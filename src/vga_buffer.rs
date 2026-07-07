@@ -88,6 +88,10 @@ impl Writer {
     pub fn write_byte(&mut self, byte: u8) {
         match byte {
             b'\n' => self.new_line(),
+            // Backspace (0x08): einen Schritt zurück und das Zeichen
+            // dort löschen. Am Zeilenanfang passiert nichts — wir
+            // springen (noch) nicht in die vorherige Zeile zurück.
+            0x08 => self.backspace(),
             byte => {
                 // Zeile voll? Dann erst umbrechen.
                 if self.column_position >= BUFFER_WIDTH {
@@ -123,6 +127,20 @@ impl Writer {
     /// Bereits geschriebener Text behält seine Farbe.
     pub fn set_color(&mut self, foreground: Color, background: Color) {
         self.color_code = ColorCode::new(foreground, background);
+    }
+
+    /// Löscht das Zeichen links von der aktuellen Position
+    /// (klassisches Backspace-Verhalten).
+    fn backspace(&mut self) {
+        if self.column_position > 0 {
+            self.column_position -= 1;
+            let row = BUFFER_HEIGHT - 1;
+            let blank = ScreenChar {
+                ascii_character: b' ',
+                color_code: self.color_code,
+            };
+            self.buffer.chars[row][self.column_position].write(blank);
+        }
     }
 
     /// Zeilenumbruch: Alle Zeilen eins nach oben schieben,
@@ -166,6 +184,9 @@ fn char_zu_cp437(c: char) -> u8 {
         // Druckbares ASCII (Leerzeichen bis '~') und Zeilenumbruch:
         // identisch in Unicode und CP437, einfach durchreichen.
         ' '..='~' | '\n' => c as u8,
+        // Steuerzeichen fürs Löschen: Backspace (0x08) direkt, und
+        // DEL (0x7F, von der Entf-Taste) behandeln wir genauso.
+        '\u{8}' | '\u{7f}' => 0x08,
         // Deutsche Umlaute und ß an ihren CP437-Positionen:
         'ä' => 0x84,
         'ö' => 0x94,
@@ -264,6 +285,33 @@ mod tests {
             let screen_char = WRITER.lock().buffer.chars[BUFFER_HEIGHT - 2][i].read();
             assert_eq!(char::from(screen_char.ascii_character), c);
         }
+    }
+
+    /// Prüft das Backspace-Verhalten: "ab" tippen, einmal löschen —
+    /// übrig bleiben muss "a", und die Schreibposition steht auf 1.
+    /// Auch am Zeilenanfang darf Backspace nicht abstürzen.
+    #[test_case]
+    fn test_backspace_loescht_letztes_zeichen() {
+        use x86_64::instructions::interrupts;
+
+        // Interrupts aus + Lock direkt halten, damit uns während der
+        // Prüfung niemand (z. B. der Tastatur-Handler) dazwischenschreibt.
+        interrupts::without_interrupts(|| {
+            let mut writer = WRITER.lock();
+            let row = BUFFER_HEIGHT - 1;
+            // "\n" bringt uns sauber an einen Zeilenanfang.
+            writer.write_string("\nab\u{8}");
+            assert_eq!(writer.column_position, 1);
+            assert_eq!(writer.buffer.chars[row][0].read().ascii_character, b'a');
+            assert_eq!(writer.buffer.chars[row][1].read().ascii_character, b' ');
+            // Entf-Variante (DEL, 0x7F) löscht genauso:
+            writer.write_string("\u{7f}");
+            assert_eq!(writer.column_position, 0);
+            assert_eq!(writer.buffer.chars[row][0].read().ascii_character, b' ');
+            // Backspace am Zeilenanfang: darf einfach nichts tun.
+            writer.write_string("\u{8}");
+            assert_eq!(writer.column_position, 0);
+        });
     }
 
     /// Prüft, dass Umlaute an den richtigen CP437-Positionen landen

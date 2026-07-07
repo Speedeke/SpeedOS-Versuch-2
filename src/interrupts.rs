@@ -206,9 +206,22 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
     if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
         if let Some(key) = keyboard.process_keyevent(key_event) {
             match key {
+                // Backspace (0x08) oder Entf (DEL, 0x7F): letztes Zeichen
+                // löschen. Die Sequenz "\u{8} \u{8}" löscht auf BEIDEN
+                // Kanälen sauber: zurück, mit Leerzeichen überschreiben,
+                // wieder zurück (so machen es auch echte Terminals).
+                // Solange wir keinen frei beweglichen Cursor haben,
+                // verhält sich Entf wie Backspace.
+                DecodedKey::Unicode('\u{8}') | DecodedKey::Unicode('\u{7f}') => {
+                    print!("\u{8} \u{8}")
+                }
                 // Normale Zeichen (auch ä, ö, ü, ß!) auf den Bildschirm.
                 DecodedKey::Unicode(zeichen) => print!("{}", zeichen),
-                // Sondertasten (Pfeile, F-Tasten, ...) als Name.
+                // Entf kommt je nach Layout auch als Roh-Taste an:
+                DecodedKey::RawKey(pc_keyboard::KeyCode::Delete) => {
+                    print!("\u{8} \u{8}")
+                }
+                // Andere Sondertasten (Pfeile, F-Tasten, ...) als Name.
                 DecodedKey::RawKey(taste) => print!("{:?}", taste),
             }
         }

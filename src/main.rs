@@ -68,7 +68,7 @@ pub extern "C" fn _start() -> ! {
     // Aufforderung zum Tippen — die Tastatur lebt!
     vga_buffer::set_color(Color::Yellow, Color::Black);
     println!();
-    println!("Tippe etwas (deutsches QWERTZ-Layout, auch ä ö ü ß):");
+    println!("Tippe etwas (QWERTZ, auch ä ö ü ß - Backspace/Entf loeschen):");
 
     // Zurück zur Standardfarbe für alles Weitere.
     vga_buffer::set_color(Color::LightGray, Color::Black);
