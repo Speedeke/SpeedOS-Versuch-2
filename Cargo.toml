@@ -55,3 +55,9 @@ test-args = [
 test-success-exit-code = 33
 # Sicherheitsnetz: Test nach 5 Minuten abbrechen, falls er hängt.
 test-timeout = 300
+
+# Der Stack-Overflow-Test braucht kein Test-Framework (harness):
+# Er besteht aus einem einzigen Ablauf mit eigener Test-IDT.
+[[test]]
+name = "stack_overflow"
+harness = false

@@ -26,6 +26,10 @@ use speed_os::{println, serial_println};
 /// es gibt ja niemanden, zu dem sie zurückkehren könnte.
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
+    // Als Allererstes: GDT, TSS und IDT laden. Ab jetzt werden
+    // CPU-Exceptions sauber gemeldet statt den Rechner neu zu starten.
+    speed_os::init();
+
     // println! schreibt seit v0.1.1 IMMER auf VGA UND seriell gleichzeitig
     // (Projektregel: niemals nur VGA) — wir müssen nichts doppelt ausgeben.
 
@@ -52,6 +56,14 @@ pub extern "C" fn _start() -> ! {
 
     vga_buffer::set_color(Color::Pink, Color::Black);
     println!("Formatierung funktioniert: {} + {} = {}", 2, 3, 2 + 3);
+
+    // Live-Beweis, dass das Exception-Handling funktioniert:
+    // int3 löst eine Breakpoint-Exception aus — unser Handler meldet
+    // sie, und die Ausführung geht danach einfach weiter.
+    vga_buffer::set_color(Color::White, Color::Black);
+    println!("Loese jetzt absichtlich eine Breakpoint-Exception aus ...");
+    x86_64::instructions::interrupts::int3();
+    println!("... und der Kernel laeuft einfach weiter!");
 
     // Zurück zur Standardfarbe für alles Weitere.
     vga_buffer::set_color(Color::LightGray, Color::Black);

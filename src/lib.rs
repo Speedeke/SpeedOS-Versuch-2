@@ -13,14 +13,28 @@
 #![no_std] // Keine Standardbibliothek — wir sind das Betriebssystem!
 #![cfg_attr(test, no_main)] // Im Testmodus: kein normales main()
 #![feature(custom_test_frameworks)] // Eigenes Test-Framework (Nightly-Feature)
+#![feature(abi_x86_interrupt)] // Aufrufkonvention für Exception-Handler (Nightly-Feature)
 #![test_runner(crate::test_runner)] // Unsere Funktion führt die Tests aus
 #![reexport_test_harness_main = "test_main"] // Generierte Test-Startfunktion heißt test_main
 
 use core::panic::PanicInfo;
 
-// Unsere Treiber-Module — bewusst voneinander isoliert (Mikrokernel-Prinzip).
+// Unsere Treiber- und System-Module — bewusst voneinander isoliert
+// (Mikrokernel-Prinzip).
+pub mod gdt;
+pub mod interrupts;
 pub mod serial;
 pub mod vga_buffer;
+
+/// Initialisiert alle CPU-Strukturen des Kernels.
+/// MUSS als Allererstes beim Boot aufgerufen werden — vorher führt
+/// jede Exception zum Triple Fault und damit zum Reboot.
+/// Reihenfolge wichtig: erst GDT/TSS (stellt den Notfall-Stack bereit),
+/// dann die IDT (verweist auf diesen Stack).
+pub fn init() {
+    gdt::init();
+    interrupts::init_idt();
+}
 
 // ---------------------------------------------------------------------------
 // Die zentralen Ausgabe-Makros print! und println!
@@ -129,6 +143,7 @@ pub fn test_panic_handler(info: &PanicInfo) -> ! {
 #[cfg(test)]
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
+    init(); // GDT + IDT laden, damit Exception-Tests funktionieren
     test_main();
     hlt_loop();
 }
