@@ -30,6 +30,15 @@ x86_64 = "0.14.2"
 # Darüber schicken wir alle Debug-Ausgaben ins Terminal.
 uart_16550 = "0.2.0"
 
+# Treiber für den 8259 PIC (Programmable Interrupt Controller) —
+# das Bauteil, das Hardware-Interrupts (Timer, Tastatur, ...) an die
+# CPU weiterleitet.
+pic8259 = "0.10.1"
+
+# Übersetzt rohe Tastatur-Scancodes in Zeichen — inklusive
+# deutschem QWERTZ-Layout mit Umlauten.
+pc-keyboard = "0.7.0"
+
 # lazy_static erlaubt statische Variablen, die erst beim ersten Zugriff
 # initialisiert werden. "spin_no_std" nutzt Spinlocks statt OS-Mutexe.
 [dependencies.lazy_static]

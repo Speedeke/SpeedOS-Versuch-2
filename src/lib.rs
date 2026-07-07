@@ -30,10 +30,17 @@ pub mod vga_buffer;
 /// MUSS als Allererstes beim Boot aufgerufen werden — vorher führt
 /// jede Exception zum Triple Fault und damit zum Reboot.
 /// Reihenfolge wichtig: erst GDT/TSS (stellt den Notfall-Stack bereit),
-/// dann die IDT (verweist auf diesen Stack).
+/// dann die IDT (verweist auf diesen Stack), dann den PIC scharf
+/// schalten und erst GANZ zum Schluss Interrupts erlauben.
 pub fn init() {
     gdt::init();
     interrupts::init_idt();
+    // `unsafe`: Der PIC ist falsch konfiguriert gefährlich —
+    // unsere Offsets (32/40) sind die bewährte Standard-Wahl.
+    unsafe { interrupts::PICS.lock().initialize() };
+    // Interrupts auf der CPU aktivieren (sti-Befehl):
+    // Ab jetzt können Timer und Tastatur jederzeit "dazwischenfunken".
+    x86_64::instructions::interrupts::enable();
 }
 
 // ---------------------------------------------------------------------------

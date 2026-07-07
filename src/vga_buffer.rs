@@ -215,10 +215,19 @@ pub fn set_color(foreground: Color, background: Color) {
 /// Interne Hilfsfunktion, die NUR auf VGA schreibt.
 /// Die print!/println!-Makros (in lib.rs) rufen sie zusammen mit der
 /// seriellen Ausgabe auf — bitte nicht direkt benutzen.
+///
+/// Deadlock-Schutz: Während wir den WRITER-Lock halten, schalten wir
+/// Interrupts kurz ab. Sonst könnte mitten im Schreiben ein Tastatur-
+/// Interrupt zuschlagen, dessen Handler auch drucken will — er würde
+/// ewig auf den Lock warten, den wir nie freigeben können (Deadlock!).
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;
-    WRITER.lock().write_fmt(args).unwrap();
+    use x86_64::instructions::interrupts;
+
+    interrupts::without_interrupts(|| {
+        WRITER.lock().write_fmt(args).unwrap();
+    });
 }
 
 // ---------------------------------------------------------------------------

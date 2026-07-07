@@ -13,9 +13,51 @@
 // Mit dieser Datei wird der Kernel absturzsicher: Er meldet Fehler
 // sauber auf VGA + seriell, statt wortlos neu zu starten.
 
-use crate::{gdt, println};
+use crate::{gdt, print, println};
+use core::sync::atomic::{AtomicU64, Ordering};
 use lazy_static::lazy_static;
+use pic8259::ChainedPics;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
+
+// ---------------------------------------------------------------------------
+// Hardware-Interrupts und der 8259 PIC
+//
+// Hardware wie Timer und Tastatur meldet sich nicht direkt bei der CPU,
+// sondern beim PIC (Programmable Interrupt Controller) — zwei
+// zusammengeschaltete Chips mit je 8 Leitungen. Der PIC übersetzt
+// "Leitung 1 hat gezuckt" in eine Interrupt-Nummer für die IDT.
+//
+// Ab Werk benutzt der PIC die Nummern 0–15. Das kollidiert mit den
+// CPU-Exceptions (0–31)! Deshalb "remappen" wir ihn auf 32–47:
+// Timer = 32, Tastatur = 33, usw.
+// ---------------------------------------------------------------------------
+
+/// Neue Basis-Nummern der beiden PICs: direkt hinter den 32 Exceptions.
+pub const PIC_1_OFFSET: u8 = 32;
+pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
+
+/// Die beiden PIC-Chips, geschützt durch einen Spinlock.
+/// `unsafe`: Falsche Offsets würden das Interrupt-System zerstören —
+/// unsere kollidieren garantiert mit nichts.
+pub static PICS: spin::Mutex<ChainedPics> =
+    spin::Mutex::new(unsafe { ChainedPics::new(PIC_1_OFFSET, PIC_2_OFFSET) });
+
+/// Die Interrupt-Nummern unserer Hardware — lesbar benannt.
+#[derive(Debug, Clone, Copy)]
+#[repr(u8)]
+pub enum InterruptIndex {
+    Timer = PIC_1_OFFSET, // 32: der PIT-Timer (tickt ~18,2x pro Sekunde)
+    Keyboard,             // 33: die PS/2-Tastatur
+}
+
+impl InterruptIndex {
+    fn as_u8(self) -> u8 {
+        self as u8
+    }
+    fn as_usize(self) -> usize {
+        usize::from(self.as_u8())
+    }
+}
 
 lazy_static! {
     /// Die IDT muss so lange leben, wie der Kernel läuft, denn die CPU
@@ -35,6 +77,9 @@ lazy_static! {
                 // so funktioniert der Handler selbst bei Stack Overflow.
                 .set_stack_index(gdt::DOUBLE_FAULT_IST_INDEX);
         }
+        // Hardware-Interrupts (nach dem PIC-Remapping):
+        idt[InterruptIndex::Timer.as_usize()].set_handler_fn(timer_interrupt_handler);
+        idt[InterruptIndex::Keyboard.as_usize()].set_handler_fn(keyboard_interrupt_handler);
         idt
     };
 }
@@ -107,6 +152,75 @@ extern "x86-interrupt" fn double_fault_handler(
 }
 
 // ---------------------------------------------------------------------------
+// Hardware-Interrupt-Handler
+// ---------------------------------------------------------------------------
+
+/// Globaler Tick-Zähler des Timers. `AtomicU64` statt Mutex, weil der
+/// Zugriff aus dem Interrupt-Kontext niemals blockieren darf.
+static TICKS: AtomicU64 = AtomicU64::new(0);
+
+/// Wie oft der Timer seit dem Boot getickt hat (~18,2 Ticks/Sekunde).
+pub fn timer_ticks() -> u64 {
+    TICKS.load(Ordering::Relaxed)
+}
+
+/// Timer-Interrupt: Nur den Zähler erhöhen — KEINE Ausgabe, das würde
+/// den Bildschirm ~18x pro Sekunde vollspammen.
+extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    TICKS.fetch_add(1, Ordering::Relaxed);
+
+    // Dem PIC melden: "fertig behandelt" (End of Interrupt).
+    // Ohne das schickt er nie wieder einen Timer-Interrupt!
+    unsafe {
+        PICS.lock()
+            .notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
+    }
+}
+
+/// Tastatur-Interrupt: Scancode vom PS/2-Controller lesen, mit dem
+/// deutschen QWERTZ-Layout in ein Zeichen übersetzen und ausgeben.
+extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    use pc_keyboard::{layouts, DecodedKey, HandleControl, Keyboard, ScancodeSet1};
+    use spin::Mutex;
+    use x86_64::instructions::port::Port;
+
+    lazy_static! {
+        /// Der Decoder merkt sich Zustand (z. B. "Shift ist gedrückt"),
+        /// deshalb lebt er als globales, gelocktes Objekt.
+        /// De105Key = deutsches QWERTZ-Layout mit Umlauten.
+        static ref KEYBOARD: Mutex<Keyboard<layouts::De105Key, ScancodeSet1>> =
+            Mutex::new(Keyboard::new(
+                ScancodeSet1::new(),
+                layouts::De105Key,
+                HandleControl::Ignore,
+            ));
+    }
+
+    let mut keyboard = KEYBOARD.lock();
+    // Der PS/2-Controller legt den Scancode der Taste in Port 0x60.
+    // Wir MÜSSEN ihn lesen, sonst sendet die Tastatur nichts mehr.
+    let mut port = Port::new(0x60);
+    let scancode: u8 = unsafe { port.read() };
+
+    // Scancode -> KeyEvent (Taste + gedrückt/losgelassen) -> Zeichen.
+    if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
+        if let Some(key) = keyboard.process_keyevent(key_event) {
+            match key {
+                // Normale Zeichen (auch ä, ö, ü, ß!) auf den Bildschirm.
+                DecodedKey::Unicode(zeichen) => print!("{}", zeichen),
+                // Sondertasten (Pfeile, F-Tasten, ...) als Name.
+                DecodedKey::RawKey(taste) => print!("{:?}", taste),
+            }
+        }
+    }
+
+    unsafe {
+        PICS.lock()
+            .notify_end_of_interrupt(InterruptIndex::Keyboard.as_u8());
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests — laufen in QEMU über unser eigenes Test-Framework (cargo test)
 // ---------------------------------------------------------------------------
 
@@ -121,5 +235,18 @@ mod tests {
     fn test_breakpoint_exception_laeuft_weiter() {
         x86_64::instructions::interrupts::int3();
         println!("Nach int3 geht es hier normal weiter.");
+    }
+
+    /// Prüft, dass der Timer wirklich tickt: Wir legen die CPU ein paar
+    /// Mal mit hlt schlafen (sie wacht bei jedem Interrupt auf) — danach
+    /// muss der Zähler gestiegen sein.
+    #[test_case]
+    fn test_timer_tickt() {
+        let vorher = super::timer_ticks();
+        for _ in 0..5 {
+            x86_64::instructions::hlt();
+        }
+        let nachher = super::timer_ticks();
+        assert!(nachher > vorher, "Timer-Zaehler ist nicht gestiegen");
     }
 }

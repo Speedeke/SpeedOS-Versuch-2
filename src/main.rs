@@ -65,6 +65,11 @@ pub extern "C" fn _start() -> ! {
     x86_64::instructions::interrupts::int3();
     println!("... und der Kernel laeuft einfach weiter!");
 
+    // Aufforderung zum Tippen — die Tastatur lebt!
+    vga_buffer::set_color(Color::Yellow, Color::Black);
+    println!();
+    println!("Tippe etwas (deutsches QWERTZ-Layout, auch ä ö ü ß):");
+
     // Zurück zur Standardfarbe für alles Weitere.
     vga_buffer::set_color(Color::LightGray, Color::Black);
 
@@ -76,7 +81,9 @@ pub extern "C" fn _start() -> ! {
     #[cfg(test)]
     test_main();
 
-    // Fertig — CPU schlafen legen (für immer, bis wir mehr können).
+    // CPU schlafen legen, bis der nächste Interrupt kommt (Timer oder
+    // Tastatur) — so verbraucht SpeedOS im Leerlauf fast keine Rechenzeit,
+    // statt in einer Endlosschleife 100 % CPU zu fressen.
     speed_os::hlt_loop();
 }
 

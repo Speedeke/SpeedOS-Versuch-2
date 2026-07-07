@@ -28,13 +28,20 @@ lazy_static! {
 }
 
 /// Interne Hilfsfunktion für die Makros — bitte nicht direkt aufrufen.
+///
+/// Deadlock-Schutz wie beim VGA-Writer: keine Interrupts, solange wir
+/// den Lock auf den seriellen Port halten (siehe vga_buffer::_print).
 #[doc(hidden)]
 pub fn _print(args: ::core::fmt::Arguments) {
     use core::fmt::Write;
-    SERIAL1
-        .lock()
-        .write_fmt(args)
-        .expect("Ausgabe an seriellen Port fehlgeschlagen");
+    use x86_64::instructions::interrupts;
+
+    interrupts::without_interrupts(|| {
+        SERIAL1
+            .lock()
+            .write_fmt(args)
+            .expect("Ausgabe an seriellen Port fehlgeschlagen");
+    });
 }
 
 /// Gibt formatierten Text über die serielle Schnittstelle aus.
