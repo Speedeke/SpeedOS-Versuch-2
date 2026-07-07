@@ -107,17 +107,22 @@ impl Writer {
         }
     }
 
-    /// Schreibt einen ganzen String. Der VGA-Textmodus kann kein
-    /// Unicode — nicht darstellbare Zeichen werden als ■ (0xfe) gezeigt.
+    /// Schreibt einen ganzen String auf den Bildschirm.
+    ///
+    /// Rust-Strings sind UTF-8, der VGA-Textmodus versteht aber nur
+    /// Codepage 437 (den alten IBM-PC-Zeichensatz). Deshalb gehen wir
+    /// hier Zeichen für Zeichen (nicht Byte für Byte!) durch den String
+    /// und übersetzen jedes Zeichen mit `char_zu_cp437`.
     pub fn write_string(&mut self, s: &str) {
-        for byte in s.bytes() {
-            match byte {
-                // Druckbares ASCII-Zeichen oder Zeilenumbruch
-                0x20..=0x7e | b'\n' => self.write_byte(byte),
-                // Alles andere: Platzhalter-Block
-                _ => self.write_byte(0xfe),
-            }
+        for c in s.chars() {
+            self.write_byte(char_zu_cp437(c));
         }
+    }
+
+    /// Ändert die Farbe für alle FOLGENDEN Ausgaben.
+    /// Bereits geschriebener Text behält seine Farbe.
+    pub fn set_color(&mut self, foreground: Color, background: Color) {
+        self.color_code = ColorCode::new(foreground, background);
     }
 
     /// Zeilenumbruch: Alle Zeilen eins nach oben schieben,
@@ -134,14 +139,49 @@ impl Writer {
     }
 
     /// Überschreibt eine Zeile komplett mit Leerzeichen.
+    /// Bewusst immer in der Standardfarbe (Hellgrau auf Schwarz),
+    /// nicht in der aktuellen Schreibfarbe — sonst hinterlässt das
+    /// Scrolling farbige Streifen, wenn gerade z. B. mit blauem
+    /// Hintergrund geschrieben wird.
     fn clear_row(&mut self, row: usize) {
         let blank = ScreenChar {
             ascii_character: b' ',
-            color_code: self.color_code,
+            color_code: ColorCode::new(Color::LightGray, Color::Black),
         };
         for col in 0..BUFFER_WIDTH {
             self.buffer.chars[row][col].write(blank);
         }
+    }
+}
+
+/// Übersetzt ein Unicode-Zeichen in den VGA-Zeichensatz (Codepage 437).
+///
+/// Codepage 437 ist der Zeichensatz des Ur-IBM-PCs von 1981 — die
+/// VGA-Hardware hat für jeden der 256 Byte-Werte ein festes Zeichenbild.
+/// Zum Glück enthält er die deutschen Umlaute und das ß, nur an ganz
+/// anderen Positionen als in Unicode/ASCII. Alles, was CP437 nicht
+/// kennt (z. B. € oder Emoji), wird zum Ersatzzeichen ■ (0xFE).
+fn char_zu_cp437(c: char) -> u8 {
+    match c {
+        // Druckbares ASCII (Leerzeichen bis '~') und Zeilenumbruch:
+        // identisch in Unicode und CP437, einfach durchreichen.
+        ' '..='~' | '\n' => c as u8,
+        // Deutsche Umlaute und ß an ihren CP437-Positionen:
+        'ä' => 0x84,
+        'ö' => 0x94,
+        'ü' => 0x81,
+        'Ä' => 0x8E,
+        'Ö' => 0x99,
+        'Ü' => 0x9A,
+        'ß' => 0xE1,
+        // Ein paar weitere nützliche CP437-Zeichen:
+        '§' => 0x15,
+        '°' => 0xF8,
+        '²' => 0xFD,
+        'é' => 0x82,
+        'è' => 0x8A,
+        // Alles andere kann VGA nicht darstellen: Ersatzzeichen ■
+        _ => 0xFE,
     }
 }
 
@@ -166,22 +206,66 @@ lazy_static! {
     });
 }
 
-/// Gibt formatierten Text auf dem VGA-Bildschirm aus (wie print! in normalem Rust).
-#[macro_export]
-macro_rules! print {
-    ($($arg:tt)*) => ($crate::vga_buffer::_print(format_args!($($arg)*)));
+/// Ändert die Ausgabefarbe des globalen Writers (bequemer Kurzweg,
+/// damit der Rest des Kernels nicht selbst WRITER.lock() rufen muss).
+pub fn set_color(foreground: Color, background: Color) {
+    WRITER.lock().set_color(foreground, background);
 }
 
-/// Wie print!, aber mit Zeilenumbruch am Ende.
-#[macro_export]
-macro_rules! println {
-    () => ($crate::print!("\n"));
-    ($($arg:tt)*) => ($crate::print!("{}\n", format_args!($($arg)*)));
-}
-
-/// Interne Hilfsfunktion für die Makros — bitte nicht direkt aufrufen.
+/// Interne Hilfsfunktion, die NUR auf VGA schreibt.
+/// Die print!/println!-Makros (in lib.rs) rufen sie zusammen mit der
+/// seriellen Ausgabe auf — bitte nicht direkt benutzen.
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;
     WRITER.lock().write_fmt(args).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Tests — laufen in QEMU über unser eigenes Test-Framework (cargo test)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::println;
+
+    /// println! darf niemals abstürzen — auch nicht bei vielen Aufrufen.
+    #[test_case]
+    fn test_println_ohne_panic() {
+        for i in 0..10 {
+            println!("println-Test ohne Panic, Durchlauf {}", i);
+        }
+    }
+
+    /// Druckt mehr Zeilen, als auf den Bildschirm passen (25), und prüft
+    /// danach, dass die letzte Zeile korrekt sichtbar ist. Das beweist,
+    /// dass das Scrolling funktioniert und nichts durcheinanderkommt.
+    #[test_case]
+    fn test_scrolling_viele_zeilen() {
+        // Bildschirm mehrfach komplett füllen -> erzwingt Scrolling.
+        for i in 0..60 {
+            println!("Scroll-Zeile {}", i);
+        }
+        let s = "Diese Zeile muss nach dem Scrollen sichtbar sein";
+        println!("{}", s);
+        // Nach dem abschließenden \n von println! steht der Text in der
+        // vorletzten Zeile (BUFFER_HEIGHT - 2). Zeichen für Zeichen prüfen:
+        for (i, c) in s.chars().enumerate() {
+            let screen_char = WRITER.lock().buffer.chars[BUFFER_HEIGHT - 2][i].read();
+            assert_eq!(char::from(screen_char.ascii_character), c);
+        }
+    }
+
+    /// Prüft, dass Umlaute an den richtigen CP437-Positionen landen
+    /// und nicht darstellbare Zeichen zum Ersatzzeichen ■ werden.
+    #[test_case]
+    fn test_umlaute_und_ersatzzeichen() {
+        println!("äöüÄÖÜß€");
+        let erwartet: [u8; 8] = [0x84, 0x94, 0x81, 0x8E, 0x99, 0x9A, 0xE1, 0xFE];
+        for (i, &code) in erwartet.iter().enumerate() {
+            let screen_char = WRITER.lock().buffer.chars[BUFFER_HEIGHT - 2][i].read();
+            assert_eq!(screen_char.ascii_character, code);
+        }
+    }
 }

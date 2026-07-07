@@ -14,6 +14,7 @@
 #![reexport_test_harness_main = "test_main"]
 
 use core::panic::PanicInfo;
+use speed_os::vga_buffer::{self, Color};
 use speed_os::{println, serial_println};
 
 /// Der Entry Point unseres Kernels.
@@ -25,11 +26,39 @@ use speed_os::{println, serial_println};
 /// es gibt ja niemanden, zu dem sie zurückkehren könnte.
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    // Unsere Begrüßung: einmal auf den Bildschirm (VGA) ...
-    println!("SpeedOS v0.1 - Hello World!");
-    // ... und einmal über die serielle Schnittstelle ins Terminal.
-    // Projektregel: Debug-Ausgaben IMMER auch seriell, niemals nur VGA.
-    serial_println!("SpeedOS v0.1 - Hello World!");
+    // println! schreibt seit v0.1.1 IMMER auf VGA UND seriell gleichzeitig
+    // (Projektregel: niemals nur VGA) — wir müssen nichts doppelt ausgeben.
+
+    // Farbiger SpeedOS-Schriftzug: Gelb auf Blau.
+    // "{:<60}" füllt jede Zeile mit Leerzeichen auf 60 Spalten auf,
+    // damit der blaue Hintergrund als sauberer Block erscheint.
+    vga_buffer::set_color(Color::Yellow, Color::Blue);
+    println!("{:<60}", "");
+    println!("{:<60}", "    ____                      _  ___  ____");
+    println!("{:<60}", "   / ___| _ __   ___  ___  __| |/ _ \\/ ___|");
+    println!("{:<60}", "   \\___ \\| '_ \\ / _ \\/ _ \\/ _` | | | \\___ \\");
+    println!("{:<60}", "    ___) | |_) |  __/  __/ (_| | |_| |___) |");
+    println!("{:<60}", "   |____/| .__/ \\___|\\___|\\__,_|\\___/|____/");
+    println!("{:<60}", "         |_|            v0.1 - Hello World!");
+    println!("{:<60}", "");
+
+    // Ein paar Testzeilen in verschiedenen Farben:
+    vga_buffer::set_color(Color::LightGreen, Color::Black);
+    println!("Kernel gebootet, VGA-Treiber und serieller Port laufen.");
+
+    vga_buffer::set_color(Color::LightCyan, Color::Black);
+    println!("Umlaut-Test (CP437): ä ö ü Ä Ö Ü ß — und é è ° § ²");
+    println!("Nicht darstellbar (wird zu Ersatzzeichen): Euro-Symbol €");
+
+    vga_buffer::set_color(Color::Pink, Color::Black);
+    println!("Formatierung funktioniert: {} + {} = {}", 2, 3, 2 + 3);
+
+    // Zurück zur Standardfarbe für alles Weitere.
+    vga_buffer::set_color(Color::LightGray, Color::Black);
+
+    // Reine Debug-Info: geht NUR über die serielle Schnittstelle,
+    // erscheint also im Terminal, aber nicht auf dem Bildschirm.
+    serial_println!("[DEBUG] Kernel-Initialisierung abgeschlossen (nur seriell sichtbar).");
 
     // Im Testmodus (cargo test) stattdessen die Tests ausführen.
     #[cfg(test)]
@@ -41,12 +70,12 @@ pub extern "C" fn _start() -> ! {
 
 /// Panic-Handler für den normalen Betrieb: Wenn irgendwo im Kernel
 /// ein Panic auftritt (z. B. unwrap() auf einem Fehler), landen wir hier.
-/// Wir geben die Fehlermeldung auf beiden Kanälen aus und halten an.
+/// println! gibt die Meldung automatisch auf beiden Kanälen aus.
 #[cfg(not(test))]
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
+    vga_buffer::set_color(Color::LightRed, Color::Black);
     println!("KERNEL PANIC: {}", info);
-    serial_println!("KERNEL PANIC: {}", info);
     speed_os::hlt_loop();
 }
 

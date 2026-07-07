@@ -22,6 +22,37 @@ use core::panic::PanicInfo;
 pub mod serial;
 pub mod vga_buffer;
 
+// ---------------------------------------------------------------------------
+// Die zentralen Ausgabe-Makros print! und println!
+//
+// Projektregel: Ausgaben gehen IMMER auf VGA UND die serielle
+// Schnittstelle gleichzeitig — niemals nur VGA. Deshalb leben die
+// Makros hier in lib.rs und rufen beide Treiber auf, statt in einem
+// der Treiber-Module (die bleiben so voneinander isoliert).
+// Für reine Debug-Ausgaben ohne Bildschirm gibt es serial_println!.
+// ---------------------------------------------------------------------------
+
+/// Interne Hilfsfunktion der Makros: schreibt auf beide Kanäle.
+/// `fmt::Arguments` ist Copy, daher können wir es zweimal übergeben.
+#[doc(hidden)]
+pub fn _print(args: core::fmt::Arguments) {
+    vga_buffer::_print(args);
+    serial::_print(args);
+}
+
+/// Gibt formatierten Text auf VGA UND seriell aus (wie print! in normalem Rust).
+#[macro_export]
+macro_rules! print {
+    ($($arg:tt)*) => ($crate::_print(format_args!($($arg)*)));
+}
+
+/// Wie print!, aber mit Zeilenumbruch am Ende.
+#[macro_export]
+macro_rules! println {
+    () => ($crate::print!("\n"));
+    ($($arg:tt)*) => ($crate::print!("{}\n", format_args!($($arg)*)));
+}
+
 /// Exit-Codes, die wir an QEMU übergeben.
 /// QEMU rechnet daraus (wert << 1) | 1, also:
 ///   Success (0x10) -> Prozess-Exit-Code 33 (in Cargo.toml als Erfolg konfiguriert)
