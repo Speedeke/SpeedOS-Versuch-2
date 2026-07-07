@@ -33,6 +33,7 @@ pub mod gdt;
 pub mod interrupts;
 pub mod memory;
 pub mod serial;
+pub mod shell;
 pub mod task;
 pub mod vga_buffer;
 
@@ -172,8 +173,19 @@ pub fn test_panic_handler(info: &PanicInfo) -> ! {
 bootloader::entry_point!(test_kernel_main);
 
 #[cfg(test)]
-fn test_kernel_main(_boot_info: &'static bootloader::BootInfo) -> ! {
+fn test_kernel_main(boot_info: &'static bootloader::BootInfo) -> ! {
+    use x86_64::VirtAddr;
+
     init(); // GDT + IDT laden, damit Exception-Tests funktionieren
+
+    // Auch den Heap aufsetzen — die Shell-Tests brauchen Box & Vec.
+    let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
+    let mut mapper = unsafe { memory::init(phys_mem_offset) };
+    let mut frame_allocator =
+        unsafe { memory::BootInfoFrameAllocator::init(&boot_info.memory_map) };
+    allocator::init_heap(&mut mapper, &mut frame_allocator)
+        .expect("Heap-Initialisierung fehlgeschlagen");
+
     test_main();
     hlt_loop();
 }

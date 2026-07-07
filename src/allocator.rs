@@ -77,6 +77,20 @@ pub fn init_heap(
     Ok(())
 }
 
+/// Liefert (belegt, frei) in Bytes — für den meminfo-Shell-Befehl.
+/// Nur der Standard-Allocator führt diese Statistik; die beiden
+/// Lern-Allocatoren geben None zurück.
+#[cfg(not(any(feature = "bump-allocator", feature = "fixed-block-allocator")))]
+pub fn heap_statistik() -> Option<(usize, usize)> {
+    let heap = ALLOCATOR.lock();
+    Some((heap.used(), heap.free()))
+}
+
+#[cfg(any(feature = "bump-allocator", feature = "fixed-block-allocator"))]
+pub fn heap_statistik() -> Option<(usize, usize)> {
+    None
+}
+
 // ---------------------------------------------------------------------------
 // Auswahl des globalen Allocators (per Cargo-Feature)
 // ---------------------------------------------------------------------------

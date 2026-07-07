@@ -129,6 +129,36 @@ impl Writer {
         self.color_code = ColorCode::new(foreground, background);
     }
 
+    /// Leert den kompletten Bildschirm und setzt den Cursor an den
+    /// Anfang der (untersten) Schreibzeile.
+    pub fn clear_screen(&mut self) {
+        for row in 0..BUFFER_HEIGHT {
+            self.clear_row(row);
+        }
+        self.column_position = 0;
+        self.update_cursor();
+    }
+
+    /// Schiebt den blinkenden Hardware-Cursor der VGA-Karte an die
+    /// aktuelle Schreibposition. Die Karte wird über zwei I/O-Ports
+    /// gesteuert: In 0x3D4 sagt man, WELCHES Register man meint,
+    /// in 0x3D5 schreibt man den Wert. Das Blinken macht die
+    /// Hardware dann ganz von selbst.
+    fn update_cursor(&self) {
+        use x86_64::instructions::port::Port;
+
+        let pos = ((BUFFER_HEIGHT - 1) * BUFFER_WIDTH + self.column_position) as u16;
+        let mut index_port: Port<u8> = Port::new(0x3D4);
+        let mut data_port: Port<u8> = Port::new(0x3D5);
+        // unsafe: Standard-VGA-Ports, auf jedem PC/QEMU vorhanden.
+        unsafe {
+            index_port.write(0x0F); // Register: Cursorposition, Low-Byte
+            data_port.write((pos & 0xFF) as u8);
+            index_port.write(0x0E); // Register: Cursorposition, High-Byte
+            data_port.write((pos >> 8) as u8);
+        }
+    }
+
     /// Löscht das Zeichen links von der aktuellen Position
     /// (klassisches Backspace-Verhalten).
     fn backspace(&mut self) {
@@ -201,6 +231,7 @@ fn char_zu_cp437(c: char) -> u8 {
         '²' => 0xFD,
         'é' => 0x82,
         'è' => 0x8A,
+        '█' => 0xDB, // Vollblock — praktisch für Farb-Demos
         // Alles andere kann VGA nicht darstellen: Ersatzzeichen ■
         _ => 0xFE,
     }
@@ -211,6 +242,8 @@ fn char_zu_cp437(c: char) -> u8 {
 impl fmt::Write for Writer {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         self.write_string(s);
+        // Nach jeder Ausgabe den blinkenden Cursor nachziehen.
+        self.update_cursor();
         Ok(())
     }
 }
@@ -231,6 +264,34 @@ lazy_static! {
 /// damit der Rest des Kernels nicht selbst WRITER.lock() rufen muss).
 pub fn set_color(foreground: Color, background: Color) {
     WRITER.lock().set_color(foreground, background);
+}
+
+/// Leert den kompletten Bildschirm (mit Interrupt- und Lock-Schutz
+/// wie bei _print).
+pub fn clear_screen() {
+    use x86_64::instructions::interrupts;
+    interrupts::without_interrupts(|| {
+        WRITER.lock().clear_screen();
+    });
+}
+
+/// Schaltet den blinkenden Hardware-Cursor ein (Unterstrich-Form,
+/// Scanlines 14-15 der 16 Pixel hohen Textzelle) und setzt ihn an
+/// die aktuelle Schreibposition.
+pub fn cursor_aktivieren() {
+    use x86_64::instructions::{interrupts, port::Port};
+    interrupts::without_interrupts(|| {
+        let writer = WRITER.lock();
+        let mut index_port: Port<u8> = Port::new(0x3D4);
+        let mut data_port: Port<u8> = Port::new(0x3D5);
+        unsafe {
+            index_port.write(0x0A); // Register: Cursor-Start-Scanline
+            data_port.write(14); //   (Bit 5 = 0 heißt: Cursor sichtbar)
+            index_port.write(0x0B); // Register: Cursor-End-Scanline
+            data_port.write(15);
+        }
+        writer.update_cursor();
+    });
 }
 
 /// Interne Hilfsfunktion, die NUR auf VGA schreibt.

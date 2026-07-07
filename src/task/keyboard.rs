@@ -12,14 +12,15 @@
 //       gibt sie aus. Ist die Queue leer, schläft der Task, bis der
 //       Waker ihn weckt — kostet dann NULL Rechenzeit.
 
-use crate::{print, println};
+use crate::println;
 use conquer_once::spin::OnceCell;
 use core::{
     pin::Pin,
     task::{Context, Poll},
 };
 use crossbeam_queue::ArrayQueue;
-use futures_util::{stream::Stream, stream::StreamExt, task::AtomicWaker};
+use futures_util::{stream::Stream, task::AtomicWaker};
+use pc_keyboard::{layouts, DecodedKey, HandleControl, Keyboard, ScancodeSet1};
 
 /// Die Scancode-Warteschlange. OnceCell statt lazy_static, damit die
 /// Initialisierung (die allokiert!) GARANTIERT nicht heimlich beim
@@ -93,35 +94,45 @@ impl Stream for ScancodeStream {
     }
 }
 
-/// Der Tastatur-Task: läuft "ewig" im Executor und verarbeitet
-/// jeden Scancode — Dekodierung wie gehabt mit deutschem QWERTZ.
-pub async fn print_keypresses() {
-    use pc_keyboard::{layouts, DecodedKey, HandleControl, Keyboard, ScancodeSet1};
+/// Ein Stream fertig dekodierter Tasten: Scancodes aus der Queue
+/// werden mit dem deutschen QWERTZ-Layout (De105Key) übersetzt.
+/// Der Konsument (z. B. die SpeedShell) bekommt entweder ein
+/// Unicode-Zeichen (auch ä ö ü ß!) oder eine Roh-Taste (Pfeile, F1...).
+pub struct KeyStream {
+    scancodes: ScancodeStream,
+    keyboard: Keyboard<layouts::De105Key, ScancodeSet1>,
+}
 
-    let mut scancodes = ScancodeStream::new();
-    let mut keyboard = Keyboard::new(
-        ScancodeSet1::new(),
-        layouts::De105Key,
-        HandleControl::Ignore,
-    );
+impl KeyStream {
+    pub fn new() -> Self {
+        KeyStream {
+            scancodes: ScancodeStream::new(),
+            keyboard: Keyboard::new(
+                ScancodeSet1::new(),
+                layouts::De105Key,
+                HandleControl::Ignore,
+            ),
+        }
+    }
+}
 
-    // `while let + .next().await`: schläft bei leerer Queue,
-    // ohne einen einzigen CPU-Zyklus zu verschwenden.
-    while let Some(scancode) = scancodes.next().await {
-        if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
-            if let Some(key) = keyboard.process_keyevent(key_event) {
-                match key {
-                    // Backspace/Entf: löschen (siehe interrupts.rs früher)
-                    DecodedKey::Unicode('\u{8}') | DecodedKey::Unicode('\u{7f}') => {
-                        print!("\u{8} \u{8}")
-                    }
-                    DecodedKey::Unicode(zeichen) => print!("{}", zeichen),
-                    DecodedKey::RawKey(pc_keyboard::KeyCode::Delete) => {
-                        print!("\u{8} \u{8}")
-                    }
-                    DecodedKey::RawKey(taste) => print!("{:?}", taste),
+impl Stream for KeyStream {
+    type Item = DecodedKey;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<DecodedKey>> {
+        let this = self.get_mut();
+        // Solange Scancodes da sind: dekodieren. Nicht jeder Scancode
+        // ergibt eine Taste (z. B. "Taste losgelassen" oder der erste
+        // Teil einer E0-Sequenz bei Pfeiltasten) — dann weiterlesen.
+        while let Poll::Ready(Some(scancode)) = Pin::new(&mut this.scancodes).poll_next(cx) {
+            if let Ok(Some(key_event)) = this.keyboard.add_byte(scancode) {
+                if let Some(key) = this.keyboard.process_keyevent(key_event) {
+                    return Poll::Ready(Some(key));
                 }
             }
         }
+        // Queue leer: Der Waker ist durch das poll_next des inneren
+        // Streams schon registriert — wir schlafen bis zur Taste.
+        Poll::Pending
     }
 }
