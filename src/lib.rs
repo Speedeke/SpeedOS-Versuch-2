@@ -14,18 +14,34 @@
 #![cfg_attr(test, no_main)] // Im Testmodus: kein normales main()
 #![feature(custom_test_frameworks)] // Eigenes Test-Framework (Nightly-Feature)
 #![feature(abi_x86_interrupt)] // Aufrufkonvention für Exception-Handler (Nightly-Feature)
+#![feature(alloc_error_handler)] // Eigener Handler für fehlgeschlagene Allokationen
 #![test_runner(crate::test_runner)] // Unsere Funktion führt die Tests aus
 #![reexport_test_harness_main = "test_main"] // Generierte Test-Startfunktion heißt test_main
+
+// Das alloc-Crate ist der Teil der Standardbibliothek, der dynamischen
+// Speicher braucht: Box, Vec, String, BTreeMap, Rc, ... Es funktioniert
+// auch ohne OS — solange jemand einen #[global_allocator] bereitstellt.
+// Das tun wir in allocator.rs!
+extern crate alloc;
 
 use core::panic::PanicInfo;
 
 // Unsere Treiber- und System-Module — bewusst voneinander isoliert
 // (Mikrokernel-Prinzip).
+pub mod allocator;
 pub mod gdt;
 pub mod interrupts;
 pub mod memory;
 pub mod serial;
 pub mod vga_buffer;
+
+/// Wird aufgerufen, wenn eine Allokation fehlschlägt (Heap voll).
+/// Mehr als kontrolliert panicken können wir dann nicht — aber die
+/// Meldung landet dank unserem Panic-Handler auf VGA UND seriell.
+#[alloc_error_handler]
+fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
+    panic!("Heap-Allokation fehlgeschlagen: {:?}", layout);
+}
 
 /// Initialisiert alle CPU-Strukturen des Kernels.
 /// MUSS als Allererstes beim Boot aufgerufen werden — vorher führt

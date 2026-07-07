@@ -43,6 +43,17 @@ pic8259 = "0.10.1"
 # deutschem QWERTZ-Layout mit Umlauten.
 pc-keyboard = "0.7.0"
 
+# Unser Standard-Heap-Allocator: verwaltet freie Speicherblöcke in
+# einer verketteten Liste (siehe src/allocator.rs für die Alternativen).
+linked_list_allocator = "0.9.0"
+
+[features]
+# Zum Lernen: alternative Heap-Allocatoren (Standard ist der
+# linked_list_allocator). Aktivieren mit z. B.:
+#   cargo test --features bump-allocator
+bump-allocator = []
+fixed-block-allocator = []
+
 # lazy_static erlaubt statische Variablen, die erst beim ersten Zugriff
 # initialisiert werden. "spin_no_std" nutzt Spinlocks statt OS-Mutexe.
 [dependencies.lazy_static]

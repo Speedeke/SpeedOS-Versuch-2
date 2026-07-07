@@ -12,9 +12,10 @@
 # Erlaubt eigene Target-Definitionen als .json-Datei
 # (seit neueren Nightly-Versionen explizit nötig).
 json-target-spec = true
-# `core` und `compiler_builtins` aus dem Quellcode mitkompilieren
-# (deshalb brauchen wir die rust-src-Komponente).
-build-std = ["core", "compiler_builtins"]
+# `core`, `compiler_builtins` und `alloc` aus dem Quellcode
+# mitkompilieren (deshalb brauchen wir die rust-src-Komponente).
+# `alloc` liefert Box, Vec, String, ... — braucht unseren Heap!
+build-std = ["core", "compiler_builtins", "alloc"]
 # Stellt memset/memcpy/memcmp bereit — die erwartet der Compiler,
 # normalerweise liefert sie die C-Bibliothek, die wir nicht haben.
 build-std-features = ["compiler-builtins-mem"]

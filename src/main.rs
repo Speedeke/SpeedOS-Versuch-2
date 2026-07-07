@@ -13,10 +13,13 @@
 #![test_runner(speed_os::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 
+extern crate alloc;
+
+use alloc::vec::Vec;
 use bootloader::{entry_point, BootInfo};
 use core::panic::PanicInfo;
 use speed_os::vga_buffer::{self, Color};
-use speed_os::{memory, println, serial_println};
+use speed_os::{allocator, memory, println, serial_println};
 use x86_64::VirtAddr;
 
 // Das entry_point!-Makro erzeugt die echte _start-Funktion für uns und
@@ -79,6 +82,30 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     vga_buffer::set_color(Color::LightGreen, Color::Black);
     println!("Paging initialisiert (phys. Speicher gemappt ab {:#x}).", boot_info.physical_memory_offset);
 
+    // Heap mappen und den Allocator scharf schalten — ab hier
+    // funktionieren Box, Vec, String und alle anderen alloc-Typen!
+    allocator::init_heap(&mut mapper, &mut frame_allocator)
+        .expect("Heap-Initialisierung fehlgeschlagen");
+    println!("Heap initialisiert ({} KiB ab {:#x}).", allocator::HEAP_SIZE / 1024, allocator::HEAP_START);
+
+    // Demo: ein Vec mit Strings — zur Compile-Zeit unbekannte Menge
+    // dynamischen Speichers, im Kernel bisher undenkbar!
+    {
+        let mut features: Vec<&str> = Vec::new();
+        features.push("VGA-Textmodus mit CP437-Umlauten");
+        features.push("Serielle Debug-Ausgabe (COM1)");
+        features.push("Exceptions: Breakpoint, Page Fault, Double Fault");
+        features.push("Hardware-Interrupts: Timer + QWERTZ-Tastatur");
+        features.push("Paging mit eigenem Frame-Allocator");
+        features.push("Kernel-Heap: Box, Vec, String, BTreeMap");
+
+        vga_buffer::set_color(Color::LightCyan, Color::Black);
+        println!("SpeedOS-Features (aus einem Vec auf dem Heap, {} Stueck):", features.len());
+        for (nr, feature) in features.iter().enumerate() {
+            println!("  {}. {}", nr + 1, feature);
+        }
+    }
+
     // Adressübersetzungs-Demo, nur seriell (Debug):
     {
         use x86_64::structures::paging::Translate;
@@ -99,9 +126,11 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // Adressen zeigen jetzt auf denselben physischen Speicher!
     // (Bewusst NACH der letzten println!-Zeile: jedes println scrollt
     // den Bildschirm — es würde unsere Zeile 0 sonst wegschieben.)
+    // Achtung: Adresse 0x6666..., denn ab 0x4444_4444_0000 liegt
+    // jetzt der Kernel-Heap (siehe allocator.rs)!
     {
         use x86_64::structures::paging::Page;
-        let page = Page::containing_address(VirtAddr::new(0x_4444_4444_0000));
+        let page = Page::containing_address(VirtAddr::new(0x_6666_6666_0000));
         memory::create_example_mapping(page, &mut mapper, &mut frame_allocator);
 
         let nachricht = b"PAGING FUNKTIONIERT! (via neuer virtueller Page geschrieben)";

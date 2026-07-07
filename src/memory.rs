@@ -104,7 +104,8 @@ impl BootInfoFrameAllocator {
 
     /// Alle freien Frames als Iterator: nutzbare Regionen heraussuchen,
     /// in 4096-Byte-Schritte zerlegen, Startadressen zu Frames machen.
-    fn usable_frames(&self) -> impl Iterator<Item = PhysFrame> {
+    /// (`+ '_`: Der Iterator borgt sich die Memory Map aus &self.)
+    fn usable_frames(&self) -> impl Iterator<Item = PhysFrame> + '_ {
         let regions = self.memory_map.iter();
         let usable_regions = regions.filter(|r| r.region_type == MemoryRegionType::Usable);
         let addr_ranges = usable_regions.map(|r| r.range.start_addr()..r.range.end_addr());
