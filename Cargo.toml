@@ -13,7 +13,11 @@ edition = "2021"
 # Der Bootloader: schaltet die CPU in den 64-Bit-Modus und springt
 # dann in unsere _start-Funktion. Version 0.9.x, wie im Buch
 # "Writing an OS in Rust" von Philipp Oppermann.
-bootloader = "0.9"
+# Feature "map_physical_memory": Der Bootloader mappt den KOMPLETTEN
+# physischen Speicher an eine hohe virtuelle Adresse und teilt uns
+# diese über boot_info.physical_memory_offset mit — die Grundlage
+# unserer Speicherverwaltung.
+bootloader = { version = "0.9", features = ["map_physical_memory"] }
 
 # "volatile" verhindert, dass der Compiler unsere Schreibzugriffe auf den
 # VGA-Speicher wegoptimiert (er sieht ja nicht, dass die Hardware mitliest).

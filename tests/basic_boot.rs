@@ -14,14 +14,16 @@
 #![test_runner(speed_os::test_runner)] // Test-Runner aus unserer lib.rs benutzen
 #![reexport_test_harness_main = "test_main"]
 
+use bootloader::{entry_point, BootInfo};
 use core::panic::PanicInfo;
 use speed_os::{println, serial_println};
+
+entry_point!(main);
 
 /// Entry Point dieses Test-Kernels: direkt die Tests starten.
 /// Dass wir überhaupt bis hierher kommen, beweist schon,
 /// dass der Kernel erfolgreich gebootet hat!
-#[no_mangle]
-pub extern "C" fn _start() -> ! {
+fn main(_boot_info: &'static BootInfo) -> ! {
     test_main();
     speed_os::hlt_loop();
 }

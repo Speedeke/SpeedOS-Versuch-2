@@ -13,19 +13,23 @@
 #![test_runner(speed_os::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 
+use bootloader::{entry_point, BootInfo};
 use core::panic::PanicInfo;
 use speed_os::vga_buffer::{self, Color};
-use speed_os::{println, serial_println};
+use speed_os::{memory, println, serial_println};
+use x86_64::VirtAddr;
 
-/// Der Entry Point unseres Kernels.
-///
-/// `#[no_mangle]` verhindert, dass Rust den Funktionsnamen verändert —
-/// der Bootloader sucht im Binary nach genau dem Symbol "_start".
-/// `extern "C"` legt die C-Aufrufkonvention fest, die der Bootloader benutzt.
-/// Der Rückgabetyp `!` heißt: Diese Funktion kehrt NIEMALS zurück —
-/// es gibt ja niemanden, zu dem sie zurückkehren könnte.
-#[no_mangle]
-pub extern "C" fn _start() -> ! {
+// Das entry_point!-Makro erzeugt die echte _start-Funktion für uns und
+// ruft dann unser kernel_main auf. Vorteil: Die Signatur (BootInfo!)
+// wird zur Compile-Zeit geprüft — mit einem handgeschriebenen
+// `extern "C" fn _start` könnte man sie stillschweigend falsch machen.
+entry_point!(kernel_main);
+
+/// Der eigentliche Kernel-Einstieg. Der Bootloader übergibt uns die
+/// BootInfo-Struktur: darin stecken die Memory Map (Landkarte des RAM)
+/// und der Offset, ab dem der komplette physische Speicher virtuell
+/// gemappt ist. Rückgabetyp `!`: kehrt niemals zurück.
+fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // Als Allererstes: GDT, TSS und IDT laden. Ab jetzt werden
     // CPU-Exceptions sauber gemeldet statt den Rechner neu zu starten.
     speed_os::init();
@@ -65,10 +69,53 @@ pub extern "C" fn _start() -> ! {
     x86_64::instructions::interrupts::int3();
     println!("... und der Kernel laeuft einfach weiter!");
 
+    // ----- Speicherverwaltung: Paging -----
+    // Zugriff auf die Page Tables über das Komplett-Mapping des
+    // physischen Speichers (Offset kommt vom Bootloader).
+    let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
+    let mut mapper = unsafe { memory::init(phys_mem_offset) };
+    let mut frame_allocator = unsafe { memory::BootInfoFrameAllocator::init(&boot_info.memory_map) };
+
+    vga_buffer::set_color(Color::LightGreen, Color::Black);
+    println!("Paging initialisiert (phys. Speicher gemappt ab {:#x}).", boot_info.physical_memory_offset);
+
+    // Adressübersetzungs-Demo, nur seriell (Debug):
+    {
+        use x86_64::structures::paging::Translate;
+        for &adresse in &[0xb8000u64, boot_info.physical_memory_offset] {
+            let virt = VirtAddr::new(adresse);
+            serial_println!("[DEBUG] virtuell {:?} -> physisch {:?}", virt, mapper.translate_addr(virt));
+        }
+    }
+
     // Aufforderung zum Tippen — die Tastatur lebt!
     vga_buffer::set_color(Color::Yellow, Color::Black);
     println!();
     println!("Tippe etwas (QWERTZ, auch ä ö ü ß - Backspace/Entf loeschen):");
+
+    // Demonstration: eine nagelneue virtuelle Page auf den VGA-Frame
+    // (physisch 0xb8000) mappen und DARÜBER in die oberste
+    // Bildschirmzeile schreiben. Zwei völlig verschiedene virtuelle
+    // Adressen zeigen jetzt auf denselben physischen Speicher!
+    // (Bewusst NACH der letzten println!-Zeile: jedes println scrollt
+    // den Bildschirm — es würde unsere Zeile 0 sonst wegschieben.)
+    {
+        use x86_64::structures::paging::Page;
+        let page = Page::containing_address(VirtAddr::new(0x_4444_4444_0000));
+        memory::create_example_mapping(page, &mut mapper, &mut frame_allocator);
+
+        let nachricht = b"PAGING FUNKTIONIERT! (via neuer virtueller Page geschrieben)";
+        let page_ptr: *mut u8 = page.start_address().as_mut_ptr();
+        for (i, &zeichen) in nachricht.iter().enumerate() {
+            // Direkt in den (neu gemappten) VGA-Speicher: Zeichen-Byte
+            // + Farb-Byte 0x2F = weiß auf grün. write_volatile, damit
+            // der Compiler die Schreibzugriffe nicht wegoptimiert.
+            unsafe {
+                page_ptr.add(i * 2).write_volatile(zeichen);
+                page_ptr.add(i * 2 + 1).write_volatile(0x2F);
+            }
+        }
+    }
 
     // Zurück zur Standardfarbe für alles Weitere.
     vga_buffer::set_color(Color::LightGray, Color::Black);

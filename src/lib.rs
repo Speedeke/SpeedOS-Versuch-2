@@ -23,6 +23,7 @@ use core::panic::PanicInfo;
 // (Mikrokernel-Prinzip).
 pub mod gdt;
 pub mod interrupts;
+pub mod memory;
 pub mod serial;
 pub mod vga_buffer;
 
@@ -146,10 +147,15 @@ pub fn test_panic_handler(info: &PanicInfo) -> ! {
 
 // ----- Ab hier: Nur für `cargo test` der Bibliothek selbst -----
 
-/// Entry Point, wenn die Bibliothek selbst getestet wird (cargo test --lib).
+// Entry Point, wenn die Bibliothek selbst getestet wird (cargo test --lib).
+// Das entry_point!-Makro des Bootloaders prüft die Signatur unserer
+// Startfunktion zur Compile-Zeit — so kann man die BootInfo-Struktur
+// gar nicht erst falsch entgegennehmen.
 #[cfg(test)]
-#[no_mangle]
-pub extern "C" fn _start() -> ! {
+bootloader::entry_point!(test_kernel_main);
+
+#[cfg(test)]
+fn test_kernel_main(_boot_info: &'static bootloader::BootInfo) -> ! {
     init(); // GDT + IDT laden, damit Exception-Tests funktionieren
     test_main();
     hlt_loop();
