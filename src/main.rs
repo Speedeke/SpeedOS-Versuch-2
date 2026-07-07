@@ -18,6 +18,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use bootloader::{entry_point, BootInfo};
 use core::panic::PanicInfo;
+use speed_os::task::{executor::Executor, keyboard, yield_now, Task};
 use speed_os::vga_buffer::{self, Color};
 use speed_os::{allocator, memory, println, serial_println};
 use x86_64::VirtAddr;
@@ -120,6 +121,12 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     println!();
     println!("Tippe etwas (QWERTZ, auch ä ö ü ß - Backspace/Entf loeschen):");
 
+    // Multitasking-Demo: zwei Zähl-Tasks, die sich die CPU freiwillig
+    // teilen (yield_now) — ihre Ausgaben erscheinen gleich verschränkt.
+    vga_buffer::set_color(Color::Pink, Color::Black);
+    println!("Kooperatives Multitasking, 2 Tasks verschraenkt:");
+    vga_buffer::set_color(Color::LightGray, Color::Black);
+
     // Demonstration: eine nagelneue virtuelle Page auf den VGA-Frame
     // (physisch 0xb8000) mappen und DARÜBER in die oberste
     // Bildschirmzeile schreiben. Zwei völlig verschiedene virtuelle
@@ -157,10 +164,28 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     #[cfg(test)]
     test_main();
 
-    // CPU schlafen legen, bis der nächste Interrupt kommt (Timer oder
-    // Tastatur) — so verbraucht SpeedOS im Leerlauf fast keine Rechenzeit,
-    // statt in einer Endlosschleife 100 % CPU zu fressen.
-    speed_os::hlt_loop();
+    // Der Executor übernimmt: Er ist ab jetzt die Hauptschleife des
+    // Kernels. Drei Tasks laufen "gleichzeitig" (kooperativ):
+    // zwei Zähler und die Tastatur-Verarbeitung. Ist nichts zu tun,
+    // legt der Executor die CPU mit hlt schlafen — wie früher unsere
+    // hlt_loop, nur schlauer.
+    let mut executor = Executor::new();
+    executor.spawn(Task::new(zaehler_task("Task A", 1)));
+    executor.spawn(Task::new(zaehler_task("Task B", 100)));
+    executor.spawn(Task::new(keyboard::print_keypresses()));
+    executor.run();
+}
+
+/// Demo-Task: zählt 5 Schritte ab `start` und gibt nach JEDEM Schritt
+/// die CPU freiwillig ab (yield_now). Weil zwei Instanzen dieses Tasks
+/// laufen, wechseln sich ihre Ausgaben sichtbar ab — der Beweis, dass
+/// hier wirklich zwei Abläufe verschränkt vorankommen.
+async fn zaehler_task(name: &'static str, start: u64) {
+    for i in start..start + 5 {
+        println!("  [{}] zaehlt: {}", name, i);
+        yield_now().await; // Kooperation: andere Tasks sind dran!
+    }
+    println!("  [{}] fertig.", name);
 }
 
 /// Panic-Handler für den normalen Betrieb: Wenn irgendwo im Kernel

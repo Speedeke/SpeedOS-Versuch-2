@@ -47,6 +47,19 @@ pc-keyboard = "0.7.0"
 # einer verketteten Liste (siehe src/allocator.rs für die Alternativen).
 linked_list_allocator = "0.9.0"
 
+# Lock-freie Queue (ArrayQueue) für Scancodes: darf im Interrupt-
+# Handler benutzt werden, weil push/pop NIE blockieren oder locken.
+crossbeam-queue = { version = "0.3", default-features = false, features = ["alloc"] }
+
+# OnceCell: einmalige, explizite Initialisierung von Statics —
+# im Gegensatz zu lazy_static passiert die Initialisierung NICHT
+# heimlich beim ersten Zugriff (der könnte im Interrupt-Handler sein!).
+conquer-once = { version = "0.4", default-features = false }
+
+# Async-Werkzeuge: Stream-Trait (asynchroner Iterator) und AtomicWaker
+# (interrupt-sicherer Aufbewahrungsort für den Waker).
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
+
 [features]
 # Zum Lernen: alternative Heap-Allocatoren (Standard ist der
 # linked_list_allocator). Aktivieren mit z. B.:
@@ -84,4 +97,10 @@ test-timeout = 300
 # Er besteht aus einem einzigen Ablauf mit eigener Test-IDT.
 [[test]]
 name = "stack_overflow"
+harness = false
+
+# Der Async-Test steuert den Executor selbst und beendet QEMU
+# aus einem Task heraus — auch ohne Test-Framework.
+[[test]]
+name = "async_task"
 harness = false

@@ -13,7 +13,7 @@
 // Mit dieser Datei wird der Kernel absturzsicher: Er meldet Fehler
 // sauber auf VGA + seriell, statt wortlos neu zu starten.
 
-use crate::{gdt, print, println};
+use crate::{gdt, println};
 use core::sync::atomic::{AtomicU64, Ordering};
 use lazy_static::lazy_static;
 use pic8259::ChainedPics;
@@ -177,55 +177,20 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
     }
 }
 
-/// Tastatur-Interrupt: Scancode vom PS/2-Controller lesen, mit dem
-/// deutschen QWERTZ-Layout in ein Zeichen übersetzen und ausgeben.
+/// Tastatur-Interrupt: NUR den Scancode lesen und an die async
+/// Verarbeitung übergeben (task/keyboard.rs). Der Handler ist bewusst
+/// winzig — solange er läuft, steht das restliche System still. Die
+/// eigentliche Dekodierung (QWERTZ, Umlaute, Backspace) erledigt der
+/// Tastatur-Task im Executor, wenn gerade Zeit dafür ist.
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    use pc_keyboard::{layouts, DecodedKey, HandleControl, Keyboard, ScancodeSet1};
-    use spin::Mutex;
     use x86_64::instructions::port::Port;
 
-    lazy_static! {
-        /// Der Decoder merkt sich Zustand (z. B. "Shift ist gedrückt"),
-        /// deshalb lebt er als globales, gelocktes Objekt.
-        /// De105Key = deutsches QWERTZ-Layout mit Umlauten.
-        static ref KEYBOARD: Mutex<Keyboard<layouts::De105Key, ScancodeSet1>> =
-            Mutex::new(Keyboard::new(
-                ScancodeSet1::new(),
-                layouts::De105Key,
-                HandleControl::Ignore,
-            ));
-    }
-
-    let mut keyboard = KEYBOARD.lock();
     // Der PS/2-Controller legt den Scancode der Taste in Port 0x60.
     // Wir MÜSSEN ihn lesen, sonst sendet die Tastatur nichts mehr.
     let mut port = Port::new(0x60);
     let scancode: u8 = unsafe { port.read() };
-
-    // Scancode -> KeyEvent (Taste + gedrückt/losgelassen) -> Zeichen.
-    if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
-        if let Some(key) = keyboard.process_keyevent(key_event) {
-            match key {
-                // Backspace (0x08) oder Entf (DEL, 0x7F): letztes Zeichen
-                // löschen. Die Sequenz "\u{8} \u{8}" löscht auf BEIDEN
-                // Kanälen sauber: zurück, mit Leerzeichen überschreiben,
-                // wieder zurück (so machen es auch echte Terminals).
-                // Solange wir keinen frei beweglichen Cursor haben,
-                // verhält sich Entf wie Backspace.
-                DecodedKey::Unicode('\u{8}') | DecodedKey::Unicode('\u{7f}') => {
-                    print!("\u{8} \u{8}")
-                }
-                // Normale Zeichen (auch ä, ö, ü, ß!) auf den Bildschirm.
-                DecodedKey::Unicode(zeichen) => print!("{}", zeichen),
-                // Entf kommt je nach Layout auch als Roh-Taste an:
-                DecodedKey::RawKey(pc_keyboard::KeyCode::Delete) => {
-                    print!("\u{8} \u{8}")
-                }
-                // Andere Sondertasten (Pfeile, F-Tasten, ...) als Name.
-                DecodedKey::RawKey(taste) => print!("{:?}", taste),
-            }
-        }
-    }
+    // In die lock-freie Queue damit + Tastatur-Task wecken. Fertig!
+    crate::task::keyboard::add_scancode(scancode);
 
     unsafe {
         PICS.lock()
