@@ -49,8 +49,11 @@ impl BumpAllocator {
     }
 
     /// Weist dem Allocator seinen Speicherbereich zu.
-    /// `unsafe`: Der Aufrufer garantiert, dass [heap_start, heap_start
-    /// + heap_size) gültig gemappt ist und exklusiv uns gehört.
+    ///
+    /// # Safety
+    ///
+    /// Der Aufrufer garantiert, dass [heap_start, heap_start + heap_size)
+    /// gültig gemappt ist und exklusiv diesem Allocator gehört.
     pub unsafe fn init(&mut self, heap_start: usize, heap_size: usize) {
         self.heap_start = heap_start;
         self.heap_end = heap_start + heap_size;
@@ -58,6 +61,17 @@ impl BumpAllocator {
     }
 }
 
+/// Default = leerer Allocator (wie new) — von Clippy empfohlen,
+/// damit sich der Typ wie übliche Rust-Typen verhält.
+impl Default for BumpAllocator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// unsafe impl: Wir halten den GlobalAlloc-Vertrag ein — alloc liefert
+// entweder null (Fehler) oder einen exklusiven, korrekt ausgerichteten
+// Block der angeforderten Größe; der Spinlock verhindert Races.
 unsafe impl GlobalAlloc for Locked<BumpAllocator> {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let mut bump = self.lock();

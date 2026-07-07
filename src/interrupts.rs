@@ -171,6 +171,9 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
 
     // Dem PIC melden: "fertig behandelt" (End of Interrupt).
     // Ohne das schickt er nie wieder einen Timer-Interrupt!
+    // unsafe: Die Interrupt-Nummer stammt aus unserem eigenen Enum und
+    // ist garantiert die, die gerade behandelt wird — eine falsche
+    // Nummer könnte fremde Interrupts verschlucken.
     unsafe {
         PICS.lock()
             .notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
@@ -187,11 +190,14 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
 
     // Der PS/2-Controller legt den Scancode der Taste in Port 0x60.
     // Wir MÜSSEN ihn lesen, sonst sendet die Tastatur nichts mehr.
+    // unsafe (Port-I/O): 0x60 ist der Standard-Datenport des PS/2-
+    // Controllers; das Lesen ist genau die vorgesehene Bedienung.
     let mut port = Port::new(0x60);
     let scancode: u8 = unsafe { port.read() };
     // In die lock-freie Queue damit + Tastatur-Task wecken. Fertig!
     crate::task::keyboard::add_scancode(scancode);
 
+    // unsafe: korrekte Interrupt-Nummer, siehe Timer-Handler.
     unsafe {
         PICS.lock()
             .notify_end_of_interrupt(InterruptIndex::Keyboard.as_u8());

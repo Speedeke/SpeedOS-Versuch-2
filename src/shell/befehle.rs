@@ -262,6 +262,9 @@ impl Befehl for Neustart {
         // (Port 0x64) hat eine Leitung zur Reset-Pin der CPU. Das
         // Kommando 0xFE zieht sie — die Maschine bootet sofort neu.
         let mut port: Port<u8> = Port::new(0x64);
+        // unsafe (Port-I/O): 0x64 ist der Kommando-Port des 8042.
+        // Der Reset ist hier die GEWOLLTE Wirkung — Datenverlust im
+        // RamFs inklusive, das ist dem Nutzer des Befehls bewusst.
         unsafe {
             port.write(0xFE);
         }

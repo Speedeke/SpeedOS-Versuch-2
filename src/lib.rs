@@ -112,6 +112,10 @@ pub enum QemuExitCode {
 pub fn exit_qemu(exit_code: QemuExitCode) {
     use x86_64::instructions::port::Port;
 
+    // unsafe (Port-I/O): Port 0xf4 ist das isa-debug-exit-Device aus
+    // unserer QEMU-Konfiguration (Cargo.toml test-args). Der Schreib-
+    // zugriff kann keinen Speicher korrumpieren — er beendet höchstens
+    // QEMU, und genau das ist hier der Zweck.
     unsafe {
         let mut port = Port::new(0xf4);
         port.write(exit_code as u32);
@@ -180,6 +184,8 @@ fn test_kernel_main(boot_info: &'static bootloader::BootInfo) -> ! {
     init(); // GDT + IDT laden, damit Exception-Tests funktionieren
 
     // Auch den Heap aufsetzen — die Shell-Tests brauchen Box & Vec.
+    // unsafe: einmaliger Aufruf mit dem garantiert korrekten Mapping/
+    // der Memory Map des Bootloaders (siehe # Safety in memory.rs).
     let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
     let mut mapper = unsafe { memory::init(phys_mem_offset) };
     let mut frame_allocator =

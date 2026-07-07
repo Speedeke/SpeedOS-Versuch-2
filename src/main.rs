@@ -37,6 +37,8 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // 2. Speicherverwaltung: Zugriff auf die Page Tables über das
     //    Komplett-Mapping des Bootloaders, dann den Heap mappen.
     //    Danach funktionieren Box, Vec, String & Co.
+    //    unsafe: einmaliger Aufruf mit dem garantiert korrekten Mapping/
+    //    der Memory Map des Bootloaders (siehe # Safety in memory.rs).
     let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
     let mut mapper = unsafe { memory::init(phys_mem_offset) };
     let mut frame_allocator =

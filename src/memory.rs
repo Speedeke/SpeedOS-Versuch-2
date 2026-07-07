@@ -28,10 +28,13 @@ use x86_64::{
 /// virtuelle in physische Adressen übersetzen (translate_addr aus
 /// dem Translate-Trait) und neue Mappings anlegen (map_to).
 ///
-/// `unsafe`: Der Aufrufer muss garantieren, dass der komplette
-/// physische Speicher wirklich bei `physical_memory_offset` gemappt
-/// ist (macht unser Bootloader) — und die Funktion darf nur EINMAL
-/// aufgerufen werden, sonst gäbe es mehrere &mut auf dieselbe Tabelle.
+/// # Safety
+///
+/// Der Aufrufer muss garantieren, dass der komplette physische
+/// Speicher wirklich bei `physical_memory_offset` gemappt ist (macht
+/// unser Bootloader mit dem Feature "map_physical_memory") — und die
+/// Funktion darf nur EINMAL aufgerufen werden, sonst gäbe es mehrere
+/// &mut-Referenzen auf dieselbe Level-4-Tabelle (Undefined Behavior).
 pub unsafe fn init(physical_memory_offset: VirtAddr) -> OffsetPageTable<'static> {
     let level_4_table = active_level_4_table(physical_memory_offset);
     OffsetPageTable::new(level_4_table, physical_memory_offset)
@@ -93,8 +96,13 @@ pub struct BootInfoFrameAllocator {
 }
 
 impl BootInfoFrameAllocator {
-    /// `unsafe`: Der Aufrufer garantiert, dass die Memory Map stimmt
-    /// und die "Usable"-Frames wirklich niemand anderes benutzt.
+    /// Baut den Allocator aus der Memory Map des Bootloaders.
+    ///
+    /// # Safety
+    ///
+    /// Der Aufrufer garantiert, dass die Memory Map korrekt ist und
+    /// die als "Usable" markierten Frames wirklich unbenutzt sind —
+    /// sonst würden wir Speicher doppelt vergeben.
     pub unsafe fn init(memory_map: &'static MemoryMap) -> Self {
         BootInfoFrameAllocator {
             memory_map,

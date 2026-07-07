@@ -221,7 +221,7 @@ fn gemeinsamer_anfang(eintraege: &[&DirEintrag]) -> String {
     let mut gemeinsam = String::new();
     'aussen: for (i, zeichen) in erster.char_indices() {
         for eintrag in eintraege.iter().skip(1) {
-            if eintrag.name[i..].chars().next() != Some(zeichen) {
+            if !eintrag.name[i..].starts_with(zeichen) {
                 break 'aussen;
             }
         }

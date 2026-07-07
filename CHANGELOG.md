@@ -1,0 +1,70 @@
+# Changelog
+
+Alle nennenswerten Änderungen an SpeedOS, neueste zuerst.
+Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
+
+## [Unveröffentlicht]
+
+### Verbessert
+- Qualitäts-Pass: alle Clippy-Lints behoben, `# Safety`-Dokumentation
+  für alle unsafe-Funktionen, Begründungs-Kommentare an jedem
+  unsafe-Block, README/CHANGELOG ergänzt
+
+## 0.1.0 — Meilensteine bis Juli 2026
+
+### RAM-Dateisystem mit VFS (a55873d)
+- `FileSystem`-Trait als VFS-Abstraktion (lesen, schreiben, liste,
+  mkdir, loeschen, node_typ) — vorbereitet für FAT32/Disk-Dateisysteme
+- RamFs: hierarchisches In-Memory-Dateisystem (BTreeMap-Baum)
+- 9 neue Shell-Befehle: dir, cd, mkdir, type, write, del, copy, move,
+  tree; Prompt zeigt aktuelles Verzeichnis; Tab-Vervollständigung
+- Demo-Dateien beim Boot (/willkommen.txt, /system/info.txt)
+
+### SpeedShell (bc9c0b7)
+- Interaktive Shell als async Task: Prompt mit blinkendem
+  Hardware-Cursor, Zeileneingabe mit Backspace/Entf, Befehlsverlauf
+  (10 Einträge, Pfeiltasten)
+- Befehls-Registry über das `Befehl`-Trait: help, echo, clear, ticks,
+  meminfo, version, farbtest, neustart
+
+### Kooperatives Multitasking (555fdc5)
+- Task-Typ um Futures, Executor mit Waker-Support (fair, FIFO,
+  hlt im Leerlauf, race-freies sleep_if_idle)
+- Tastatur auf async umgestellt: Interrupt-Handler füllt nur noch
+  eine lock-freie Queue (crossbeam ArrayQueue + AtomicWaker)
+
+### Kernel-Heap (759d7f6)
+- 100-KiB-Heap ab 0x4444_4444_0000; alloc-Crate aktiviert
+  (Box, Vec, String, BTreeMap im Kernel)
+- Drei Allocatoren: linked_list (Standard) sowie Bump und
+  Fixed-Size-Block als dokumentierte Lern-Alternativen (Features)
+
+### Paging (e4186a0)
+- Bootloader mappt den physischen Speicher komplett
+  (map_physical_memory); OffsetPageTable über CR3
+- BootInfoFrameAllocator vergibt Frames aus der Memory Map
+- entry_point!-Makro für typgeprüfte Kernel-Einstiege
+
+### Tastatur, Backspace & Entf (41fa008, 8ae2b30)
+- 8259 PIC remappt (32-47), Timer-Tick-Zähler, PS/2-Tastatur mit
+  deutschem QWERTZ-Layout (De105Key) inkl. Umlauten
+- Deadlock-Schutz: Ausgabe-Locks nur mit deaktivierten Interrupts
+- Backspace/Entf löschen (VGA + seriell konsistent)
+
+### Exception-Handling (41678ec)
+- IDT mit Breakpoint-, Page-Fault- und Double-Fault-Handler
+- GDT/TSS mit Interrupt Stack Table: Double Fault läuft auf eigenem
+  Notfall-Stack — Stack Overflow führt zu sauberer Meldung statt
+  Triple Fault + Reboot
+
+### VGA-Treiber (3c9c0f8)
+- println!/print! schreiben immer auf VGA UND seriell
+- Codepage-437-Übersetzung (ä ö ü Ä Ö Ü ß é è ° § ² …),
+  Ersatzzeichen für Nicht-Darstellbares, Farb-API, Scrolling-Fix
+
+### Grundgerüst (6c877b6)
+- no_std-Kernel mit eigenem Entry Point und Panic-Handler
+- Eigenes Target x86_64-speedos.json, bootimage + QEMU-Workflow
+- Serieller Port (COM1) als Debug-Kanal
+- Eigenes Test-Framework: Tests booten in QEMU, isa-debug-exit
+  liefert den Exit-Code

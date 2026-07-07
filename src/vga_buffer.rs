@@ -289,6 +289,8 @@ pub fn cursor_aktivieren() {
         let writer = WRITER.lock();
         let mut index_port: Port<u8> = Port::new(0x3D4);
         let mut data_port: Port<u8> = Port::new(0x3D5);
+        // unsafe (Port-I/O): Standard-VGA-Register, reine Cursor-Optik —
+        // schlimmstenfalls sähe der Cursor falsch aus.
         unsafe {
             index_port.write(0x0A); // Register: Cursor-Start-Scanline
             data_port.write(14); //   (Bit 5 = 0 heißt: Cursor sichtbar)

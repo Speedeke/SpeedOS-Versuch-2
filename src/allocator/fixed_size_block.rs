@@ -68,7 +68,12 @@ impl FixedSizeBlockAllocator {
         }
     }
 
-    /// `unsafe`: wie immer — der Bereich muss gültig und exklusiv sein.
+    /// Weist dem Allocator seinen Speicherbereich zu.
+    ///
+    /// # Safety
+    ///
+    /// Der Aufrufer garantiert, dass [heap_start, heap_start + heap_size)
+    /// gültig gemappt ist und exklusiv diesem Allocator gehört.
     pub unsafe fn init(&mut self, heap_start: usize, heap_size: usize) {
         self.fallback_allocator.init(heap_start, heap_size);
     }
@@ -82,6 +87,16 @@ impl FixedSizeBlockAllocator {
     }
 }
 
+/// Default = leerer Allocator (wie new).
+impl Default for FixedSizeBlockAllocator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// unsafe impl: GlobalAlloc-Vertrag wie beim BumpAllocator — exklusive,
+// ausgerichtete Blöcke oder null; Blockgröße >= Anforderung, weil
+// list_index immer aufrundet; der Spinlock verhindert Races.
 unsafe impl GlobalAlloc for Locked<FixedSizeBlockAllocator> {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let mut allocator = self.lock();

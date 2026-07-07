@@ -112,6 +112,13 @@ impl Executor {
     }
 }
 
+/// Default = leerer Executor (wie new).
+impl Default for Executor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Der Waker eines Tasks: kennt die Task-ID und die Warteschlange.
 /// wake() = "ID wieder einreihen". Mehr ist es nicht!
 struct TaskWaker {

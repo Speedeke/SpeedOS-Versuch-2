@@ -58,6 +58,11 @@ pub struct ScancodeStream {
     _private: (),
 }
 
+// Kein Default für ScancodeStream/KeyStream: new() hat einen
+// einmaligen Seiteneffekt (Queue-Initialisierung, zweiter Aufruf
+// panict absichtlich) — ein "harmlos" aussehendes Default würde
+// das verschleiern.
+#[allow(clippy::new_without_default)]
 impl ScancodeStream {
     pub fn new() -> Self {
         SCANCODE_QUEUE
@@ -103,6 +108,7 @@ pub struct KeyStream {
     keyboard: Keyboard<layouts::De105Key, ScancodeSet1>,
 }
 
+#[allow(clippy::new_without_default)] // siehe ScancodeStream
 impl KeyStream {
     pub fn new() -> Self {
         KeyStream {
