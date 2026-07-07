@@ -232,6 +232,11 @@ fn char_zu_cp437(c: char) -> u8 {
         'é' => 0x82,
         'è' => 0x8A,
         '█' => 0xDB, // Vollblock — praktisch für Farb-Demos
+        // Linien-Zeichen für den tree-Befehl:
+        '│' => 0xB3,
+        '├' => 0xC3,
+        '└' => 0xC0,
+        '─' => 0xC4,
         // Alles andere kann VGA nicht darstellen: Ersatzzeichen ■
         _ => 0xFE,
     }

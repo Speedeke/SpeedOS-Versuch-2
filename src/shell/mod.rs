@@ -11,13 +11,15 @@
 
 pub mod befehle;
 
+use crate::fs::{self, DirEintrag, NodeTyp};
 use crate::task::keyboard::KeyStream;
 use crate::vga_buffer::{self, Color};
 use crate::{print, println};
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::string::String;
-use befehle::Befehl;
+use alloc::vec::Vec;
+use befehle::{Befehl, ShellKontext};
 use futures_util::StreamExt;
 use pc_keyboard::{DecodedKey, KeyCode};
 
@@ -33,6 +35,8 @@ pub async fn run() {
 
     let registry = befehle::alle_befehle();
     let mut keys = KeyStream::new();
+    // Der Shell-Zustand: aktuelles Verzeichnis (Befehle ändern ihn).
+    let mut kontext = ShellKontext::neu();
     // Die aktuelle Eingabezeile (das, was der Nutzer gerade tippt).
     let mut zeile = String::new();
     // Der Befehlsverlauf: vorne = neuester Befehl.
@@ -40,7 +44,7 @@ pub async fn run() {
     // Wo wir gerade im Verlauf blättern (None = nicht am Blättern).
     let mut verlauf_index: Option<usize> = None;
 
-    prompt();
+    prompt(&kontext);
     while let Some(key) = keys.next().await {
         match key {
             // Enter: Zeile abschließen und Befehl ausführen.
@@ -53,11 +57,15 @@ pub async fn run() {
                         verlauf.push_front(String::from(eingabe));
                         verlauf.truncate(MAX_VERLAUF);
                     }
-                    befehl_ausfuehren(&registry, eingabe);
+                    befehl_ausfuehren(&registry, &mut kontext, eingabe);
                 }
                 zeile.clear();
                 verlauf_index = None;
-                prompt();
+                prompt(&kontext);
+            }
+            // Tab: Datei-/Ordnernamen vervollständigen.
+            DecodedKey::Unicode('\t') => {
+                tab_vervollstaendigen(&mut zeile, &kontext);
             }
             // Backspace oder Entf: letztes Zeichen der Eingabe löschen.
             DecodedKey::Unicode('\u{8}') | DecodedKey::Unicode('\u{7f}') => {
@@ -112,11 +120,11 @@ pub async fn run() {
 
 /// Führt eine Eingabezeile aus: erstes Wort = Befehlsname, Rest =
 /// Argumente. Öffentlich, damit die Tests sie direkt aufrufen können.
-pub fn befehl_ausfuehren(registry: &[Box<dyn Befehl>], eingabe: &str) {
+pub fn befehl_ausfuehren(registry: &[Box<dyn Befehl>], kontext: &mut ShellKontext, eingabe: &str) {
     let (name, argumente) = eingabe.split_once(' ').unwrap_or((eingabe, ""));
 
     match registry.iter().find(|b| b.name() == name) {
-        Some(befehl) => befehl.ausfuehren(argumente.trim(), registry),
+        Some(befehl) => befehl.ausfuehren(argumente.trim(), kontext, registry),
         None => {
             vga_buffer::set_color(Color::LightRed, Color::Black);
             println!("Unbekannter Befehl: '{}'", name);
@@ -126,11 +134,100 @@ pub fn befehl_ausfuehren(registry: &[Box<dyn Befehl>], eingabe: &str) {
     }
 }
 
-/// Gibt den Eingabe-Prompt aus.
-fn prompt() {
+/// Gibt den Eingabe-Prompt aus — mit dem aktuellen Verzeichnis,
+/// wie man es von cmd kennt (C:\> ... bei uns: SpeedOS:/system>).
+fn prompt(kontext: &ShellKontext) {
     vga_buffer::set_color(Color::LightGreen, Color::Black);
-    print!("SpeedOS> ");
+    print!("SpeedOS:{}> ", kontext.aktuelles_verzeichnis);
     vga_buffer::set_color(Color::LightGray, Color::Black);
+}
+
+/// Tab-Vervollständigung für Datei- und Ordnernamen.
+///
+/// Nimmt das letzte Wort der Eingabezeile, zerlegt es in Verzeichnis-
+/// Teil und Namensanfang, und schaut im VFS nach passenden Einträgen:
+///   - genau 1 Treffer: wird vervollständigt (Ordner bekommen ein /)
+///   - mehrere: erst den gemeinsamen Anfang ergänzen; geht das nicht,
+///     alle Kandidaten anzeigen und die Eingabezeile neu zeichnen
+fn tab_vervollstaendigen(zeile: &mut String, kontext: &ShellKontext) {
+    // Das letzte Wort der Zeile ist das zu vervollständigende Token.
+    let token_start = zeile.rfind(' ').map(|i| i + 1).unwrap_or(0);
+    let token = String::from(&zeile[token_start..]);
+
+    // Token = optionaler Verzeichnis-Teil + Namensanfang.
+    // "system/in" -> Verzeichnis "system/", Anfang "in"
+    let (verz_teil, anfang) = match token.rfind('/') {
+        Some(i) => (&token[..=i], &token[i + 1..]),
+        None => ("", &token[..]),
+    };
+    let verz_pfad = if verz_teil.is_empty() {
+        kontext.aktuelles_verzeichnis.clone()
+    } else {
+        kontext.aufloesen(verz_teil)
+    };
+
+    let eintraege = match fs::mit_fs(|f| f.liste(&verz_pfad)) {
+        Ok(e) => e,
+        Err(_) => return, // Kein gültiges Verzeichnis: nichts tun.
+    };
+    let passende: Vec<&DirEintrag> = eintraege
+        .iter()
+        .filter(|e| e.name.starts_with(anfang))
+        .collect();
+
+    match passende.len() {
+        0 => {} // Nichts passt: nichts tun (wie in cmd).
+        1 => {
+            // Eindeutig: den Rest des Namens ergänzen.
+            let eintrag = passende[0];
+            let mut rest = String::from(&eintrag.name[anfang.len()..]);
+            if eintrag.typ == NodeTyp::Verzeichnis {
+                rest.push('/'); // Ordner: gleich weitertippen können
+            }
+            print!("{}", rest);
+            zeile.push_str(&rest);
+        }
+        _ => {
+            // Mehrdeutig: so weit ergänzen, wie alle übereinstimmen.
+            let gemeinsam = gemeinsamer_anfang(&passende);
+            if gemeinsam.chars().count() > anfang.chars().count() {
+                let rest = String::from(&gemeinsam[anfang.len()..]);
+                print!("{}", rest);
+                zeile.push_str(&rest);
+            } else {
+                // Alle Kandidaten zeigen, dann Prompt + Zeile neu.
+                println!();
+                for eintrag in &passende {
+                    if eintrag.typ == NodeTyp::Verzeichnis {
+                        vga_buffer::set_color(Color::LightCyan, Color::Black);
+                        print!("{}/  ", eintrag.name);
+                        vga_buffer::set_color(Color::LightGray, Color::Black);
+                    } else {
+                        print!("{}  ", eintrag.name);
+                    }
+                }
+                println!();
+                prompt(kontext);
+                print!("{}", zeile);
+            }
+        }
+    }
+}
+
+/// Der längste gemeinsame Namensanfang aller Kandidaten
+/// (zeichenweise verglichen, damit Umlaute nicht zerteilt werden).
+fn gemeinsamer_anfang(eintraege: &[&DirEintrag]) -> String {
+    let erster = &eintraege[0].name;
+    let mut gemeinsam = String::new();
+    'aussen: for (i, zeichen) in erster.char_indices() {
+        for eintrag in eintraege.iter().skip(1) {
+            if eintrag.name[i..].chars().next() != Some(zeichen) {
+                break 'aussen;
+            }
+        }
+        gemeinsam.push(zeichen);
+    }
+    gemeinsam
 }
 
 /// Ersetzt die sichtbare Eingabezeile durch `neu` (fürs Blättern im
@@ -178,11 +275,12 @@ mod tests {
     #[test_case]
     fn test_alle_befehle_ohne_panic() {
         let registry = befehle::alle_befehle();
+        let mut kontext = ShellKontext::neu();
         for befehl in registry.iter() {
             if befehl.name() == "neustart" {
                 continue;
             }
-            befehl.ausfuehren("", &registry);
+            befehl.ausfuehren("", &mut kontext, &registry);
         }
     }
 
@@ -191,7 +289,45 @@ mod tests {
     #[test_case]
     fn test_dispatcher() {
         let registry = befehle::alle_befehle();
-        befehl_ausfuehren(&registry, "gibtsnicht");
-        befehl_ausfuehren(&registry, "echo Hallo aus dem Test");
+        let mut kontext = ShellKontext::neu();
+        befehl_ausfuehren(&registry, &mut kontext, "gibtsnicht");
+        befehl_ausfuehren(&registry, &mut kontext, "echo Hallo aus dem Test");
+    }
+
+    /// Die Dateisystem-Befehle über den Dispatcher, wie sie ein
+    /// Nutzer tippen würde — inklusive cd mit relativen Pfaden.
+    #[test_case]
+    fn test_dateisystem_befehle() {
+        let registry = befehle::alle_befehle();
+        let mut kontext = ShellKontext::neu();
+
+        befehl_ausfuehren(&registry, &mut kontext, "mkdir shelltest");
+        befehl_ausfuehren(&registry, &mut kontext, "cd shelltest");
+        assert_eq!(kontext.aktuelles_verzeichnis, "/shelltest");
+
+        befehl_ausfuehren(&registry, &mut kontext, "write notiz.txt Hallo Welt");
+        assert_eq!(
+            fs::mit_fs(|f| f.lesen("/shelltest/notiz.txt")).unwrap(),
+            b"Hallo Welt\n"
+        );
+
+        befehl_ausfuehren(&registry, &mut kontext, "copy notiz.txt kopie.txt");
+        assert!(fs::mit_fs(|f| f.lesen("/shelltest/kopie.txt")).is_ok());
+
+        befehl_ausfuehren(&registry, &mut kontext, "cd ..");
+        assert_eq!(kontext.aktuelles_verzeichnis, "/");
+
+        // cd in eine Datei muss scheitern (cwd bleibt unverändert).
+        befehl_ausfuehren(&registry, &mut kontext, "cd shelltest/notiz.txt");
+        assert_eq!(kontext.aktuelles_verzeichnis, "/");
+
+        // Aufräumen.
+        befehl_ausfuehren(&registry, &mut kontext, "del shelltest/notiz.txt");
+        befehl_ausfuehren(&registry, &mut kontext, "del shelltest/kopie.txt");
+        befehl_ausfuehren(&registry, &mut kontext, "del shelltest");
+        assert_eq!(
+            fs::mit_fs(|f| f.node_typ("/shelltest")),
+            Err(fs::FsFehler::NichtGefunden)
+        );
     }
 }

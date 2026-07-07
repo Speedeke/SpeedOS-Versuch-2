@@ -33,3 +33,13 @@
 ## Architektur-Prinzip
 - Mikrokernel-inspiriert: Treiber und Systemdienste so isoliert wie möglich
   (eigene Module, klare Schnittstellen, so wenig geteilter Zustand wie möglich).
+
+## Architektur-Entscheidungen
+- **VFS-Abstraktion (Juli 2026):** Alle Dateisysteme implementieren das Trait
+  `FileSystem` in `src/fs/mod.rs` (lesen, schreiben, liste, mkdir, loeschen,
+  node_typ — absolute, normalisierte Pfade mit `/`). Shell-Befehle und Kernel
+  greifen NIE auf eine konkrete Implementierung zu, sondern nur über
+  `fs::mit_fs()` auf das global gemountete VFS. Erste Implementierung ist
+  `RamFs` (`src/fs/ramfs.rs`, in-memory); FAT32 und ein eigenes
+  Disk-Dateisystem sollen später exakt dieselbe Schnittstelle bedienen —
+  dann wird nur das gemountete Dateisystem ausgetauscht, kein Befehl ändert sich.

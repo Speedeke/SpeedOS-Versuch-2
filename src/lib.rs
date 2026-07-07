@@ -29,6 +29,7 @@ use core::panic::PanicInfo;
 // Unsere Treiber- und System-Module — bewusst voneinander isoliert
 // (Mikrokernel-Prinzip).
 pub mod allocator;
+pub mod fs;
 pub mod gdt;
 pub mod interrupts;
 pub mod memory;
@@ -185,6 +186,9 @@ fn test_kernel_main(boot_info: &'static bootloader::BootInfo) -> ! {
         unsafe { memory::BootInfoFrameAllocator::init(&boot_info.memory_map) };
     allocator::init_heap(&mut mapper, &mut frame_allocator)
         .expect("Heap-Initialisierung fehlgeschlagen");
+
+    // Dateisystem mounten — die fs- und Shell-Tests brauchen es.
+    fs::init();
 
     test_main();
     hlt_loop();

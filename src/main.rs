@@ -44,13 +44,16 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     allocator::init_heap(&mut mapper, &mut frame_allocator)
         .expect("Heap-Initialisierung fehlgeschlagen");
 
-    serial_println!("[DEBUG] GDT/IDT/PIC, Paging und Heap initialisiert. Starte SpeedShell.");
+    // 3. Dateisystem: RamFs als Wurzel mounten (mit Demo-Dateien).
+    speed_os::fs::init();
+
+    serial_println!("[DEBUG] GDT/IDT/PIC, Paging, Heap und RamFs initialisiert. Starte SpeedShell.");
 
     // Im Testmodus (cargo test) stattdessen die Tests ausführen.
     #[cfg(test)]
     test_main();
 
-    // 3. Der Executor übernimmt als Hauptschleife des Kernels und
+    // 4. Der Executor übernimmt als Hauptschleife des Kernels und
     //    startet die SpeedShell — SpeedOS ist jetzt interaktiv!
     //    (Die Shell liest die Tastatur über den async KeyStream;
     //    ist nichts zu tun, schläft die CPU per hlt.)
