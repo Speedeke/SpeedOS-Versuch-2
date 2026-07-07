@@ -1,0 +1,5 @@
+# .gitignore — was NICHT ins Git-Repository gehört
+
+# Build-Artefakte von cargo (kompilierte Dateien, Boot-Images) —
+# lassen sich jederzeit mit `cargo build` neu erzeugen.
+/target

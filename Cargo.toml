@@ -1,0 +1,57 @@
+# Cargo.toml — Projekt-Manifest von SpeedOS
+#
+# Hier stehen alle Abhängigkeiten (Crates) und die Konfiguration für
+# das `bootimage`-Tool, das aus unserem Kernel ein bootfähiges
+# Festplatten-Image baut und QEMU mit den richtigen Optionen startet.
+
+[package]
+name = "speed_os"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Der Bootloader: schaltet die CPU in den 64-Bit-Modus und springt
+# dann in unsere _start-Funktion. Version 0.9.x, wie im Buch
+# "Writing an OS in Rust" von Philipp Oppermann.
+bootloader = "0.9"
+
+# "volatile" verhindert, dass der Compiler unsere Schreibzugriffe auf den
+# VGA-Speicher wegoptimiert (er sieht ja nicht, dass die Hardware mitliest).
+volatile = "0.2.6"
+
+# Spinlocks: einfache Mutexe, die ohne Betriebssystem funktionieren
+# (wir KÖNNEN ja keine OS-Mutexe benutzen — wir SIND das OS).
+spin = "0.5.2"
+
+# Abstraktionen für x86_64-Spezialbefehle (Port-I/O, hlt, ...).
+x86_64 = "0.14.2"
+
+# Treiber für den seriellen UART-Chip 16550 (COM1 auf Port 0x3F8).
+# Darüber schicken wir alle Debug-Ausgaben ins Terminal.
+uart_16550 = "0.2.0"
+
+# lazy_static erlaubt statische Variablen, die erst beim ersten Zugriff
+# initialisiert werden. "spin_no_std" nutzt Spinlocks statt OS-Mutexe.
+[dependencies.lazy_static]
+version = "1.0"
+features = ["spin_no_std"]
+
+# Konfiguration für das bootimage-Tool
+[package.metadata.bootimage]
+# Bei `cargo run`: serielle Ausgabe (COM1) ins Terminal umleiten,
+# damit wir die Debug-Ausgaben direkt sehen.
+run-args = ["-serial", "stdio"]
+
+# Bei `cargo test`: zusätzlich das isa-debug-exit-Device einbinden,
+# über das der Kernel QEMU mit einem Exit-Code beenden kann.
+# Kein Fenster nötig (-display none), Ausgabe nur seriell.
+test-args = [
+    "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
+    "-serial", "stdio",
+    "-display", "none",
+]
+# QEMU berechnet den Exit-Code als (wert << 1) | 1.
+# Unser Erfolgs-Wert 0x10 ergibt also (0x10 << 1) | 1 = 33.
+test-success-exit-code = 33
+# Sicherheitsnetz: Test nach 5 Minuten abbrechen, falls er hängt.
+test-timeout = 300

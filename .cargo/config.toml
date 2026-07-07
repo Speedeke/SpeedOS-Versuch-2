@@ -1,0 +1,30 @@
+# .cargo/config.toml — Build-Konfiguration für SpeedOS
+#
+# Diese Datei sagt cargo:
+#  1. Baue standardmäßig für unser eigenes Target (x86_64-speedos.json),
+#     nicht für Windows.
+#  2. Kompiliere die `core`-Bibliothek selbst mit (build-std), weil es
+#     für unser selbst definiertes Target keine fertige gibt.
+#  3. Bei `cargo run`/`cargo test`: starte das Ergebnis über
+#     `bootimage runner` in QEMU statt es direkt auszuführen.
+
+[unstable]
+# Erlaubt eigene Target-Definitionen als .json-Datei
+# (seit neueren Nightly-Versionen explizit nötig).
+json-target-spec = true
+# `core` und `compiler_builtins` aus dem Quellcode mitkompilieren
+# (deshalb brauchen wir die rust-src-Komponente).
+build-std = ["core", "compiler_builtins"]
+# Stellt memset/memcpy/memcmp bereit — die erwartet der Compiler,
+# normalerweise liefert sie die C-Bibliothek, die wir nicht haben.
+build-std-features = ["compiler-builtins-mem"]
+
+[build]
+# Unser eigenes Bare-Metal-Target als Standard.
+target = "x86_64-speedos.json"
+
+# Für alle Targets ohne Betriebssystem (also unseres):
+# `cargo run` übergibt die Kernel-Datei an `bootimage runner`,
+# der daraus ein Boot-Image baut und QEMU damit startet.
+[target.'cfg(target_os = "none")']
+runner = "bootimage runner"

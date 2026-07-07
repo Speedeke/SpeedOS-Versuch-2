@@ -1,0 +1,13 @@
+# rust-toolchain.toml — pinnt die Rust-Toolchain für dieses Projekt
+#
+# OS-Entwicklung braucht Nightly-Rust, weil wir instabile Features nutzen
+# (eigenes Test-Framework, build-std). Diese Datei sorgt dafür, dass
+# cargo in diesem Ordner automatisch nightly verwendet — egal, was
+# systemweit als Standard eingestellt ist.
+
+[toolchain]
+channel = "nightly"
+components = [
+    "rust-src",            # Quellcode der Standardbibliothek — nötig, um `core` selbst für unser eigenes Target zu kompilieren
+    "llvm-tools-preview",  # LLVM-Werkzeuge — braucht das bootimage-Tool zum Zusammenbauen des Boot-Images
+]
