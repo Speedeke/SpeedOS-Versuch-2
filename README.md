@@ -16,11 +16,13 @@ ist alles selbst gebaut (auf Basis der bewährten Architektur aus
 
 ## Features (Stand: Juli 2026)
 
-- **Eigenständiger Boot:** `no_std`-Kernel, eigenes Target
-  (`x86_64-speedos.json`), bootloader-Crate 0.9.x, startet in QEMU
-- **Textausgabe:** VGA-Textmodus-Treiber mit Farben, Scrolling,
-  CP437-Umlauten (ä ö ü ß) und blinkendem Hardware-Cursor; alle
-  Ausgaben laufen parallel über die serielle Schnittstelle (COM1)
+- **Eigenständiger Boot:** `no_std`-Kernel (Target `x86_64-unknown-none`),
+  UEFI-Boot über bootloader_api 0.11, startet in QEMU
+- **Linearer Framebuffer:** vom Bootloader eingerichtet (bei QEMU z. B.
+  2560x1600 BGR) — Text-Rendering darauf ist der nächste Meilenstein.
+  Übergangsweise läuft alle Textausgabe über die serielle Konsole
+  (`konsole.rs`, mit ANSI-Farben — die Shell bleibt voll benutzbar:
+  Tippen im QEMU-Fenster, Ausgabe im Terminal)
 - **Absturzsicherheit:** IDT mit Handlern für Breakpoint, Page Fault
   und Double Fault — letzterer mit eigenem Notfall-Stack (IST/TSS),
   sodass selbst ein Kernel-Stack-Overflow sauber gemeldet wird
@@ -47,26 +49,31 @@ ist alles selbst gebaut (auf Basis der bewährten Architektur aus
 Voraussetzungen (einmalig):
 
 ```
-# Rust nightly mit den nötigen Komponenten (rust-toolchain.toml
-# wählt sie im Projektordner automatisch):
-rustup toolchain install nightly --component rust-src --component llvm-tools-preview
-
-# bootimage baut aus dem Kernel ein bootfähiges Image:
-cargo install bootimage
+# Rust nightly — Komponenten und Targets installiert rust-toolchain.toml
+# im Projektordner automatisch beim ersten cargo-Aufruf.
+rustup toolchain install nightly
 
 # QEMU (Windows: https://qemu.weilnetz.de/w64/ oder winget install
-# SoftwareFreedomConservancy.QEMU) — qemu-system-x86_64 muss im PATH sein.
+# SoftwareFreedomConservancy.QEMU) — qemu-system-x86_64 im PATH oder
+# unter C:\Program Files\qemu (die mitgelieferte edk2/OVMF-Firmware
+# wird für den UEFI-Boot gebraucht).
 ```
 
 Dann:
 
 ```
-cargo run     # baut alles und startet SpeedOS im QEMU-Fenster
+cargo run     # baut Kernel + Disk-Image und startet SpeedOS im QEMU-Fenster
 cargo test    # führt alle Tests in QEMU aus (headless)
 ```
 
-Beim ersten Build kompiliert cargo die `core`-/`alloc`-Bibliotheken für
-unser eigenes Target mit — das dauert einmalig ein paar Minuten.
+Hinter den Kulissen ruft cargo unser `boot/`-Programm als Runner auf:
+Es verpackt den Kernel mit `bootloader::UefiBoot` in ein bootfähiges
+GPT-Image und startet QEMU. Der allererste Build kompiliert dabei
+einmalig die Bootloader-Stages (ein paar Minuten).
+
+Aktueller Übergangszustand: Getippt wird im QEMU-Fenster (PS/2-Tastatur),
+die Shell-Ausgabe erscheint im Terminal (seriell) — bis der
+Framebuffer-Text-Renderer fertig ist.
 
 Alternative Heap-Allocatoren zum Experimentieren:
 
@@ -79,25 +86,30 @@ cargo test --features fixed-block-allocator   # Frei-Listen fester Größen
 
 ```
 src/
-├── main.rs          Kernel-Einstieg: Init-Reihenfolge, startet die Shell
+├── main.rs          Kernel-Einstieg: Init-Reihenfolge, Framebuffer, Shell
 ├── lib.rs           Kern-Bibliothek: init(), Test-Framework, print-Makros
-├── vga_buffer.rs    VGA-Textmodus (Farben, CP437, Scrolling, Cursor)
-├── serial.rs        Serielle Debug-Ausgabe (COM1)
+├── konsole.rs       Übergangs-Konsole: ANSI-Farben über seriell
+├── serial.rs        Serielle Ausgabe (COM1) — aktuell der Text-Kanal
 ├── gdt.rs           GDT/TSS + Notfall-Stack für Double Faults
-├── interrupts.rs    IDT, Exception- und Hardware-Interrupt-Handler
-├── memory.rs        Paging: OffsetPageTable + Frame-Allocator
+├── interrupts.rs    IDT, Exceptions, PIC/PIT/LAPIC, Timer & Tastatur
+├── memory.rs        Paging: globale API + Bitmap-Frame-Allocator
 ├── allocator.rs     Kernel-Heap (+ allocator/{bump,fixed_size_block}.rs)
+├── zeit.rs          Zeit-API (ticks, ms_seit_boot)
 ├── task/            Async-Multitasking: Task, Executor, Tastatur-Stream
-├── shell/           SpeedShell: Eingabe-Loop + Befehls-Registry
+├── shell/           SpeedShell: ZeilenEditor + Befehls-Registry
 └── fs/              VFS-Trait + RamFs
+boot/                Host-Runner: baut das UEFI-Disk-Image, startet QEMU
 tests/               Integrationstests (booten einzeln in QEMU)
+docs/                Migrationsplan bootloader 0.9 -> 0.11
 ```
 
 ## Roadmap (Kurzfassung)
 
-- [x] Boot, VGA/Seriell, Exceptions, Interrupts, Tastatur (QWERTZ)
+- [x] Boot, Seriell, Exceptions, Interrupts, Tastatur (QWERTZ)
 - [x] Paging, Heap, async/await, Shell, RAM-Dateisystem
-- [ ] **Grafik:** Framebuffer statt VGA-Textmodus, eigener Text-Renderer
+- [x] **UEFI-Boot mit linearem Framebuffer** (bootloader 0.11)
+- [ ] **Grafik:** Text-Renderer auf dem Framebuffer (eigene Schrift,
+      Software-Cursor) — der nächste Meilenstein
 - [ ] **Persistenz:** Block-Device-Treiber + Disk-Dateisystem (VFS ist bereit)
 - [ ] **User Space:** Ring-3-Prozesse, Syscalls, präemptiver Scheduler
 - [ ] Ferner: eigene Programme laden (ELF), Netzwerk, Sound

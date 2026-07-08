@@ -59,6 +59,53 @@ impl InterruptIndex {
     }
 }
 
+/// Schaltet den Local APIC ab, damit die klassischen 8259-PIC-
+/// Interrupts die CPU direkt erreichen (Pre-APIC-Verdrahtung).
+///
+/// Lektion aus der bootloader-0.11-Migration: UEFI-Firmware (OVMF)
+/// benutzt den modernen APIC und hinterlässt ihn AKTIV — dabei ist
+/// die Leitung vom alten PIC (LINT0) maskiert. Folge: Timer und
+/// Tastatur feuern am PIC, aber die CPU bekommt NIE etwas davon mit.
+/// Bis SpeedOS echtes APIC lernt (nötig für SMP und den präzisen
+/// APIC-Timer), ist der abgeschaltete LAPIC die ehrliche Konfiguration
+/// zu unserem 8259-Design.
+pub fn lapic_deaktivieren() {
+    use x86_64::registers::model_specific::Msr;
+
+    /// Das Model-Specific Register, das den LAPIC steuert.
+    const IA32_APIC_BASE: u32 = 0x1B;
+    let mut msr = Msr::new(IA32_APIC_BASE);
+    // unsafe (MSR-Zugriff): Bit 11 = "APIC Global Enable". Wir löschen
+    // nur dieses eine Bit und lassen den Rest (Basisadresse) unberührt.
+    unsafe {
+        let wert = msr.read();
+        msr.write(wert & !(1 << 11));
+    }
+}
+
+/// Programmiert den PIT (Programmable Interval Timer, Kanal 0) auf
+/// ~18,2 Interrupts pro Sekunde (Teiler 65536, Rate-Generator-Modus).
+///
+/// Lektion aus der bootloader-0.11-Migration: Unter klassischem BIOS
+/// hatte die Firmware den PIT immer schon so eingestellt — unter UEFI
+/// tut das NIEMAND für uns. Ohne diese Initialisierung feuert IRQ 0
+/// nie, und alles, was auf Timer-Ticks wartet (zeit.rs, hlt-Aufwachen,
+/// Executor-Notfallpfad), steht still. Ein OS stellt seine Uhr selbst!
+pub fn pit_initialisieren() {
+    use x86_64::instructions::port::Port;
+
+    let mut kommando: Port<u8> = Port::new(0x43);
+    let mut kanal_0: Port<u8> = Port::new(0x40);
+    // unsafe (Port-I/O): Standard-PIT-Ports; die Werte sind die seit
+    // 1981 dokumentierte Konfiguration (Kanal 0, Low/High-Byte,
+    // Modus 2 = Rate-Generator, binär).
+    unsafe {
+        kommando.write(0b0011_0100);
+        kanal_0.write(0x00); // Teiler Low-Byte  (0x0000 = 65536)
+        kanal_0.write(0x00); // Teiler High-Byte
+    }
+}
+
 lazy_static! {
     /// Die IDT muss so lange leben, wie der Kernel läuft, denn die CPU
     /// greift bei jeder Exception darauf zu — deshalb `static` über

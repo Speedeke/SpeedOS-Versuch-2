@@ -9,15 +9,17 @@ name = "speed_os"
 version = "0.1.0"
 edition = "2021"
 
+# Das boot/-Verzeichnis ist ein eigenständiges HOST-Programm (baut das
+# Disk-Image und startet QEMU) — es gehört nicht zu unserem Kernel-
+# Workspace, sonst würde cargo es fürs Bare-Metal-Target mitbauen.
+[workspace]
+exclude = ["boot"]
+
 [dependencies]
-# Der Bootloader: schaltet die CPU in den 64-Bit-Modus und springt
-# dann in unsere _start-Funktion. Version 0.9.x, wie im Buch
-# "Writing an OS in Rust" von Philipp Oppermann.
-# Feature "map_physical_memory": Der Bootloader mappt den KOMPLETTEN
-# physischen Speicher an eine hohe virtuelle Adresse und teilt uns
-# diese über boot_info.physical_memory_offset mit — die Grundlage
-# unserer Speicherverwaltung.
-bootloader = { version = "0.9", features = ["map_physical_memory"] }
+# Die Kernel-Seite des Bootloaders (seit 0.11 aufgeteilt):
+# bootloader_api liefert entry_point!, BootInfo und die Config —
+# das Disk-Image baut das separate Host-Programm in boot/.
+bootloader_api = "0.11"
 
 # "volatile" verhindert, dass der Compiler unsere Schreibzugriffe auf den
 # VGA-Speicher wegoptimiert (er sieht ja nicht, dass die Hardware mitliest).
@@ -73,25 +75,8 @@ fixed-block-allocator = []
 version = "1.0"
 features = ["spin_no_std"]
 
-# Konfiguration für das bootimage-Tool
-[package.metadata.bootimage]
-# Bei `cargo run`: serielle Ausgabe (COM1) ins Terminal umleiten,
-# damit wir die Debug-Ausgaben direkt sehen.
-run-args = ["-serial", "stdio"]
-
-# Bei `cargo test`: zusätzlich das isa-debug-exit-Device einbinden,
-# über das der Kernel QEMU mit einem Exit-Code beenden kann.
-# Kein Fenster nötig (-display none), Ausgabe nur seriell.
-test-args = [
-    "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
-    "-serial", "stdio",
-    "-display", "none",
-]
-# QEMU berechnet den Exit-Code als (wert << 1) | 1.
-# Unser Erfolgs-Wert 0x10 ergibt also (0x10 << 1) | 1 = 33.
-test-success-exit-code = 33
-# Sicherheitsnetz: Test nach 5 Minuten abbrechen, falls er hängt.
-test-timeout = 300
+# (QEMU-Start und Test-Exit-Codes regelt jetzt der Runner in boot/ —
+#  die frühere [package.metadata.bootimage]-Sektion ist Geschichte.)
 
 # Der Stack-Overflow-Test braucht kein Test-Framework (harness):
 # Er besteht aus einem einzigen Ablauf mit eigener Test-IDT.

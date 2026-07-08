@@ -1,0 +1,24 @@
+# boot/Cargo.toml — Das Host-Programm, das bootimage ersetzt.
+#
+# Läuft auf WINDOWS (nicht im Kernel!): baut aus dem Kernel-ELF ein
+# bootfähiges BIOS-Disk-Image und startet QEMU damit. cargo ruft es
+# als "runner" auf (siehe ../.cargo/config.toml).
+
+[package]
+name = "boot"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Die Host-Seite des Bootloader-Projekts (nur UEFI!).
+# Warum kein BIOS-Feature: Die publizierten BIOS-Stages von 0.11.15
+# haben Target-JSONs mit dem alten "rustc-abi: x86-softfloat" und
+# kompilieren auf aktuellem Nightly nicht mehr. Die UEFI-Stage nutzt
+# das EINGEBAUTE Target x86_64-unknown-uefi — kein solches Problem.
+# QEMU bootet UEFI über die mitgelieferte edk2-Firmware (OVMF).
+bootloader = { version = "0.11", default-features = false, features = ["uefi"] }
+# Für die BootConfig-Details (LevelFilter fürs Boot-Logging).
+bootloader-boot-config = "0.11"
+
+# Eigenständiger Workspace — gehört bewusst NICHT zum Kernel-Workspace.
+[workspace]

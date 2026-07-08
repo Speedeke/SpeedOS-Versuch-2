@@ -10,22 +10,24 @@
 #![test_runner(speed_os::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 
-use bootloader::{entry_point, BootInfo};
+use bootloader_api::{entry_point, BootInfo};
 use core::panic::PanicInfo;
 use speed_os::memory;
-use x86_64::structures::paging::{Page, PhysFrame};
+use x86_64::structures::paging::Page;
 use x86_64::{PhysAddr, VirtAddr};
 
-entry_point!(main);
+entry_point!(main, config = &speed_os::BOOTLOADER_CONFIG);
 
-fn main(boot_info: &'static BootInfo) -> ! {
+fn main(boot_info: &'static mut BootInfo) -> ! {
     speed_os::init();
+    let boot_info: &'static BootInfo = boot_info;
     // Die globale Speicherverwaltung ist alles, was diese Tests brauchen
     // (kein Heap nötig — die memory-API alloziert selbst nichts).
-    memory::init(
-        VirtAddr::new(boot_info.physical_memory_offset),
-        &boot_info.memory_map,
-    );
+    let offset = boot_info
+        .physical_memory_offset
+        .into_option()
+        .expect("kein Physik-Mapping");
+    memory::init(VirtAddr::new(offset), &boot_info.memory_regions);
 
     test_main();
     speed_os::hlt_loop();
@@ -34,14 +36,6 @@ fn main(boot_info: &'static BootInfo) -> ! {
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     speed_os::test_panic_handler(info)
-}
-
-/// Der VGA-Puffer ist vom Bootloader identisch gemappt (identity
-/// mapping): virtuell 0xb8000 muss physisch 0xb8000 ergeben.
-#[test_case]
-fn vga_puffer_ist_identisch_gemappt() {
-    let phys = memory::uebersetzen(VirtAddr::new(0xb8000));
-    assert_eq!(phys, Some(PhysAddr::new(0xb8000)));
 }
 
 /// Das Komplett-Mapping des physischen Speichers: virtuelle Adresse
@@ -59,18 +53,18 @@ fn ungemappte_adresse_hat_keine_uebersetzung() {
     assert_eq!(phys, None);
 }
 
-/// map_page_zu auf einen bestimmten Frame (wie später beim
-/// Framebuffer): Die Übersetzung muss exakt dorthin zeigen.
+/// map_page_zu auf einen bestimmten Frame (wie beim Framebuffer/MMIO):
+/// Die Übersetzung muss exakt auf diesen Frame zeigen.
 #[test_case]
 fn map_page_zu_wird_korrekt_uebersetzt() {
     let page = Page::containing_address(VirtAddr::new(0x_5555_5555_0000));
-    let vga_frame = PhysFrame::containing_address(PhysAddr::new(0xb8000));
-    // unsafe: Der VGA-Frame ist Hardware-Speicher — das Doppel-Mapping
-    // ist gewollt und ungefährlich (kein Rust-Objekt lebt dort).
-    unsafe { memory::map_page_zu(page, vga_frame).unwrap() };
+    // Einen konkreten Frame besorgen und die Page GENAU dorthin mappen:
+    let frame = memory::frame_allozieren().expect("kein freier Frame");
+    // unsafe: Der Frame kommt exklusiv aus dem Allocator — kein Aliasing.
+    unsafe { memory::map_page_zu(page, frame).unwrap() };
 
     let phys = memory::uebersetzen(page.start_address());
-    assert_eq!(phys, Some(PhysAddr::new(0xb8000)));
+    assert_eq!(phys, Some(frame.start_address()));
 }
 
 /// map_page + Schreiben/Lesen + unmap_page: der volle Lebenszyklus

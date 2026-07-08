@@ -8,7 +8,7 @@
 // help, Dispatcher und Fehlermeldungen funktionieren dann automatisch.
 
 use crate::fs::{self, FsFehler, NodeTyp};
-use crate::vga_buffer::{self, Color};
+use crate::konsole::{self, Color};
 use crate::{allocator, print, println};
 use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
 
@@ -72,9 +72,9 @@ pub fn alle_befehle() -> Vec<Box<dyn Befehl>> {
 
 /// Gibt einen Dateisystem-Fehler rot und auf Deutsch aus.
 fn fs_fehler_ausgeben(fehler: FsFehler) {
-    vga_buffer::set_color(Color::LightRed, Color::Black);
+    konsole::set_color(Color::LightRed, Color::Black);
     println!("Fehler: {}", fehler.meldung());
-    vga_buffer::set_color(Color::LightGray, Color::Black);
+    konsole::set_color(Color::LightGray, Color::Black);
 }
 
 // ---------------------------------------------------------------------------
@@ -92,9 +92,9 @@ impl Befehl for Help {
     fn ausfuehren(&self, _argumente: &str, _kontext: &mut ShellKontext, registry: &[Box<dyn Befehl>]) {
         println!("Verfuegbare Befehle:");
         for befehl in registry {
-            vga_buffer::set_color(Color::LightCyan, Color::Black);
+            konsole::set_color(Color::LightCyan, Color::Black);
             print!("  {:<10}", befehl.name());
-            vga_buffer::set_color(Color::LightGray, Color::Black);
+            konsole::set_color(Color::LightGray, Color::Black);
             println!("{}", befehl.beschreibung());
         }
     }
@@ -126,7 +126,7 @@ impl Befehl for Clear {
         "Leert den Bildschirm"
     }
     fn ausfuehren(&self, _argumente: &str, _kontext: &mut ShellKontext, _registry: &[Box<dyn Befehl>]) {
-        vga_buffer::clear_screen();
+        konsole::clear_screen();
     }
 }
 
@@ -203,11 +203,11 @@ impl Befehl for Version {
         "Zeigt die SpeedOS-Version"
     }
     fn ausfuehren(&self, _argumente: &str, _kontext: &mut ShellKontext, _registry: &[Box<dyn Befehl>]) {
-        vga_buffer::set_color(Color::Yellow, Color::Black);
+        konsole::set_color(Color::Yellow, Color::Black);
         println!("SpeedOS v{}", env!("CARGO_PKG_VERSION"));
-        vga_buffer::set_color(Color::LightGray, Color::Black);
+        konsole::set_color(Color::LightGray, Color::Black);
         println!("  Ein Betriebssystem from scratch in Rust (nightly, no_std)");
-        println!("  Architektur: x86_64  |  Bootloader: bootloader 0.9");
+        println!("  Architektur: x86_64  |  Bootloader: bootloader 0.11 (Framebuffer!)");
         println!("  Multitasking: kooperativ (async/await)");
     }
 }
@@ -245,9 +245,9 @@ impl Befehl for Farbtest {
         for (nr, (farbe, name)) in farben.iter().enumerate() {
             // Farbblock in der Farbe selbst, Name daneben in Grau
             // (sonst wäre "Schwarz" komplett unsichtbar).
-            vga_buffer::set_color(*farbe, Color::Black);
+            konsole::set_color(*farbe, Color::Black);
             print!("██");
-            vga_buffer::set_color(Color::LightGray, Color::Black);
+            konsole::set_color(Color::LightGray, Color::Black);
             print!(" {:<13}", name);
             if (nr + 1) % 4 == 0 {
                 println!();
@@ -316,18 +316,18 @@ impl Befehl for Dir {
                     match e.typ {
                         NodeTyp::Verzeichnis => {
                             verzeichnisse += 1;
-                            vga_buffer::set_color(Color::LightCyan, Color::Black);
+                            konsole::set_color(Color::LightCyan, Color::Black);
                             println!("    <DIR>           {}", e.name);
                         }
                         NodeTyp::Datei => {
                             dateien += 1;
                             bytes += e.groesse;
-                            vga_buffer::set_color(Color::LightGray, Color::Black);
+                            konsole::set_color(Color::LightGray, Color::Black);
                             println!("    {:>9} Bytes  {}", e.groesse, e.name);
                         }
                     }
                 }
-                vga_buffer::set_color(Color::LightGray, Color::Black);
+                konsole::set_color(Color::LightGray, Color::Black);
                 println!();
                 println!(
                     "    {} Datei(en), {} Bytes  |  {} Verzeichnis(se)",
@@ -550,9 +550,9 @@ fn baum_zeichnen(pfad: &str, einrueckung: &str) {
         let ast = if letzter { "└─" } else { "├─" };
         match eintrag.typ {
             NodeTyp::Verzeichnis => {
-                vga_buffer::set_color(Color::LightCyan, Color::Black);
+                konsole::set_color(Color::LightCyan, Color::Black);
                 println!("{}{}{}", einrueckung, ast, eintrag.name);
-                vga_buffer::set_color(Color::LightGray, Color::Black);
+                konsole::set_color(Color::LightGray, Color::Black);
                 let kind_pfad = if pfad == "/" {
                     format!("/{}", eintrag.name)
                 } else {

@@ -51,23 +51,25 @@ lazy_static! {
 /// in die CPU-Register zu schreiben.
 struct Selectors {
     code_selector: SegmentSelector,
+    data_selector: SegmentSelector,
     tss_selector: SegmentSelector,
 }
 
 lazy_static! {
-    /// Unsere GDT: ein Code-Segment für den Kernel + das TSS.
+    /// Unsere GDT: Code- und Daten-Segment für den Kernel + das TSS.
     static ref GDT: (GlobalDescriptorTable, Selectors) = {
         let mut gdt = GlobalDescriptorTable::new();
         let code_selector = gdt.add_entry(Descriptor::kernel_code_segment());
+        let data_selector = gdt.add_entry(Descriptor::kernel_data_segment());
         let tss_selector = gdt.add_entry(Descriptor::tss_segment(&TSS));
-        (gdt, Selectors { code_selector, tss_selector })
+        (gdt, Selectors { code_selector, data_selector, tss_selector })
     };
 }
 
 /// Lädt GDT und TSS in die CPU. Muss beim Boot VOR der IDT
 /// initialisiert werden (die IDT verweist auf den IST-Eintrag).
 pub fn init() {
-    use x86_64::instructions::segmentation::{Segment, CS};
+    use x86_64::instructions::segmentation::{Segment, CS, DS, ES, SS};
     use x86_64::instructions::tables::load_tss;
 
     GDT.0.load();
@@ -78,6 +80,16 @@ pub fn init() {
         // Code-Segment-Register neu laden, damit es auf UNSERE GDT zeigt
         // (bis hierhin zeigte es noch auf die GDT des Bootloaders).
         CS::set_reg(GDT.1.code_selector);
+        // WICHTIG (Lektion aus der bootloader-0.11-Migration): Auch
+        // SS/DS/ES neu laden! Der Bootloader hinterlässt dort Selektoren
+        // aus SEINER GDT — in unserer zeigen dieselben Nummern auf ganz
+        // andere Einträge (0x10 wäre unser TSS!). Im 64-Bit-Modus fällt
+        // das im Normalbetrieb nicht auf, aber `iretq` VALIDIERT das
+        // gepoppte SS streng: veraltetes SS -> #GP -> Double Fault bei
+        // der allerersten Exception-Rückkehr.
+        SS::set_reg(GDT.1.data_selector);
+        DS::set_reg(GDT.1.data_selector);
+        ES::set_reg(GDT.1.data_selector);
         // Der CPU sagen, wo unser TSS liegt.
         load_tss(GDT.1.tss_selector);
     }

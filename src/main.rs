@@ -3,10 +3,16 @@
 // Diese Datei ist das, was nach dem Bootloader als Erstes läuft.
 // Es gibt kein Betriebssystem unter uns — nur wir und die CPU.
 //
+// Seit der Migration auf bootloader 0.11 booten wir in einen
+// GRAFIKMODUS: Der Bootloader richtet per VESA einen linearen
+// Framebuffer ein und übergibt ihn uns in der BootInfo. Text läuft
+// übergangsweise nur über die serielle Schnittstelle (siehe konsole.rs),
+// bis der Framebuffer-Text-Renderer gebaut ist.
+//
 // Ablauf beim Booten:
-//   BIOS -> Bootloader (bootloader-Crate) -> kernel_main (hier!)
-//   -> CPU-Strukturen (GDT/IDT/PIC) -> Paging -> Heap
-//   -> Executor startet die SpeedShell
+//   BIOS -> bootloader (Stage 1-4) -> kernel_main (hier!)
+//   -> CPU-Strukturen (GDT/IDT/PIC) -> Speicher -> Heap -> Dateisystem
+//   -> Framebuffer-Demo -> Executor startet die SpeedShell (seriell)
 
 #![no_std] // Keine Standardbibliothek — es gibt ja noch kein OS, das sie tragen könnte
 #![no_main] // Kein normales main(): Der Bootloader springt direkt zu unserem Entry Point
@@ -16,57 +22,105 @@
 
 extern crate alloc;
 
-use bootloader::{entry_point, BootInfo};
+use bootloader_api::info::PixelFormat;
+use bootloader_api::{entry_point, BootInfo};
 use core::panic::PanicInfo;
 use speed_os::task::{executor::Executor, Task};
 use speed_os::{allocator, memory, serial_println, shell};
 use x86_64::VirtAddr;
 
-// Das entry_point!-Makro erzeugt die echte _start-Funktion für uns und
-// ruft dann unser kernel_main auf — mit zur Compile-Zeit geprüfter
-// Signatur (BootInfo!).
-entry_point!(kernel_main);
+// Das entry_point!-Makro erzeugt die echte _start-Funktion und prüft
+// die Signatur zur Compile-Zeit; die Config wird in eine spezielle
+// ELF-Sektion serialisiert, aus der der Bootloader sie liest.
+// (Die Framebuffer-Mindestauflösung 1280x720 wird seit bootloader
+// 0.11.x NICHT hier, sondern beim Image-Bau konfiguriert — siehe
+// boot/src/main.rs, BootConfig.)
+entry_point!(kernel_main, config = &speed_os::BOOTLOADER_CONFIG);
 
 /// Der eigentliche Kernel-Einstieg. Rückgabetyp `!`: kehrt nie zurück.
-fn kernel_main(boot_info: &'static BootInfo) -> ! {
+fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // 1. CPU-Strukturen: GDT, TSS, IDT laden, PIC scharf schalten.
-    //    Ab jetzt werden Exceptions gemeldet statt neu zu booten,
-    //    und Timer + Tastatur melden sich per Interrupt.
     speed_os::init();
+    serial_println!("[BOOT] SpeedOS startet (bootloader_api 0.11) ...");
 
-    // 2. Speicherverwaltung: globaler Mapper + Bitmap-Frame-Allocator
-    //    (memory::init), dann den Heap mappen. Danach kann JEDES Modul
-    //    zur Laufzeit Pages mappen, und Box, Vec, String & Co. laufen.
-    let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
-    memory::init(phys_mem_offset, &boot_info.memory_map);
+    // 2. Den Framebuffer aus der BootInfo HERAUSNEHMEN (take), bevor
+    //    wir die BootInfo zu &'static abwerten — sonst Borrow-Konflikt.
+    let framebuffer = boot_info.framebuffer.take();
+    let boot_info: &'static BootInfo = boot_info;
+
+    // 3. Speicherverwaltung: globaler Mapper + Bitmap-Frame-Allocator,
+    //    dann Heap. Danach funktionieren Box, Vec, String & Co.
+    let phys_mem_offset = boot_info
+        .physical_memory_offset
+        .into_option()
+        .expect("Bootloader hat kein Physik-Mapping angelegt");
+    memory::init(VirtAddr::new(phys_mem_offset), &boot_info.memory_regions);
     allocator::init_heap().expect("Heap-Initialisierung fehlgeschlagen");
 
-    // 3. Dateisystem: RamFs als Wurzel mounten (mit Demo-Dateien).
+    // 4. Dateisystem: RamFs als Wurzel mounten (mit Demo-Dateien).
     speed_os::fs::init();
 
-    serial_println!("[DEBUG] GDT/IDT/PIC, Paging, Heap und RamFs initialisiert. Starte SpeedShell.");
+    // 5. Framebuffer-Beweis: komplett mit SpeedOS-Blau füllen und
+    //    die Eckdaten seriell ausgeben. (Text darauf: nächster Schritt!)
+    match framebuffer {
+        Some(mut framebuffer) => {
+            let info = framebuffer.info();
+            serial_println!(
+                "[FB] Linearer Framebuffer: {}x{} Pixel, Format {:?}, {} Bytes/Pixel, Stride {} Pixel, Puffer {} KiB",
+                info.width,
+                info.height,
+                info.pixel_format,
+                info.bytes_per_pixel,
+                info.stride,
+                info.byte_len / 1024
+            );
+
+            // SpeedOS-Blau (das Banner-Blau): R=0, G=40, B=160.
+            let (r, g, b) = (0u8, 40u8, 160u8);
+            let bytes_pro_pixel = info.bytes_per_pixel;
+            for pixel in framebuffer.buffer_mut().chunks_exact_mut(bytes_pro_pixel) {
+                match info.pixel_format {
+                    PixelFormat::Rgb => {
+                        pixel[0] = r;
+                        pixel[1] = g;
+                        pixel[2] = b;
+                    }
+                    PixelFormat::Bgr => {
+                        pixel[0] = b;
+                        pixel[1] = g;
+                        pixel[2] = r;
+                    }
+                    // Graustufen oder Unbekanntes: mittleres Grau.
+                    _ => pixel.fill(0x60),
+                }
+            }
+            serial_println!("[FB] Framebuffer mit SpeedOS-Blau gefuellt.");
+        }
+        None => serial_println!("[FB] WARNUNG: Bootloader hat KEINEN Framebuffer uebergeben!"),
+    }
+
+    serial_println!("[BOOT] GDT/IDT/PIC, Speicher, Heap und RamFs initialisiert.");
+    serial_println!("[BOOT] Shell-Eingabe: im QEMU-Fenster tippen, Ausgabe HIER im Terminal.");
 
     // Im Testmodus (cargo test) stattdessen die Tests ausführen.
     #[cfg(test)]
     test_main();
 
-    // 4. Der Executor übernimmt als Hauptschleife des Kernels und
-    //    startet die SpeedShell — SpeedOS ist jetzt interaktiv!
-    //    (Die Shell liest die Tastatur über den async KeyStream;
-    //    ist nichts zu tun, schläft die CPU per hlt.)
+    // 6. Der Executor übernimmt als Hauptschleife und startet die
+    //    SpeedShell — Ausgabe übergangsweise über die serielle Konsole.
     let mut executor = Executor::new();
     executor.spawn(Task::new(shell::run()));
     executor.run();
 }
 
-/// Panic-Handler für den normalen Betrieb: Meldung in Rot auf VGA
-/// (und automatisch auch seriell), dann anhalten.
+/// Panic-Handler für den normalen Betrieb: Meldung in Rot (ANSI) über
+/// die serielle Konsole, dann anhalten.
 #[cfg(not(test))]
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    use speed_os::vga_buffer::{self, Color};
+    use speed_os::konsole::{self, Color};
 
-    vga_buffer::set_color(Color::LightRed, Color::Black);
+    konsole::set_color(Color::LightRed, Color::Black);
     speed_os::println!("KERNEL PANIC: {}", info);
     speed_os::hlt_loop();
 }
