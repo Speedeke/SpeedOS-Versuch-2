@@ -3,3 +3,5 @@
 # Build-Artefakte von cargo (kompilierte Dateien, Boot-Images) —
 # lassen sich jederzeit mit `cargo build` neu erzeugen.
 /target
+# ... auch die des boot/-Runners (eigenständiger Workspace):
+/boot/target

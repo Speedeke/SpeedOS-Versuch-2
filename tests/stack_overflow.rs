@@ -17,15 +17,15 @@
 #![no_main]
 #![feature(abi_x86_interrupt)]
 
-use bootloader::{entry_point, BootInfo};
+use bootloader_api::{entry_point, BootInfo};
 use core::panic::PanicInfo;
 use lazy_static::lazy_static;
 use speed_os::{exit_qemu, serial_print, serial_println, QemuExitCode};
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
 
-entry_point!(main);
+entry_point!(main, config = &speed_os::BOOTLOADER_CONFIG);
 
-fn main(_boot_info: &'static BootInfo) -> ! {
+fn main(_boot_info: &'static mut BootInfo) -> ! {
     serial_print!("stack_overflow::stack_overflow...\t");
 
     // GDT + TSS laden (stellt den Notfall-Stack bereit) ...

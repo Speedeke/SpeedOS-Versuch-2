@@ -14,7 +14,7 @@ pub mod editor;
 
 use crate::fs::{self, NodeTyp};
 use crate::task::keyboard::KeyStream;
-use crate::vga_buffer::{self, Color};
+use crate::konsole::{self, Color};
 use crate::{print, println};
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -38,7 +38,7 @@ pub async fn run() {
     banner();
     // Blinkenden Hardware-Cursor einschalten — ab jetzt sieht man,
     // wo die nächste Eingabe landet.
-    vga_buffer::cursor_aktivieren();
+    konsole::cursor_aktivieren();
 
     let registry = befehle::alle_befehle();
     let mut keys = KeyStream::new();
@@ -124,9 +124,9 @@ pub fn befehl_ausfuehren(registry: &[Box<dyn Befehl>], kontext: &mut ShellKontex
     match registry.iter().find(|b| b.name() == name) {
         Some(befehl) => befehl.ausfuehren(argumente.trim(), kontext, registry),
         None => {
-            vga_buffer::set_color(Color::LightRed, Color::Black);
+            konsole::set_color(Color::LightRed, Color::Black);
             println!("Unbekannter Befehl: '{}'", name);
-            vga_buffer::set_color(Color::LightGray, Color::Black);
+            konsole::set_color(Color::LightGray, Color::Black);
             println!("Tippe 'help', um alle verfuegbaren Befehle zu sehen.");
         }
     }
@@ -135,15 +135,15 @@ pub fn befehl_ausfuehren(registry: &[Box<dyn Befehl>], kontext: &mut ShellKontex
 /// Gibt den Eingabe-Prompt aus — mit dem aktuellen Verzeichnis,
 /// wie man es von cmd kennt (C:\> ... bei uns: SpeedOS:/system>).
 fn prompt(kontext: &ShellKontext) {
-    vga_buffer::set_color(Color::LightGreen, Color::Black);
+    konsole::set_color(Color::LightGreen, Color::Black);
     print!("SpeedOS:{}> ", kontext.aktuelles_verzeichnis);
-    vga_buffer::set_color(Color::LightGray, Color::Black);
+    konsole::set_color(Color::LightGray, Color::Black);
 }
 
 /// Das farbige SpeedOS-Banner beim Start der Shell.
 fn banner() {
-    vga_buffer::clear_screen();
-    vga_buffer::set_color(Color::Yellow, Color::Blue);
+    konsole::clear_screen();
+    konsole::set_color(Color::Yellow, Color::Blue);
     println!("{:<60}", "");
     println!("{:<60}", "    ____                      _  ___  ____");
     println!("{:<60}", "   / ___| _ __   ___  ___  __| |/ _ \\/ ___|");
@@ -152,12 +152,12 @@ fn banner() {
     println!("{:<60}", "   |____/| .__/ \\___|\\___|\\__,_|\\___/|____/");
     println!("{:<60}", "         |_|      v0.1  -  ein OS in Rust");
     println!("{:<60}", "");
-    vga_buffer::set_color(Color::LightCyan, Color::Black);
+    konsole::set_color(Color::LightCyan, Color::Black);
     println!();
     println!("Willkommen in der SpeedShell!");
     println!("Tippe 'help' fuer alle Befehle. Pfeil hoch/runter = Verlauf.");
     println!();
-    vga_buffer::set_color(Color::LightGray, Color::Black);
+    konsole::set_color(Color::LightGray, Color::Black);
 }
 
 // ---------------------------------------------------------------------------

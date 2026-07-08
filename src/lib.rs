@@ -32,12 +32,23 @@ pub mod allocator;
 pub mod fs;
 pub mod gdt;
 pub mod interrupts;
+pub mod konsole;
 pub mod memory;
 pub mod serial;
 pub mod shell;
 pub mod task;
-pub mod vga_buffer;
 pub mod zeit;
+
+/// Die gemeinsame Bootloader-Konfiguration für den Kernel und alle
+/// Test-Kernel: Der Bootloader soll den kompletten physischen Speicher
+/// an eine (von ihm gewählte) virtuelle Adresse mappen — die Grundlage
+/// unserer Speicherverwaltung (boot_info.physical_memory_offset).
+/// main.rs erweitert diese Config zusätzlich um Framebuffer-Wünsche.
+pub static BOOTLOADER_CONFIG: bootloader_api::BootloaderConfig = {
+    let mut config = bootloader_api::BootloaderConfig::new_default();
+    config.mappings.physical_memory = Some(bootloader_api::config::Mapping::Dynamic);
+    config
+};
 
 /// Wird aufgerufen, wenn eine Allokation fehlschlägt (Heap voll).
 /// Mehr als kontrolliert panicken können wir dann nicht — aber die
@@ -56,9 +67,25 @@ fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
 pub fn init() {
     gdt::init();
     interrupts::init_idt();
+    // UEFI-Erbe wegräumen: LAPIC aus, sonst erreichen die PIC-
+    // Interrupts die CPU nicht (siehe Kommentar an der Funktion).
+    interrupts::lapic_deaktivieren();
     // `unsafe`: Der PIC ist falsch konfiguriert gefährlich —
     // unsere Offsets (32/40) sind die bewährte Standard-Wahl.
     unsafe { interrupts::PICS.lock().initialize() };
+    // ZWEITE UEFI-Lektion: initialize() stellt die VORHERIGEN
+    // IRQ-Masken wieder her. Das klassische BIOS ließ Timer und
+    // Tastatur offen — OVMF maskiert ALLES (0xFF). Deshalb explizit
+    // freischalten: IRQ 0 (Timer), 1 (Tastatur), 2 (Kaskade zum
+    // zweiten PIC); alles andere bleibt aus (Bit = 1 heißt maskiert).
+    unsafe {
+        interrupts::PICS
+            .lock()
+            .write_masks(0b1111_1000, 0b1111_1111)
+    };
+    // Den Timer selbst programmieren (unter UEFI macht das sonst
+    // niemand — siehe Kommentar an pit_initialisieren).
+    interrupts::pit_initialisieren();
     // Interrupts auf der CPU aktivieren (sti-Befehl):
     // Ab jetzt können Timer und Tastatur jederzeit "dazwischenfunken".
     x86_64::instructions::interrupts::enable();
@@ -67,22 +94,22 @@ pub fn init() {
 // ---------------------------------------------------------------------------
 // Die zentralen Ausgabe-Makros print! und println!
 //
-// Projektregel: Ausgaben gehen IMMER auf VGA UND die serielle
-// Schnittstelle gleichzeitig — niemals nur VGA. Deshalb leben die
-// Makros hier in lib.rs und rufen beide Treiber auf, statt in einem
-// der Treiber-Module (die bleiben so voneinander isoliert).
-// Für reine Debug-Ausgaben ohne Bildschirm gibt es serial_println!.
+// ÜBERGANGSZUSTAND seit der bootloader-0.11-Migration: Der VGA-
+// Textmodus ist Geschichte (wir booten in einen Grafikmodus). Bis der
+// Framebuffer-Text-Renderer steht, gehen print!/println! NUR über die
+// serielle Schnittstelle — danach wieder doppelt (Framebuffer + seriell).
+// serial_println! bleibt für reine Debug-Ausgaben reserviert.
 // ---------------------------------------------------------------------------
 
-/// Interne Hilfsfunktion der Makros: schreibt auf beide Kanäle.
-/// `fmt::Arguments` ist Copy, daher können wir es zweimal übergeben.
+/// Interne Hilfsfunktion der Makros.
+/// (Übergangsweise identisch mit serial::_print — die Naht bleibt,
+/// damit der Framebuffer-Renderer hier später nur eingehängt wird.)
 #[doc(hidden)]
 pub fn _print(args: core::fmt::Arguments) {
-    vga_buffer::_print(args);
     serial::_print(args);
 }
 
-/// Gibt formatierten Text auf VGA UND seriell aus (wie print! in normalem Rust).
+/// Gibt formatierten Text aus (übergangsweise nur seriell, s. o.).
 #[macro_export]
 macro_rules! print {
     ($($arg:tt)*) => ($crate::_print(format_args!($($arg)*)));
@@ -176,18 +203,24 @@ pub fn test_panic_handler(info: &PanicInfo) -> ! {
 // Startfunktion zur Compile-Zeit — so kann man die BootInfo-Struktur
 // gar nicht erst falsch entgegennehmen.
 #[cfg(test)]
-bootloader::entry_point!(test_kernel_main);
+bootloader_api::entry_point!(test_kernel_main, config = &BOOTLOADER_CONFIG);
 
 #[cfg(test)]
-fn test_kernel_main(boot_info: &'static bootloader::BootInfo) -> ! {
+fn test_kernel_main(boot_info: &'static mut bootloader_api::BootInfo) -> ! {
     use x86_64::VirtAddr;
 
     init(); // GDT + IDT laden, damit Exception-Tests funktionieren
 
+    // &'static mut zu &'static abwerten — wir brauchen nur Lese-Zugriff.
+    let boot_info: &'static bootloader_api::BootInfo = boot_info;
+
     // Auch Speicherverwaltung + Heap aufsetzen — die Shell-Tests
     // brauchen Box & Vec, die memory-Tests die globale API.
-    let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
-    memory::init(phys_mem_offset, &boot_info.memory_map);
+    let phys_mem_offset = boot_info
+        .physical_memory_offset
+        .into_option()
+        .expect("Bootloader hat kein Physik-Mapping angelegt");
+    memory::init(VirtAddr::new(phys_mem_offset), &boot_info.memory_regions);
     allocator::init_heap().expect("Heap-Initialisierung fehlgeschlagen");
 
     // Dateisystem mounten — die fs- und Shell-Tests brauchen es.

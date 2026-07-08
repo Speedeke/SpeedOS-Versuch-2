@@ -19,7 +19,7 @@
 // Grundlagen-Erklärung zu Paging: siehe Kommentar-Block in der
 // Git-Historie (Speicherverwaltung Teil 1) bzw. README.
 
-use bootloader::bootinfo::{MemoryMap, MemoryRegionType};
+use bootloader_api::info::{MemoryRegion, MemoryRegionKind, MemoryRegions};
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use spin::Mutex;
 use x86_64::{
@@ -58,8 +58,8 @@ static NAECHSTE_VIRT_ADRESSE: AtomicUsize = AtomicUsize::new(KERNEL_ALLOC_START)
 /// # Safety-Anmerkung (Funktion ist trotzdem safe aufrufbar):
 /// Die Korrektheit stützt sich darauf, dass boot_info vom Bootloader
 /// stammt: physical_memory_offset zeigt wirklich auf das Komplett-
-/// Mapping, und die Memory Map beschreibt den RAM korrekt.
-pub fn init(physical_memory_offset: VirtAddr, memory_map: &'static MemoryMap) {
+/// Mapping, und die Memory Regions beschreiben den RAM korrekt.
+pub fn init(physical_memory_offset: VirtAddr, memory_regions: &'static MemoryRegions) {
     PHYS_OFFSET.store(physical_memory_offset.as_u64(), Ordering::Relaxed);
 
     // unsafe: Wir lesen CR3 und erzeugen die einzige &mut-Referenz auf
@@ -71,7 +71,7 @@ pub fn init(physical_memory_offset: VirtAddr, memory_map: &'static MemoryMap) {
 
     // unsafe: neu() nimmt die exklusive Referenz auf die statische
     // Bitmap — auch das passiert nur bei diesem einen init-Aufruf.
-    let frame_allocator = unsafe { BitmapFrameAllocator::neu(memory_map) };
+    let frame_allocator = unsafe { BitmapFrameAllocator::neu(memory_regions) };
 
     *MAPPER.lock() = Some(mapper);
     *FRAME_ALLOCATOR.lock() = Some(frame_allocator);
@@ -260,15 +260,15 @@ pub struct BitmapFrameAllocator {
 }
 
 impl BitmapFrameAllocator {
-    /// Baut den Allocator aus der Memory Map des Bootloaders:
+    /// Baut den Allocator aus den Memory Regions des Bootloaders:
     /// alle "Usable"-Frames werden als frei markiert, alles andere
     /// (Kernel, Bootloader, Hardware-Löcher) bleibt belegt.
     ///
     /// # Safety
     ///
     /// Nur EINMAL aufrufen: nimmt die exklusive Referenz auf die
-    /// statische Bitmap. Und die Memory Map muss korrekt sein.
-    unsafe fn neu(memory_map: &'static MemoryMap) -> Self {
+    /// statische Bitmap. Und die Memory Regions müssen korrekt sein.
+    unsafe fn neu(memory_regions: &'static [MemoryRegion]) -> Self {
         // Die Bitmap lebt als static im BSS-Segment (32 KiB) — sie
         // kann nicht auf dem Heap liegen, denn sie existiert BEVOR
         // es einen Heap gibt (der Heap braucht ja diesen Allocator!).
@@ -282,12 +282,12 @@ impl BitmapFrameAllocator {
         let mut frames_gesamt = 0;
         let mut frames_frei = 0;
 
-        for region in memory_map.iter() {
-            let start_frame = (region.range.start_addr() / 4096) as usize;
-            let end_frame = (region.range.end_addr() / 4096) as usize;
+        for region in memory_regions.iter() {
+            let start_frame = (region.start / 4096) as usize;
+            let end_frame = (region.end / 4096) as usize;
             for index in start_frame..end_frame.min(MAX_FRAMES) {
                 frames_gesamt = frames_gesamt.max(index + 1);
-                if region.region_type == MemoryRegionType::Usable {
+                if region.kind == MemoryRegionKind::Usable {
                     bitmap[index / 64] |= 1 << (index % 64);
                     frames_frei += 1;
                 }

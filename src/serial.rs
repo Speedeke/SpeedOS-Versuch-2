@@ -29,8 +29,9 @@ lazy_static! {
 
 /// Interne Hilfsfunktion für die Makros — bitte nicht direkt aufrufen.
 ///
-/// Deadlock-Schutz wie beim VGA-Writer: keine Interrupts, solange wir
-/// den Lock auf den seriellen Port halten (siehe vga_buffer::_print).
+/// Deadlock-Schutz: keine Interrupts, solange wir den Lock auf den
+/// seriellen Port halten — sonst könnte ein Interrupt-Handler, der
+/// selbst drucken will, ewig auf den nie freiwerdenden Lock warten.
 #[doc(hidden)]
 pub fn _print(args: ::core::fmt::Arguments) {
     use core::fmt::Write;

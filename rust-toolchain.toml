@@ -8,6 +8,9 @@
 [toolchain]
 channel = "nightly"
 components = [
-    "rust-src",            # Quellcode der Standardbibliothek — nötig, um `core` selbst für unser eigenes Target zu kompilieren
-    "llvm-tools-preview",  # LLVM-Werkzeuge — braucht das bootimage-Tool zum Zusammenbauen des Boot-Images
+    "rust-src",            # braucht der bootloader-Host-Build für seine BIOS-Stages
+    "llvm-tools-preview",  # LLVM-Werkzeuge für die Bootloader-Stage-Builds
+]
+targets = [
+    "x86_64-unknown-none", # das eingebaute Bare-Metal-Target unseres Kernels
 ]

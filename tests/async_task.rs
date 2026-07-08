@@ -19,7 +19,7 @@
 extern crate alloc;
 
 use alloc::{vec, vec::Vec};
-use bootloader::{entry_point, BootInfo};
+use bootloader_api::{entry_point, BootInfo};
 use core::panic::PanicInfo;
 use speed_os::allocator;
 use speed_os::memory;
@@ -31,14 +31,18 @@ use x86_64::VirtAddr;
 /// Das gemeinsame Protokoll: Wer hat wann gezählt?
 static PROTOKOLL: Mutex<Vec<(&'static str, u32)>> = Mutex::new(Vec::new());
 
-entry_point!(main);
+entry_point!(main, config = &speed_os::BOOTLOADER_CONFIG);
 
-fn main(boot_info: &'static BootInfo) -> ! {
+fn main(boot_info: &'static mut BootInfo) -> ! {
     speed_os::init();
+    let boot_info: &'static BootInfo = boot_info;
 
     // Heap aufsetzen — der Executor braucht Box, Arc und BTreeMap.
-    let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
-    memory::init(phys_mem_offset, &boot_info.memory_map);
+    let offset = boot_info
+        .physical_memory_offset
+        .into_option()
+        .expect("kein Physik-Mapping");
+    memory::init(VirtAddr::new(offset), &boot_info.memory_regions);
     allocator::init_heap().expect("Heap-Initialisierung fehlgeschlagen");
 
     serial_print!("async_task::executor_verschraenkt_und_spawnt...\t");

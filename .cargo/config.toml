@@ -1,31 +1,28 @@
 # .cargo/config.toml — Build-Konfiguration für SpeedOS
 #
-# Diese Datei sagt cargo:
-#  1. Baue standardmäßig für unser eigenes Target (x86_64-speedos.json),
-#     nicht für Windows.
-#  2. Kompiliere die `core`-Bibliothek selbst mit (build-std), weil es
-#     für unser selbst definiertes Target keine fertige gibt.
-#  3. Bei `cargo run`/`cargo test`: starte das Ergebnis über
-#     `bootimage runner` in QEMU statt es direkt auszuführen.
-
-[unstable]
-# Erlaubt eigene Target-Definitionen als .json-Datei
-# (seit neueren Nightly-Versionen explizit nötig).
-json-target-spec = true
-# `core`, `compiler_builtins` und `alloc` aus dem Quellcode
-# mitkompilieren (deshalb brauchen wir die rust-src-Komponente).
-# `alloc` liefert Box, Vec, String, ... — braucht unseren Heap!
-build-std = ["core", "compiler_builtins", "alloc"]
-# Stellt memset/memcpy/memcmp bereit — die erwartet der Compiler,
-# normalerweise liefert sie die C-Bibliothek, die wir nicht haben.
-build-std-features = ["compiler-builtins-mem"]
+# Seit der Migration auf bootloader 0.11 herrlich kurz:
+#  1. Der Kernel baut für das EINGEBAUTE Rust-Target
+#     x86_64-unknown-none (Bare Metal, soft-float) — rustup liefert
+#     vorkompilierte core/alloc, kein build-std, kein eigenes
+#     Target-JSON mehr nötig.
+#  2. `cargo run`/`cargo test` übergeben den fertigen Kernel-ELF an
+#     unser boot/-Programm: Das baut daraus ein bootfähiges
+#     BIOS-Disk-Image und startet QEMU (im Test-Modus headless mit
+#     isa-debug-exit und Exit-Code-Auswertung).
+#     Das explizite Host-Target im Runner-Aufruf ist nötig, weil sonst
+#     das [build]-Target auch fürs Host-Programm gelten würde.
 
 [build]
-# Unser eigenes Bare-Metal-Target als Standard.
-target = "x86_64-speedos.json"
+target = "x86_64-unknown-none"
 
-# Für alle Targets ohne Betriebssystem (also unseres):
-# `cargo run` übergibt die Kernel-Datei an `bootimage runner`,
-# der daraus ein Boot-Image baut und QEMU damit startet.
 [target.'cfg(target_os = "none")']
-runner = "bootimage runner"
+runner = [
+    "cargo",
+    "run",
+    "--quiet",
+    "--manifest-path",
+    "boot/Cargo.toml",
+    "--target",
+    "x86_64-pc-windows-msvc",
+    "--",
+]
