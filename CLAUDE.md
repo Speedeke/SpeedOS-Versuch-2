@@ -3,18 +3,26 @@
 ## Projekt
 - SpeedOS: ein eigenes Betriebssystem from scratch in Rust. Kein Linux, keine fremde Kernel-Basis.
 - Sprache: Rust **nightly**, `no_std`, Ziel-Architektur: **x86_64**.
-- Bootloader: das `bootloader`-Crate (**Version 0.9.x**), kompatibel mit dem Buch
-  "Writing an OS in Rust" von Philipp Oppermann — wir folgen dessen bewährter Architektur.
+- Bootloader: **bootloader_api 0.11** (UEFI-Boot mit linearem Framebuffer).
+  Ursprünglich nach "Writing an OS in Rust" von Philipp Oppermann (bootloader 0.9)
+  gebaut, im Juli 2026 migriert — Plan und Details in `docs/migration-011.md`.
 
 ## Build & Test-Umgebung
-- Test-Umgebung: **QEMU** (`qemu-system-x86_64`), gestartet über `cargo run` mittels `bootimage`.
-- Eigenes Target-JSON: `x86_64-speedos.json`.
-- Tests: Integrationstests laufen in QEMU mit dem **isa-debug-exit Device** für
-  automatisches Beenden mit Exit-Code (`cargo test`).
+- Kernel-Target: das EINGEBAUTE `x86_64-unknown-none` (kein eigenes Target-JSON,
+  kein build-std — rust-toolchain.toml installiert das Target automatisch).
+- `cargo run`/`cargo test` rufen als Runner das Host-Programm **boot/** auf:
+  Es baut per `bootloader::UefiBoot` das GPT-Disk-Image und startet
+  **QEMU** (`qemu-system-x86_64`) mit der edk2/OVMF-Firmware aus dem
+  QEMU-Installationsordner.
+- Tests: Integrationstests laufen in QEMU mit dem **isa-debug-exit Device**;
+  der Runner übersetzt Exit-Code 33 -> Erfolg (Timeout 300 s).
 
 ## Debug
-- **ALLE** Debug-Ausgaben gehen über die serielle Schnittstelle (COM1 / Port 0x3F8)
-  ins Terminal, zusätzlich zur VGA-Ausgabe. **Niemals nur VGA.**
+- **ALLE** Ausgaben laufen über die serielle Schnittstelle (COM1 / Port 0x3F8)
+  ins Terminal. ÜBERGANGSZUSTAND seit der 0.11-Migration: Es gibt noch kein
+  Framebuffer-Text-Rendering, seriell ist die EINZIGE Textausgabe
+  (`konsole.rs` = ANSI-Farben über seriell). Sobald der Text-Renderer steht,
+  gilt wieder: Framebuffer UND seriell, niemals nur Bildschirm.
 
 ## Git
 - Nach **JEDEM** funktionierenden Schritt ein Commit mit klarer Message.
@@ -43,9 +51,18 @@
   `RamFs` (`src/fs/ramfs.rs`, in-memory); FAT32 und ein eigenes
   Disk-Dateisystem sollen später exakt dieselbe Schnittstelle bedienen —
   dann wird nur das gemountete Dateisystem ausgetauscht, kein Befehl ändert sich.
-- **Ausgabe immer doppelt:** `print!`/`println!` (lib.rs) schreiben IMMER auf
-  VGA UND seriell — die Projektregel ist in die Makros eingebaut, nicht dem
-  Aufrufer überlassen. `serial_println!` nur für reine Debug-Ausgaben.
+- **Ausgabe immer doppelt (Ziel-Regel):** `print!`/`println!` (lib.rs) sollen
+  auf Bildschirm UND seriell schreiben — die Regel ist in die Makros eingebaut,
+  nicht dem Aufrufer überlassen. Übergangsweise (bis zum Framebuffer-Text-
+  Renderer) schreiben sie nur seriell; die Naht in `lib.rs::_print` bleibt.
+  `serial_println!` nur für reine Debug-Ausgaben.
+- **Bootloader-0.11-Migration (Juli 2026, docs/migration-011.md):** UEFI
+  statt BIOS (BIOS-Stages von 0.11.15 bauen auf aktuellem Nightly nicht).
+  Drei hart erkämpfte UEFI-Lektionen, alle im Code dokumentiert:
+  (1) Nach dem GDT-Laden SS/DS/ES explizit neu setzen — sonst #GP beim
+  ersten iretq (gdt.rs). (2) Den PIT selbst programmieren — UEFI tut es
+  nicht (interrupts.rs). (3) PIC-Masken explizit setzen — OVMF übergibt
+  alles maskiert; LAPIC deaktivieren für die Pre-APIC-Verdrahtung (lib.rs).
 - **Deadlock-Regeln:** (1) Ausgabe-Locks (WRITER, SERIAL1) werden nur mit
   deaktivierten Interrupts gehalten (`without_interrupts` in den _print-
   Funktionen). (2) Interrupt-Handler sind minimal: nie blockieren, nie
@@ -106,7 +123,8 @@
   einem `# Safety`-Abschnitt; jeder unsafe-Block hat einen Kommentar, WARUM
   er safe ist. `cargo clippy --all-targets` muss warnungsfrei sein.
 
-## Bekannte Abweichungen vom blog_os-Buch (aktueller Nightly)
-- `.cargo/config.toml` braucht `json-target-spec = true` unter `[unstable]`.
-- Target-JSON: `target-pointer-width`/`target-c-int-width` als Zahlen,
-  `"rustc-abi": "softfloat"` ist wegen `+soft-float` Pflicht.
+## Bekannte Abweichungen vom blog_os-Buch
+- (Historisch, seit der 0.11-Migration irrelevant: eigenes Target-JSON
+  brauchte auf neuem Nightly `json-target-spec`, Zahlen statt Strings und
+  `"rustc-abi": "softfloat"` — alles Geschichte, wir nutzen das eingebaute
+  Target `x86_64-unknown-none`.)

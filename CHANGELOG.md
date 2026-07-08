@@ -5,6 +5,22 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### Geändert (Migration auf bootloader 0.11 — UEFI + Framebuffer)
+- Kernel bootet jetzt per UEFI (edk2/OVMF) und bekommt einen linearen
+  Framebuffer vom Bootloader (QEMU: 2560x1600 BGR) — Grundlage für
+  alles Grafische; beim Boot wird er mit SpeedOS-Blau gefüllt und
+  seine Eckdaten seriell geloggt
+- Build-System: eingebautes Target x86_64-unknown-none (Target-JSON,
+  build-std, bootimage entfallen); neues boot/-Crate als Runner baut
+  das UEFI-Disk-Image und startet QEMU (inkl. Test-Exit-Codes)
+- VGA-Textmodus ist Geschichte: vga_buffer.rs gelöscht; konsole.rs
+  liefert die gewohnte Farb-API übergangsweise als ANSI-Codes über
+  die serielle Leitung (Shell voll benutzbar im Terminal)
+- Drei UEFI-Lektionen gefixt und dokumentiert: SS/DS/ES nach
+  GDT-Laden neu setzen (sonst #GP bei iretq), PIT selbst
+  programmieren, PIC-Masken selbst setzen + LAPIC deaktivieren
+- Migrationsplan in docs/migration-011.md
+
 ### Geändert (Shell-Editor, Executor, Zeit-API)
 - ZeilenEditor aus shell::run() extrahiert (shell/editor.rs):
   Eingabepuffer, Verlauf und Tab-Vervollständigung als reine Logik
