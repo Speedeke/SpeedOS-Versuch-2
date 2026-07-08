@@ -39,16 +39,18 @@ impl TaskId {
 /// - `Pin<Box<...>>`: Futures dürfen nach dem ersten poll() nicht
 ///   mehr im Speicher verschoben werden (sie enthalten oft Zeiger
 ///   auf sich selbst). Pin garantiert genau das.
+/// - `+ Send`: nötig, damit Tasks durch die globale Spawn-Queue
+///   wandern dürfen (statische Datenstrukturen verlangen Send).
 pub struct Task {
     id: TaskId,
-    future: Pin<Box<dyn Future<Output = ()>>>,
+    future: Pin<Box<dyn Future<Output = ()> + Send>>,
 }
 
 impl Task {
     /// Verpackt eine beliebige `async fn`-Future in einen Task.
     /// `'static`: Die Future darf keine Referenzen auf Kurzlebiges
     /// enthalten — sie läuft ja beliebig lange weiter.
-    pub fn new(future: impl Future<Output = ()> + 'static) -> Task {
+    pub fn new(future: impl Future<Output = ()> + Send + 'static) -> Task {
         Task {
             id: TaskId::new(),
             future: Box::pin(future),
@@ -60,6 +62,21 @@ impl Task {
     fn poll(&mut self, context: &mut Context) -> Poll<()> {
         self.future.as_mut().poll(context)
     }
+}
+
+/// Reiht einen neuen Task ein, OHNE eine Referenz auf den Executor zu
+/// brauchen — damit können laufende Tasks selbst neue Tasks starten!
+/// Der Executor übernimmt die Neuzugänge zu Beginn jeder Runde aus
+/// der globalen Spawn-Queue.
+///
+/// NICHT aus Interrupt-Handlern benutzen: Task::new alloziert auf dem
+/// Heap, und Allokationen sind im Interrupt-Kontext verboten.
+///
+/// Gibt den Task zurück (Err), wenn die Spawn-Queue voll ist oder
+/// noch kein Executor existiert — der Aufrufer entscheidet dann,
+/// ob er es später nochmal versucht.
+pub fn spawn(task: Task) -> Result<(), Task> {
+    executor::neuen_task_einreihen(task)
 }
 
 /// Gibt die CPU einmal freiwillig ab: weckt sich selbst sofort wieder

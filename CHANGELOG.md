@@ -5,6 +5,19 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### Geändert (Shell-Editor, Executor, Zeit-API)
+- ZeilenEditor aus shell::run() extrahiert (shell/editor.rs):
+  Eingabepuffer, Verlauf und Tab-Vervollständigung als reine Logik
+  mit Taste-/Reaktion-Enums und Vervollstaendiger-Trait — komplett
+  per Unit-Test abgedeckt (8 Tests mit Mock, ohne Tastatur/VGA/VFS)
+- Executor: task::spawn() erlaubt Tasks, selbst Tasks zu starten
+  (globale Spawn-Queue); volle Warteschlangen panicken nicht mehr
+  (Überlauf-Flag -> alle Tasks einmal pollen, kein Wecken geht
+  verloren); Queue-Kapazität konfigurierbar (mit_kapazitaet)
+- Neue Zeit-API src/zeit.rs: ticks(), ms_seit_boot(), ms_von_ticks()
+  — zentrale Naht für den späteren Wechsel auf den APIC-Timer;
+  ticks-Befehl zeigt jetzt die Uptime in Sekunden
+
 ### Geändert (Speicherverwaltung generalüberholt)
 - Mapper + Frame-Allocator sind jetzt global (`Mutex<Option<...>>` in
   memory.rs, Muster wie das VFS) — jedes Modul kann zur Laufzeit Pages

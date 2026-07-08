@@ -9,7 +9,7 @@
 
 use crate::fs::{self, FsFehler, NodeTyp};
 use crate::vga_buffer::{self, Color};
-use crate::{allocator, interrupts, print, println};
+use crate::{allocator, print, println};
 use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
 
 /// Gemeinsamer Zustand der Shell, den Befehle lesen und ändern dürfen —
@@ -32,7 +32,10 @@ impl ShellKontext {
 }
 
 /// Das Interface, das jeder Shell-Befehl erfüllen muss.
-pub trait Befehl {
+/// `Send + Sync`: Die Registry lebt im Shell-Task, und Tasks müssen
+/// Send sein (globale Spawn-Queue) — unsere Befehle sind alle
+/// zustandslose Structs, das erfüllen sie automatisch.
+pub trait Befehl: Send + Sync {
     /// Der Name, unter dem der Befehl aufgerufen wird (ein Wort).
     fn name(&self) -> &'static str;
     /// Einzeiler für die help-Ausgabe.
@@ -135,18 +138,18 @@ impl Befehl for Ticks {
         "ticks"
     }
     fn beschreibung(&self) -> &'static str {
-        "Zeigt Timer-Ticks seit dem Start (~18,2/Sekunde)"
+        "Zeigt Timer-Ticks und Uptime (~18,2 Ticks/Sekunde)"
     }
     fn ausfuehren(&self, _argumente: &str, _kontext: &mut ShellKontext, _registry: &[Box<dyn Befehl>]) {
-        let ticks = interrupts::timer_ticks();
-        // Der PIT-Timer tickt mit ~18,2 Hz -> Sekunden = Ticks / 18,2.
-        // Ohne Fließkomma rechnen wir in Zehnteln: Ticks * 10 / 182.
-        let zehntel = ticks * 10 / 182;
+        // Alles über die zentrale Zeit-API (zeit.rs) — wenn die
+        // Zeitquelle mal präziser wird, stimmt dieser Befehl einfach mit.
+        let ticks = crate::zeit::ticks();
+        let ms = crate::zeit::ms_seit_boot();
         println!(
-            "Timer-Ticks: {} (das sind ca. {},{} Sekunden Uptime)",
+            "Timer-Ticks: {}  |  Uptime: {},{:03} Sekunden",
             ticks,
-            zehntel / 10,
-            zehntel % 10
+            ms / 1000,
+            ms % 1000
         );
     }
 }

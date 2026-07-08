@@ -2,14 +2,13 @@
 //
 // Der Executor verwaltet alle Tasks und arbeitet sie fair ab:
 //
-//   1. Er holt Task-IDs aus einer Warteschlange (FIFO — wer zuerst
-//      geweckt wurde, läuft zuerst: das ist unsere Fairness).
-//   2. Er pollt den jeweiligen Task. Antwortet der Ready, ist er
-//      fertig und fliegt raus. Antwortet er Pending, passiert NICHTS
-//      weiter — der Task wird erst wieder gepollt, wenn sein Waker
-//      aufgerufen wird.
-//   3. Ist die Warteschlange leer, legt der Executor die CPU mit hlt
-//      schlafen. Der nächste Interrupt (Timer, Taste) weckt sie.
+//   1. Er übernimmt Neuzugänge aus der globalen Spawn-Queue
+//      (task::spawn — damit können Tasks selbst Tasks starten).
+//   2. Er holt Task-IDs aus der Weck-Warteschlange (FIFO — wer zuerst
+//      geweckt wurde, läuft zuerst: das ist unsere Fairness) und pollt
+//      sie. Ready = fertig, fliegt raus. Pending = schläft, bis sein
+//      Waker ihn wieder einreiht.
+//   3. Ist nirgends Arbeit, legt er die CPU mit hlt schlafen.
 //
 // Der Waker ist der Clou am ganzen System: ein "Rückruf-Ticket", das
 // der Executor jedem Task beim Pollen mitgibt. Der Task deponiert es
@@ -17,14 +16,35 @@
 // Wird das Ticket eingelöst (wake), landet die Task-ID wieder in der
 // Warteschlange. So verschwendet der Executor NIE Zeit damit, Tasks
 // zu pollen, die sowieso nichts zu tun haben (kein "Busy Polling").
+//
+// Überlauf-Verhalten (statt Panic!): Ist die Weck-Warteschlange voll,
+// geht das Wecken NICHT verloren — es wird nur ungenau: Ein Notfall-
+// Flag wird gesetzt, und der Executor pollt daraufhin einmal ALLE
+// Tasks. Das kostet kurz Leistung, aber kein Task bleibt je hängen.
+// (Der Timer-Interrupt weckt die CPU spätestens nach ~55 ms aus dem
+// hlt, selbst wenn das Flag mitten im Einschlafen gesetzt wurde.)
 
 use super::{Task, TaskId};
-use alloc::{collections::BTreeMap, sync::Arc, task::Wake};
+use alloc::{collections::BTreeMap, sync::Arc, task::Wake, vec::Vec};
+use conquer_once::spin::OnceCell;
+use core::sync::atomic::{AtomicBool, Ordering};
 use core::task::{Context, Poll, Waker};
 use crossbeam_queue::ArrayQueue;
 
-/// Wie viele geweckte Tasks gleichzeitig anstehen können.
-const TASK_QUEUE_GROESSE: usize = 100;
+/// Standard-Kapazität der Warteschlangen (Weck- und Spawn-Queue).
+pub const STANDARD_KAPAZITAET: usize = 128;
+
+/// Die globale Spawn-Queue: Hierüber reicht task::spawn() neue Tasks
+/// an den Executor durch — von überall, ohne &mut Executor.
+static SPAWN_QUEUE: OnceCell<ArrayQueue<Task>> = OnceCell::uninit();
+
+/// Interne Schnittstelle für task::spawn() (siehe task/mod.rs).
+pub(super) fn neuen_task_einreihen(task: Task) -> Result<(), Task> {
+    match SPAWN_QUEUE.try_get() {
+        Ok(queue) => queue.push(task),
+        Err(_) => Err(task), // Es gibt noch keinen Executor.
+    }
+}
 
 pub struct Executor {
     /// Alle lebenden Tasks, auffindbar über ihre ID.
@@ -37,14 +57,30 @@ pub struct Executor {
     /// Waker-Zwischenspeicher, damit nicht bei jedem poll() ein
     /// neuer Waker auf dem Heap entsteht.
     waker_cache: BTreeMap<TaskId, Waker>,
+    /// Notfall-Flag: wurde ein Wecken wegen voller Queue verworfen?
+    /// Dann pollt die nächste Runde ALLE Tasks (nichts geht verloren).
+    ueberlauf: Arc<AtomicBool>,
 }
 
 impl Executor {
+    /// Executor mit Standard-Kapazität (128 Einträge pro Queue).
     pub fn new() -> Self {
+        Self::mit_kapazitaet(STANDARD_KAPAZITAET)
+    }
+
+    /// Executor mit konfigurierbarer Warteschlangen-Kapazität.
+    /// Faustregel: mindestens 2x so groß wie die erwartete Task-Zahl,
+    /// denn eine ID kann kurzzeitig mehrfach in der Queue stehen.
+    pub fn mit_kapazitaet(kapazitaet: usize) -> Self {
+        // Die globale Spawn-Queue beim ersten Executor anlegen
+        // (ein zweiter Executor teilt sie sich einfach).
+        let _ = SPAWN_QUEUE.try_init_once(|| ArrayQueue::new(kapazitaet));
+
         Executor {
             tasks: BTreeMap::new(),
-            task_queue: Arc::new(ArrayQueue::new(TASK_QUEUE_GROESSE)),
+            task_queue: Arc::new(ArrayQueue::new(kapazitaet)),
             waker_cache: BTreeMap::new(),
+            ueberlauf: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -54,7 +90,11 @@ impl Executor {
         if self.tasks.insert(task_id, task).is_some() {
             panic!("Task-ID {:?} existiert schon", task_id);
         }
-        self.task_queue.push(task_id).expect("Task-Warteschlange voll");
+        if self.task_queue.push(task_id).is_err() {
+            // Queue voll: kein Panic — Notfall-Flag setzen, die
+            // nächste Runde pollt dann sowieso alle Tasks.
+            self.ueberlauf.store(true, Ordering::Relaxed);
+        }
     }
 
     /// Die Hauptschleife des Kernels: Tasks abarbeiten, dann schlafen.
@@ -66,33 +106,54 @@ impl Executor {
         }
     }
 
-    /// Arbeitet alle aktuell geweckten Tasks genau einmal ab.
+    /// Arbeitet alle aktuell anstehenden Aufgaben genau einmal ab.
     fn run_ready_tasks(&mut self) {
+        // 1. Neuzugänge aus der globalen Spawn-Queue übernehmen:
+        if let Ok(spawn_queue) = SPAWN_QUEUE.try_get() {
+            while let Some(task) = spawn_queue.pop() {
+                self.spawn(task);
+            }
+        }
+
+        // 2. Notfall-Modus nach Queue-Überlauf: ALLE Tasks pollen,
+        //    damit garantiert kein verworfenes Wecken verloren geht.
+        if self.ueberlauf.swap(false, Ordering::Relaxed) {
+            let alle_ids: Vec<TaskId> = self.tasks.keys().copied().collect();
+            for task_id in alle_ids {
+                self.task_pollen(task_id);
+            }
+        }
+
+        // 3. Normalfall: nur die geweckten Tasks pollen.
         while let Some(task_id) = self.task_queue.pop() {
-            let task = match self.tasks.get_mut(&task_id) {
-                Some(task) => task,
-                None => continue, // Task existiert nicht mehr (fertig)
-            };
-            // Waker aus dem Cache holen oder einmalig erzeugen:
-            let waker = self
-                .waker_cache
-                .entry(task_id)
-                .or_insert_with(|| TaskWaker::waker(task_id, self.task_queue.clone()));
-            let mut context = Context::from_waker(waker);
-            match task.poll(&mut context) {
-                Poll::Ready(()) => {
-                    // Fertig! Task und seinen Waker entsorgen.
-                    self.tasks.remove(&task_id);
-                    self.waker_cache.remove(&task_id);
-                }
-                Poll::Pending => {
-                    // Nichts tun: Der Task meldet sich per Waker zurück.
-                }
+            self.task_pollen(task_id);
+        }
+    }
+
+    /// Pollt einen einzelnen Task (falls er noch existiert).
+    fn task_pollen(&mut self, task_id: TaskId) {
+        let task = match self.tasks.get_mut(&task_id) {
+            Some(task) => task,
+            None => return, // Task existiert nicht mehr (fertig)
+        };
+        // Waker aus dem Cache holen oder einmalig erzeugen:
+        let waker = self.waker_cache.entry(task_id).or_insert_with(|| {
+            TaskWaker::waker(task_id, self.task_queue.clone(), self.ueberlauf.clone())
+        });
+        let mut context = Context::from_waker(waker);
+        match task.poll(&mut context) {
+            Poll::Ready(()) => {
+                // Fertig! Task und seinen Waker entsorgen.
+                self.tasks.remove(&task_id);
+                self.waker_cache.remove(&task_id);
+            }
+            Poll::Pending => {
+                // Nichts tun: Der Task meldet sich per Waker zurück.
             }
         }
     }
 
-    /// Legt die CPU schlafen, wenn keine Arbeit ansteht.
+    /// Legt die CPU schlafen, wenn wirklich nirgends Arbeit wartet.
     ///
     /// WICHTIG, subtil: Erst Interrupts VERBIETEN, dann prüfen, dann
     /// atomar "erlauben + hlt" (enable_and_hlt). Ohne das gäbe es eine
@@ -104,7 +165,14 @@ impl Executor {
         use x86_64::instructions::interrupts::{self, enable_and_hlt};
 
         interrupts::disable();
-        if self.task_queue.is_empty() {
+        let spawn_queue_leer = SPAWN_QUEUE
+            .try_get()
+            .map(|q| q.is_empty())
+            .unwrap_or(true);
+        if self.task_queue.is_empty()
+            && spawn_queue_leer
+            && !self.ueberlauf.load(Ordering::Relaxed)
+        {
             enable_and_hlt();
         } else {
             interrupts::enable();
@@ -124,22 +192,33 @@ impl Default for Executor {
 struct TaskWaker {
     task_id: TaskId,
     task_queue: Arc<ArrayQueue<TaskId>>,
+    ueberlauf: Arc<AtomicBool>,
 }
 
 impl TaskWaker {
     /// Baut aus unserem TaskWaker einen offiziellen core::task::Waker.
     /// Das Wake-Trait aus alloc erledigt die hässliche Vtable-Arbeit.
-    fn waker(task_id: TaskId, task_queue: Arc<ArrayQueue<TaskId>>) -> Waker {
+    fn waker(
+        task_id: TaskId,
+        task_queue: Arc<ArrayQueue<TaskId>>,
+        ueberlauf: Arc<AtomicBool>,
+    ) -> Waker {
         Waker::from(Arc::new(TaskWaker {
             task_id,
             task_queue,
+            ueberlauf,
         }))
     }
 
     fn wake_task(&self) {
         // push auf die lock-freie Queue: darf auch mitten im
         // Interrupt-Handler passieren, blockiert nie.
-        self.task_queue.push(self.task_id).expect("Task-Warteschlange voll");
+        if self.task_queue.push(self.task_id).is_err() {
+            // Queue voll: KEIN Panic. Das Flag sorgt dafür, dass die
+            // nächste Executor-Runde alle Tasks pollt — dieses Wecken
+            // kommt also garantiert an, nur eben etwas gröber.
+            self.ueberlauf.store(true, Ordering::Relaxed);
+        }
     }
 }
 

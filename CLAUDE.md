@@ -78,11 +78,27 @@
   Erst-Initialisierung womöglich im Interrupt-Kontext).
 - **Multitasking kooperativ (async/await):** Eigener Executor
   (`src/task/executor.rs`) mit Waker-Support, FIFO-fair, schläft per
-  hlt (race-frei via disable/enable_and_hlt). Präemptiver Scheduler kommt
-  erst mit User-Space-Prozessen.
+  hlt (race-frei via disable/enable_and_hlt). Tasks spawnen neue Tasks
+  über `task::spawn()` (globale Spawn-Queue; NIE aus Interrupt-Handlern,
+  denn Task::new alloziert). Tasks/Futures müssen `Send` sein.
+  Volle Warteschlangen panicken NICHT: Überlauf setzt ein Notfall-Flag,
+  die nächste Runde pollt alle Tasks — kein Wecken geht verloren.
+  Kapazität konfigurierbar (`Executor::mit_kapazitaet`, Standard 128).
+  Präemptiver Scheduler kommt erst mit User-Space-Prozessen.
 - **Shell-Befehle als Registry:** Jeder Befehl = Struct mit `Befehl`-Trait
-  (`src/shell/befehle.rs`), eingetragen in `alle_befehle()`. Gemeinsamer
-  Zustand (aktuelles Verzeichnis) nur über `ShellKontext`.
+  (`src/shell/befehle.rs`, `Send + Sync`), eingetragen in `alle_befehle()`.
+  Gemeinsamer Zustand (aktuelles Verzeichnis) nur über `ShellKontext`.
+- **ZeilenEditor getrennt von der Anzeige (Juli 2026):** Die gesamte
+  Eingabelogik (Tippen, Backspace, Verlauf, Tab) lebt in
+  `src/shell/editor.rs`: Eingabe = eigenes `Taste`-Enum, Ausgabe =
+  `Reaktion`-Enum (Anzeige-ANWEISUNGEN als Daten, der Editor druckt nie
+  selbst). Tab-Kandidaten kommen über das `Vervollstaendiger`-Trait
+  (Shell: VFS, Tests: Mock) — dadurch ist die Eingabelogik als reiner
+  Unit-Test prüfbar. shell::run() ist nur noch Übersetzer:
+  Taste rein, Reaktion zeichnen, fertige Zeilen an die Registry.
+- **Zeit nur über `src/zeit.rs`:** ticks(), ms_seit_boot(). Niemals
+  direkt den Tick-Zähler benutzen — die API-Naht erlaubt später den
+  Wechsel PIT (~55 ms Auflösung) -> APIC-Timer ohne Aufrufer-Änderung.
 - **Heap-Allocator austauschbar:** Standard linked_list_allocator; eigene
   Lern-Allocatoren (Bump, Fixed-Size-Block) über Cargo-Features
   `bump-allocator` / `fixed-block-allocator` — gleiche init-Schnittstelle.

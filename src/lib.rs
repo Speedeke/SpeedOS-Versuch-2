@@ -37,6 +37,7 @@ pub mod serial;
 pub mod shell;
 pub mod task;
 pub mod vga_buffer;
+pub mod zeit;
 
 /// Wird aufgerufen, wenn eine Allokation fehlschlägt (Heap voll).
 /// Mehr als kontrolliert panicken können wir dann nicht — aber die
