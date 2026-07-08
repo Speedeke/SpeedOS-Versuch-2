@@ -78,6 +78,17 @@ impl FixedSizeBlockAllocator {
         self.fallback_allocator.init(heap_start, heap_size);
     }
 
+    /// Verlängert den Heap um `zusatz` Bytes (delegiert an den
+    /// Fallback-Allocator, der den Gesamtbereich verwaltet).
+    ///
+    /// # Safety
+    ///
+    /// Der neue Bereich muss gültig gemappt sein, exklusiv diesem
+    /// Allocator gehören und nahtlos ans bisherige Heap-Ende anschließen.
+    pub unsafe fn extend(&mut self, zusatz: usize) {
+        self.fallback_allocator.extend(zusatz);
+    }
+
     /// Allokation über den Fallback-Allocator.
     fn fallback_alloc(&mut self, layout: Layout) -> *mut u8 {
         match self.fallback_allocator.allocate_first_fit(layout) {

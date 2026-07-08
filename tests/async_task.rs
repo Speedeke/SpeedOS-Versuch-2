@@ -19,7 +19,7 @@ use alloc::{vec, vec::Vec};
 use bootloader::{entry_point, BootInfo};
 use core::panic::PanicInfo;
 use speed_os::allocator;
-use speed_os::memory::{self, BootInfoFrameAllocator};
+use speed_os::memory;
 use speed_os::task::{executor::Executor, yield_now, Task};
 use speed_os::{exit_qemu, serial_print, serial_println, QemuExitCode};
 use spin::Mutex;
@@ -35,10 +35,8 @@ fn main(boot_info: &'static BootInfo) -> ! {
 
     // Heap aufsetzen — der Executor braucht Box, Arc und BTreeMap.
     let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
-    let mut mapper = unsafe { memory::init(phys_mem_offset) };
-    let mut frame_allocator = unsafe { BootInfoFrameAllocator::init(&boot_info.memory_map) };
-    allocator::init_heap(&mut mapper, &mut frame_allocator)
-        .expect("Heap-Initialisierung fehlgeschlagen");
+    memory::init(phys_mem_offset, &boot_info.memory_map);
+    allocator::init_heap().expect("Heap-Initialisierung fehlgeschlagen");
 
     serial_print!("async_task::executor_verschraenkt_tasks...\t");
 

@@ -59,6 +59,17 @@ impl BumpAllocator {
         self.heap_end = heap_start + heap_size;
         self.next = heap_start;
     }
+
+    /// Verlängert den Heap um `zusatz` Bytes — beim Bump-Allocator
+    /// heißt das schlicht: das Ende wandert nach hinten.
+    ///
+    /// # Safety
+    ///
+    /// Der neue Bereich [heap_end, heap_end + zusatz) muss gültig
+    /// gemappt sein und exklusiv diesem Allocator gehören.
+    pub unsafe fn extend(&mut self, zusatz: usize) {
+        self.heap_end += zusatz;
+    }
 }
 
 /// Default = leerer Allocator (wie new) — von Clippy empfohlen,

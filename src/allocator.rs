@@ -26,54 +26,77 @@
 pub mod bump;
 pub mod fixed_size_block;
 
+use crate::memory;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use x86_64::{
-    structures::paging::{
-        mapper::MapToError, FrameAllocator, Mapper, Page, PageTableFlags, Size4KiB,
-    },
+    structures::paging::{mapper::MapToError, Page, Size4KiB},
     VirtAddr,
 };
 
 /// Startadresse des Heaps im virtuellen Adressraum. Die Adresse ist
 /// frei gewählt — wichtig ist nur, dass dort noch nichts anderes liegt.
 pub const HEAP_START: usize = 0x_4444_4444_0000;
-/// Größe des Heaps: 100 KiB (= 25 Pages à 4 KiB).
+/// ANFANGS-Größe des Heaps: 100 KiB (= 25 Pages à 4 KiB).
+/// Der Heap kann danach mit heap_erweitern() wachsen.
 pub const HEAP_SIZE: usize = 100 * 1024;
 
-/// Mappt die Heap-Pages auf frische physische Frames und übergibt den
-/// Bereich danach an den Allocator. Ab dann funktionieren Box & Co.
-pub fn init_heap(
-    mapper: &mut impl Mapper<Size4KiB>,
-    frame_allocator: &mut impl FrameAllocator<Size4KiB>,
-) -> Result<(), MapToError<Size4KiB>> {
-    // Alle Pages von HEAP_START bis HEAP_START + HEAP_SIZE - 1:
-    let page_range = {
-        let heap_start = VirtAddr::new(HEAP_START as u64);
-        let heap_end = heap_start + HEAP_SIZE - 1u64;
-        let heap_start_page = Page::containing_address(heap_start);
-        let heap_end_page = Page::containing_address(heap_end);
-        Page::range_inclusive(heap_start_page, heap_end_page)
-    };
+/// Die aktuelle Heap-Größe in Bytes (wächst durch heap_erweitern).
+static HEAP_GROESSE: AtomicUsize = AtomicUsize::new(0);
 
-    // Für jede Page einen freien Frame besorgen und mappen:
-    for page in page_range {
-        let frame = frame_allocator
-            .allocate_frame()
-            .ok_or(MapToError::FrameAllocationFailed)?;
-        let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
-        unsafe {
-            // unsafe: siehe create_example_mapping — hier unbedenklich,
-            // die Frames sind frisch und gehören niemand anderem.
-            mapper.map_to(page, frame, flags, frame_allocator)?.flush()
-        };
-    }
+/// Die aktuelle Größe des Heaps in Bytes.
+pub fn heap_groesse() -> usize {
+    HEAP_GROESSE.load(Ordering::Relaxed)
+}
+
+/// Mappt die Heap-Pages über die globale Speicher-API und übergibt
+/// den Bereich an den Allocator. Ab dann funktionieren Box & Co.
+/// Voraussetzung: memory::init() ist bereits gelaufen.
+pub fn init_heap() -> Result<(), MapToError<Size4KiB>> {
+    heap_pages_mappen(HEAP_START, HEAP_SIZE)?;
 
     // Dem Allocator seinen Arbeitsbereich geben.
-    // unsafe: Der Bereich muss gültig gemappt und exklusiv sein —
-    // haben wir gerade beides sichergestellt.
+    // unsafe: Der Bereich ist frisch gemappt und gehört exklusiv
+    // dem Allocator — genau die init-Bedingung.
     unsafe {
         ALLOCATOR.lock().init(HEAP_START, HEAP_SIZE);
     }
+    HEAP_GROESSE.store(HEAP_SIZE, Ordering::Relaxed);
 
+    Ok(())
+}
+
+/// Erweitert den Heap zur Laufzeit um `zusaetzliche_pages` Pages und
+/// gibt die neue Gesamtgröße zurück. Die neuen Pages schließen
+/// virtuell nahtlos an den bisherigen Heap an — nötig, damit der
+/// Allocator seinen Bereich einfach verlängern kann.
+/// (Automatisches Wachsen bei Heap-Voll kommt später; im Moment
+/// ruft man die Funktion bewusst auf, z. B. bevor große Puffer
+/// gebraucht werden.)
+pub fn heap_erweitern(zusaetzliche_pages: usize) -> Result<usize, MapToError<Size4KiB>> {
+    let alte_groesse = HEAP_GROESSE.load(Ordering::Relaxed);
+    let zusatz = zusaetzliche_pages * 4096;
+
+    heap_pages_mappen(HEAP_START + alte_groesse, zusatz)?;
+
+    // unsafe: Der neue Bereich ist gemappt, exklusiv und schließt
+    // direkt an das bisherige Heap-Ende an.
+    unsafe {
+        ALLOCATOR.lock().extend(zusatz);
+    }
+    let neue_groesse = alte_groesse + zusatz;
+    HEAP_GROESSE.store(neue_groesse, Ordering::Relaxed);
+
+    Ok(neue_groesse)
+}
+
+/// Mappt den Bereich [start, start+groesse) Page für Page auf
+/// frische Frames (über die globale Speicher-API).
+fn heap_pages_mappen(start: usize, groesse: usize) -> Result<(), MapToError<Size4KiB>> {
+    let start_page = Page::containing_address(VirtAddr::new(start as u64));
+    let end_page = Page::containing_address(VirtAddr::new((start + groesse - 1) as u64));
+    for page in Page::range_inclusive(start_page, end_page) {
+        memory::map_page(page)?;
+    }
     Ok(())
 }
 

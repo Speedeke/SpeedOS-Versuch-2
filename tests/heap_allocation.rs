@@ -27,7 +27,7 @@ use alloc::{boxed::Box, collections::BTreeMap, string::String, vec::Vec};
 use bootloader::{entry_point, BootInfo};
 use core::panic::PanicInfo;
 use speed_os::allocator::{self, HEAP_SIZE};
-use speed_os::memory::{self, BootInfoFrameAllocator};
+use speed_os::memory;
 use x86_64::VirtAddr;
 
 entry_point!(main);
@@ -35,13 +35,11 @@ entry_point!(main);
 fn main(boot_info: &'static BootInfo) -> ! {
     speed_os::init();
 
-    // Paging + Heap aufsetzen — ohne das gäbe es bei der ersten
-    // Allokation einen Panic im alloc_error_handler.
+    // Speicherverwaltung + Heap aufsetzen — ohne das gäbe es bei der
+    // ersten Allokation einen Panic im alloc_error_handler.
     let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
-    let mut mapper = unsafe { memory::init(phys_mem_offset) };
-    let mut frame_allocator = unsafe { BootInfoFrameAllocator::init(&boot_info.memory_map) };
-    allocator::init_heap(&mut mapper, &mut frame_allocator)
-        .expect("Heap-Initialisierung fehlgeschlagen");
+    memory::init(phys_mem_offset, &boot_info.memory_map);
+    allocator::init_heap().expect("Heap-Initialisierung fehlgeschlagen");
 
     test_main();
     speed_os::hlt_loop();
@@ -99,6 +97,37 @@ fn string_und_btreemap() {
     map.insert("bootloader", "0.9");
     assert_eq!(map.get("kernel"), Some(&"Rust"));
     assert_eq!(map.len(), 2);
+}
+
+/// Heap-Erweiterung zur Laufzeit: Eine Allokation, die größer ist als
+/// der GESAMTE bisherige Heap, kann erst nach heap_erweitern() klappen.
+/// try_reserve statt normalem push: Es gibt ein Result zurück, statt
+/// bei Speichermangel in den alloc_error_handler zu panicken.
+#[test_case]
+fn heap_erweiterung_zur_laufzeit() {
+    let mut puffer: Vec<u8> = Vec::new();
+    // Größer als der komplette aktuelle Heap -> unmöglich:
+    let riesig = allocator::heap_groesse() + 10 * 4096;
+    assert!(
+        puffer.try_reserve(riesig).is_err(),
+        "Riesen-Allokation haette fehlschlagen muessen"
+    );
+
+    // Heap um 100 Pages (400 KiB) erweitern ...
+    let neue_groesse = allocator::heap_erweitern(100).expect("heap_erweitern fehlgeschlagen");
+    assert_eq!(neue_groesse, allocator::heap_groesse());
+    assert!(neue_groesse >= riesig);
+
+    // ... und jetzt passt sie:
+    assert!(
+        puffer.try_reserve(riesig).is_ok(),
+        "Allokation muesste nach der Erweiterung klappen"
+    );
+    // Den Speicher auch wirklich benutzen:
+    for i in 0..riesig {
+        puffer.push((i % 256) as u8);
+    }
+    assert_eq!(puffer.len(), riesig);
 }
 
 /// Langlebige + kurzlebige Allokationen gemischt: Eine Box muss ihren

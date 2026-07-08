@@ -34,17 +34,12 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     //    und Timer + Tastatur melden sich per Interrupt.
     speed_os::init();
 
-    // 2. Speicherverwaltung: Zugriff auf die Page Tables über das
-    //    Komplett-Mapping des Bootloaders, dann den Heap mappen.
-    //    Danach funktionieren Box, Vec, String & Co.
-    //    unsafe: einmaliger Aufruf mit dem garantiert korrekten Mapping/
-    //    der Memory Map des Bootloaders (siehe # Safety in memory.rs).
+    // 2. Speicherverwaltung: globaler Mapper + Bitmap-Frame-Allocator
+    //    (memory::init), dann den Heap mappen. Danach kann JEDES Modul
+    //    zur Laufzeit Pages mappen, und Box, Vec, String & Co. laufen.
     let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
-    let mut mapper = unsafe { memory::init(phys_mem_offset) };
-    let mut frame_allocator =
-        unsafe { memory::BootInfoFrameAllocator::init(&boot_info.memory_map) };
-    allocator::init_heap(&mut mapper, &mut frame_allocator)
-        .expect("Heap-Initialisierung fehlgeschlagen");
+    memory::init(phys_mem_offset, &boot_info.memory_map);
+    allocator::init_heap().expect("Heap-Initialisierung fehlgeschlagen");
 
     // 3. Dateisystem: RamFs als Wurzel mounten (mit Demo-Dateien).
     speed_os::fs::init();

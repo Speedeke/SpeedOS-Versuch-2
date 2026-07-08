@@ -51,8 +51,28 @@
   Funktionen). (2) Interrupt-Handler sind minimal: nie blockieren, nie
   allokieren, nie printen — Daten in lock-freie Queues, Verarbeitung in
   async Tasks (siehe Tastatur). (3) `fs::mit_fs()` nie verschachteln.
+- **Globale Speicher-API (Juli 2026):** Mapper und Frame-Allocator leben als
+  globale `Mutex<Option<...>>` in `src/memory.rs` (Muster wie das VFS) —
+  NICHT als Locals in kernel_main. Zugriff NUR über die API (map_page,
+  map_page_zu für MMIO, unmap_page, allocate_pages, frame_allozieren/
+  frame_freigeben, uebersetzen, frame_statistik). Beide Locks werden
+  ausschließlich in `mit_speicher()` genommen (feste Reihenfolge: Mapper
+  vor Frame-Allocator, Interrupts aus) — nie direkt.
+- **Bitmap-Frame-Allocator (Juli 2026):** 1 Bit pro 4-KiB-Frame (statische
+  32-KiB-Bitmap für max. 1 GiB RAM), Next-Fit-Zeiger. Bewusst KEINE
+  Free-List: Die Bitmap findet zusammenhängende physische Bereiche
+  (Framebuffer/DMA!) per Scan, kann O(1) freigeben, erkennt
+  Doppel-Freigaben (assert) — eine Free-List kann Kontiguität praktisch
+  nicht liefern. Freigegebene Frames setzen den Next-Fit-Zeiger zurück
+  und werden sofort wiederverwendet.
+- **Heap wächst zur Laufzeit:** `allocator::heap_erweitern(pages)` mappt
+  neue Pages nahtlos ans Heap-Ende und ruft `extend` des Allocators.
+  Alle drei Allocatoren (linked_list, Bump, Fixed-Block) unterstützen
+  extend mit derselben Signatur. Kein automatisches Wachsen — bewusst
+  manuell vor großen Puffern aufrufen.
 - **Boot-/Init-Reihenfolge (main.rs):** GDT/TSS → IDT → PIC → Interrupts an
-  → Paging (OffsetPageTable) → Heap → Dateisystem → Executor + Shell.
+  → memory::init (globaler Mapper + Frame-Allocator) → Heap → Dateisystem
+  → Executor + Shell.
   Statics mit einmaligem Seiteneffekt (Scancode-Queue) über conquer_once
   OnceCell explizit initialisieren, NICHT lazy_static (sonst passiert die
   Erst-Initialisierung womöglich im Interrupt-Kontext).

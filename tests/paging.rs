@@ -1,14 +1,8 @@
-// tests/paging.rs — Integrationstests für die Adressübersetzung
+// tests/paging.rs — Integrationstests für die Speicherverwaltung
 //
-// Diese Tests booten in QEMU und prüfen, dass unsere Speicherverwaltung
-// virtuelle Adressen korrekt in physische übersetzt — sowohl bei
-// Mappings, die der Bootloader angelegt hat, als auch bei einem
-// Mapping, das wir selbst mit map_to erzeugen.
-//
-// Besonderheit: Die Test-Funktionen (#[test_case]) bekommen keine
-// Argumente, aber wir brauchen den Mapper aus der BootInfo. Deshalb
-// legt der Entry Point Mapper & FrameAllocator in globale, gelockte
-// Variablen, aus denen sich die Tests bedienen.
+// Testet die globale memory-API: Adressübersetzung, Mapping/Unmapping,
+// den Bitmap-Frame-Allocator (inkl. Wiederverwendung freigegebener
+// Frames!) und zusammenhängende Allokationen für Framebuffer/DMA.
 
 #![no_std]
 #![no_main]
@@ -18,26 +12,20 @@
 
 use bootloader::{entry_point, BootInfo};
 use core::panic::PanicInfo;
-use spin::Mutex;
-use speed_os::memory::{self, BootInfoFrameAllocator};
-use x86_64::structures::paging::{OffsetPageTable, Translate};
+use speed_os::memory;
+use x86_64::structures::paging::{Page, PhysFrame};
 use x86_64::{PhysAddr, VirtAddr};
-
-/// Globale Ablage für Mapper & Co., gefüllt vom Entry Point.
-static MAPPER: Mutex<Option<OffsetPageTable<'static>>> = Mutex::new(None);
-static FRAME_ALLOCATOR: Mutex<Option<BootInfoFrameAllocator>> = Mutex::new(None);
-static PHYS_OFFSET: Mutex<u64> = Mutex::new(0);
 
 entry_point!(main);
 
 fn main(boot_info: &'static BootInfo) -> ! {
     speed_os::init();
-
-    let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
-    *MAPPER.lock() = Some(unsafe { memory::init(phys_mem_offset) });
-    *FRAME_ALLOCATOR.lock() =
-        Some(unsafe { BootInfoFrameAllocator::init(&boot_info.memory_map) });
-    *PHYS_OFFSET.lock() = boot_info.physical_memory_offset;
+    // Die globale Speicherverwaltung ist alles, was diese Tests brauchen
+    // (kein Heap nötig — die memory-API alloziert selbst nichts).
+    memory::init(
+        VirtAddr::new(boot_info.physical_memory_offset),
+        &boot_info.memory_map,
+    );
 
     test_main();
     speed_os::hlt_loop();
@@ -52,9 +40,7 @@ fn panic(info: &PanicInfo) -> ! {
 /// mapping): virtuell 0xb8000 muss physisch 0xb8000 ergeben.
 #[test_case]
 fn vga_puffer_ist_identisch_gemappt() {
-    let mapper = MAPPER.lock();
-    let mapper = mapper.as_ref().unwrap();
-    let phys = mapper.translate_addr(VirtAddr::new(0xb8000));
+    let phys = memory::uebersetzen(VirtAddr::new(0xb8000));
     assert_eq!(phys, Some(PhysAddr::new(0xb8000)));
 }
 
@@ -62,36 +48,98 @@ fn vga_puffer_ist_identisch_gemappt() {
 /// (offset + X) muss physische Adresse X ergeben — wir prüfen X = 0.
 #[test_case]
 fn phys_offset_mapping_zeigt_auf_phys_null() {
-    let offset = *PHYS_OFFSET.lock();
-    let mapper = MAPPER.lock();
-    let mapper = mapper.as_ref().unwrap();
-    let phys = mapper.translate_addr(VirtAddr::new(offset));
+    let phys = memory::uebersetzen(memory::phys_offset());
     assert_eq!(phys, Some(PhysAddr::new(0)));
 }
 
 /// Eine wilde, nie gemappte Adresse darf KEINE Übersetzung haben.
 #[test_case]
 fn ungemappte_adresse_hat_keine_uebersetzung() {
-    let mapper = MAPPER.lock();
-    let mapper = mapper.as_ref().unwrap();
-    let phys = mapper.translate_addr(VirtAddr::new(0x_dead_beef_0000));
+    let phys = memory::uebersetzen(VirtAddr::new(0x_dead_beef_0000));
     assert_eq!(phys, None);
 }
 
-/// Königsdisziplin: Wir mappen selbst eine neue Page auf den VGA-Frame
-/// und prüfen, dass die Übersetzung danach exakt dorthin zeigt.
+/// map_page_zu auf einen bestimmten Frame (wie später beim
+/// Framebuffer): Die Übersetzung muss exakt dorthin zeigen.
 #[test_case]
-fn eigenes_mapping_wird_korrekt_uebersetzt() {
-    use x86_64::structures::paging::Page;
-
-    let mut mapper = MAPPER.lock();
-    let mapper = mapper.as_mut().unwrap();
-    let mut frame_allocator = FRAME_ALLOCATOR.lock();
-    let frame_allocator = frame_allocator.as_mut().unwrap();
-
+fn map_page_zu_wird_korrekt_uebersetzt() {
     let page = Page::containing_address(VirtAddr::new(0x_5555_5555_0000));
-    memory::create_example_mapping(page, mapper, frame_allocator);
+    let vga_frame = PhysFrame::containing_address(PhysAddr::new(0xb8000));
+    // unsafe: Der VGA-Frame ist Hardware-Speicher — das Doppel-Mapping
+    // ist gewollt und ungefährlich (kein Rust-Objekt lebt dort).
+    unsafe { memory::map_page_zu(page, vga_frame).unwrap() };
 
-    let phys = mapper.translate_addr(page.start_address());
+    let phys = memory::uebersetzen(page.start_address());
     assert_eq!(phys, Some(PhysAddr::new(0xb8000)));
+}
+
+/// map_page + Schreiben/Lesen + unmap_page: der volle Lebenszyklus
+/// einer Page. Nach dem Unmap ist die Adresse wieder unübersetzbar.
+#[test_case]
+fn map_schreiben_unmap() {
+    let page = Page::containing_address(VirtAddr::new(0x_6666_6666_0000));
+    memory::map_page(page).unwrap();
+
+    // Über das frische Mapping schreiben und zurücklesen:
+    let zeiger: *mut u64 = page.start_address().as_mut_ptr();
+    // unsafe: Die Page ist soeben gültig gemappt, exklusiv unsere.
+    unsafe {
+        zeiger.write_volatile(0xdead_beef_1234_5678);
+        assert_eq!(zeiger.read_volatile(), 0xdead_beef_1234_5678);
+    }
+
+    let frame = memory::unmap_page(page).unwrap();
+    // unsafe: Die Page ist unmapped, der Frame nirgendwo mehr in Benutzung.
+    unsafe { memory::frame_freigeben(frame) };
+    assert_eq!(memory::uebersetzen(page.start_address()), None);
+}
+
+/// DER Wiederverwendungs-Test: allozieren -> freigeben -> wieder
+/// allozieren muss DENSELBEN Frame liefern (der Next-Fit-Zeiger wird
+/// beim Freigeben zurückgesetzt). Vorher ging jeder freigegebene
+/// Frame für immer verloren!
+#[test_case]
+fn frame_wiederverwendung() {
+    let erster = memory::frame_allozieren().expect("kein freier Frame");
+    // unsafe: Frame wurde nie gemappt, niemand benutzt ihn.
+    unsafe { memory::frame_freigeben(erster) };
+
+    let zweiter = memory::frame_allozieren().expect("kein freier Frame");
+    assert_eq!(erster, zweiter, "freigegebener Frame wurde nicht wiederverwendet");
+
+    // Aufräumen + Statistik-Gegenprobe:
+    let (frei_vorher, _) = memory::frame_statistik();
+    unsafe { memory::frame_freigeben(zweiter) };
+    let (frei_nachher, _) = memory::frame_statistik();
+    assert_eq!(frei_nachher, frei_vorher + 1);
+}
+
+/// Zusammenhängende Allokation (Framebuffer/DMA-Fall): 4 Pages, die
+/// virtuell UND physisch lückenlos aufeinanderfolgen.
+#[test_case]
+fn zusammenhaengende_pages() {
+    const ANZAHL: usize = 4;
+    let start = memory::allocate_pages(ANZAHL).expect("allocate_pages fehlgeschlagen");
+
+    // Über alle Page-Grenzen hinweg schreiben und stichprobenartig lesen:
+    let zeiger: *mut u8 = start.as_mut_ptr();
+    for i in 0..ANZAHL * 4096 {
+        // unsafe: Der Bereich ist frisch gemappt und exklusiv unserer.
+        unsafe { zeiger.add(i).write_volatile((i % 251) as u8) };
+    }
+    for i in (0..ANZAHL * 4096).step_by(1013) {
+        unsafe { assert_eq!(zeiger.add(i).read_volatile(), (i % 251) as u8) };
+    }
+
+    // Physische Kontiguität: jede Page liegt exakt 4096 Bytes
+    // hinter der vorherigen.
+    let phys_start = memory::uebersetzen(start).expect("nicht gemappt");
+    for i in 1..ANZAHL {
+        let phys = memory::uebersetzen(start + (i * 4096) as u64).expect("nicht gemappt");
+        assert_eq!(
+            phys.as_u64(),
+            phys_start.as_u64() + (i * 4096) as u64,
+            "Frames sind nicht zusammenhaengend"
+        );
+    }
 }

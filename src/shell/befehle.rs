@@ -163,8 +163,8 @@ impl Befehl for MemInfo {
     }
     fn ausfuehren(&self, _argumente: &str, _kontext: &mut ShellKontext, _registry: &[Box<dyn Befehl>]) {
         println!(
-            "Kernel-Heap: {} KiB gesamt (ab Adresse {:#x})",
-            allocator::HEAP_SIZE / 1024,
+            "Kernel-Heap: {} KiB aktuell (ab Adresse {:#x}, wachstumsfaehig)",
+            allocator::heap_groesse() / 1024,
             allocator::HEAP_START
         );
         match allocator::heap_statistik() {
@@ -177,6 +177,15 @@ impl Befehl for MemInfo {
                 println!("   Lern-Allocator fuehrt nicht Buch.)");
             }
         }
+        // Physischer Speicher (aus dem Bitmap-Frame-Allocator):
+        let (frames_frei, frames_gesamt) = crate::memory::frame_statistik();
+        println!(
+            "Physischer Speicher: {} von {} Frames frei ({} von {} MiB)",
+            frames_frei,
+            frames_gesamt,
+            frames_frei * 4 / 1024,
+            frames_gesamt * 4 / 1024
+        );
     }
 }
 

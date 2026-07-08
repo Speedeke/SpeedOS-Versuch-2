@@ -183,15 +183,11 @@ fn test_kernel_main(boot_info: &'static bootloader::BootInfo) -> ! {
 
     init(); // GDT + IDT laden, damit Exception-Tests funktionieren
 
-    // Auch den Heap aufsetzen — die Shell-Tests brauchen Box & Vec.
-    // unsafe: einmaliger Aufruf mit dem garantiert korrekten Mapping/
-    // der Memory Map des Bootloaders (siehe # Safety in memory.rs).
+    // Auch Speicherverwaltung + Heap aufsetzen — die Shell-Tests
+    // brauchen Box & Vec, die memory-Tests die globale API.
     let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
-    let mut mapper = unsafe { memory::init(phys_mem_offset) };
-    let mut frame_allocator =
-        unsafe { memory::BootInfoFrameAllocator::init(&boot_info.memory_map) };
-    allocator::init_heap(&mut mapper, &mut frame_allocator)
-        .expect("Heap-Initialisierung fehlgeschlagen");
+    memory::init(phys_mem_offset, &boot_info.memory_map);
+    allocator::init_heap().expect("Heap-Initialisierung fehlgeschlagen");
 
     // Dateisystem mounten — die fs- und Shell-Tests brauchen es.
     fs::init();

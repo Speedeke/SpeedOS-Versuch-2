@@ -5,6 +5,23 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### Geändert (Speicherverwaltung generalüberholt)
+- Mapper + Frame-Allocator sind jetzt global (`Mutex<Option<...>>` in
+  memory.rs, Muster wie das VFS) — jedes Modul kann zur Laufzeit Pages
+  mappen. Neue API: map_page, map_page_zu (MMIO), unmap_page,
+  allocate_pages (virtuell UND physisch zusammenhängend, für
+  Framebuffer/DMA), frame_allozieren/frame_freigeben, uebersetzen,
+  frame_statistik
+- BootInfoFrameAllocator (O(n²), konnte nie freigeben) ersetzt durch
+  Bitmap-Frame-Allocator: Next-Fit-Suche, O(1)-Freigabe mit
+  Doppel-Freigabe-Erkennung, freigegebene Frames werden sofort
+  wiederverwendet, zusammenhängende Allokation möglich
+- Heap wächst zur Laufzeit: allocator::heap_erweitern(pages) —
+  alle drei Allocatoren unterstützen extend
+- meminfo zeigt jetzt auch die physische Frame-Statistik
+- 5 neue Tests (Frame-Wiederverwendung, Kontiguität, map/unmap-
+  Lebenszyklus, map_page_zu, Heap-Erweiterung via try_reserve)
+
 ### Verbessert
 - Qualitäts-Pass: alle Clippy-Lints behoben, `# Safety`-Dokumentation
   für alle unsafe-Funktionen, Begründungs-Kommentare an jedem
