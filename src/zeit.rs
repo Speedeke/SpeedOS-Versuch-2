@@ -35,6 +35,68 @@ pub fn ms_von_ticks(ticks: u64) -> u64 {
 }
 
 // ---------------------------------------------------------------------------
+// Async-Warten auf Timer-Ticks (fürs Cursor-Blinken u. Ä.)
+//
+// Ein async Task darf NICHT in einer Schleife pollen ("ist es schon
+// soweit?") — mit yield_now wäre er immer "bereit", der Executor käme
+// nie zum Schlafen, die CPU liefe auf 100 %. Stattdessen: Der Task
+// deponiert seinen Waker hier, der Timer-Interrupt weckt ihn beim
+// nächsten Tick. Zwischen den Ticks schläft die CPU per hlt.
+// ---------------------------------------------------------------------------
+
+use core::future::Future;
+use core::pin::Pin;
+use core::task::{Context, Poll};
+use futures_util::task::AtomicWaker;
+
+/// Der Waker des (einen) wartenden Tasks. Ein AtomicWaker reicht:
+/// Aktuell wartet nur der Cursor-Blink-Task auf Ticks. (Mehrere
+/// Warter bräuchten eine Liste — bauen wir, wenn es soweit ist.)
+static TICK_WAKER: AtomicWaker = AtomicWaker::new();
+
+/// Wird vom Timer-Interrupt-Handler gerufen (interrupt-sicher:
+/// AtomicWaker::wake ist lock-frei).
+pub(crate) fn tick_waker_wecken() {
+    TICK_WAKER.wake();
+}
+
+/// Future, die beim NÄCHSTEN Timer-Tick fertig wird.
+struct NaechsterTick {
+    start_ticks: u64,
+}
+
+impl Future for NaechsterTick {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        if ticks() > self.start_ticks {
+            return Poll::Ready(());
+        }
+        // Waker registrieren, dann NOCHMAL prüfen — schließt die
+        // Race Condition, falls der Tick genau dazwischen kam
+        // (gleiches Muster wie beim Tastatur-Stream).
+        TICK_WAKER.register(cx.waker());
+        if ticks() > self.start_ticks {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
+/// Wartet asynchron ungefähr `ms` Millisekunden (Auflösung: ~55 ms,
+/// die PIT-Tick-Länge — für Cursor-Blinken völlig ausreichend).
+pub async fn warte_ms(ms: u64) {
+    let ziel = ms_seit_boot() + ms;
+    while ms_seit_boot() < ziel {
+        NaechsterTick {
+            start_ticks: ticks(),
+        }
+        .await;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests — laufen in QEMU über unser eigenes Test-Framework (cargo test)
 // ---------------------------------------------------------------------------
 

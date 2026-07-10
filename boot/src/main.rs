@@ -67,6 +67,12 @@ fn main() {
         .arg(format!("if=pflash,format=raw,file={}", vars_pfad.display()));
     qemu.arg("-drive")
         .arg(format!("format=raw,file={}", image_pfad.display()));
+    // Grafikkarte mit Wunsch-Auflösung 1280x720 (per EDID): Die
+    // UEFI-Firmware wählt dann diesen Modus, statt des riesigen
+    // Standard-Maximums — weniger Pixel = flotteres Zeichnen.
+    // (Der Kernel kommt trotzdem mit jeder Auflösung klar.)
+    qemu.arg("-vga").arg("none");
+    qemu.arg("-device").arg("VGA,edid=on,xres=1280,yres=720");
     // Die serielle Schnittstelle ist unser Debug-Lebensnerv:
     // immer ins Terminal spiegeln.
     qemu.arg("-serial").arg("stdio");

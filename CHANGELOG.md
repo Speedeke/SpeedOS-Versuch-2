@@ -5,6 +5,23 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### Hinzugefügt (Framebuffer-Konsole — die Konsole ist zurück!)
+- framebuffer.rs: Double Buffering (Back-Buffer aus allocate_pages,
+  present() als Block-Kopie), Pixel-/Text-Primitive mit Antialiasing
+  (Farbmischung), hochscrollen() als memmove im Back-Buffer
+- Font: noto-sans-mono-bitmap (vorgerastert, pure Rust, Latin-1 =
+  Umlaute ä ö ü ß; Größe 16 Konsole, 32 fett für den Boot-Screen)
+- konsole.rs ist jetzt die FramebufferKonsole: Zeichenraster,
+  Zeilenumbruch, Scrolling, Farben pro Zeichen (Obsidian-Aurora-
+  Palette) — print!/println! schreiben wieder DOPPELT (Bildschirm +
+  seriell mit ANSI), Shell und Makros blieben unberührt (die Naht!)
+- Software-Cursor: blinkt über einen async Task; dafür zeit::warte_ms
+  mit Tick-Future (Timer-Interrupt weckt per AtomicWaker — kein
+  Busy-Polling, die CPU schläft zwischen den Blinks)
+- Boot-Screen: Obsidian-Hintergrund, Aurora-Farbverlauf
+  (violett-blau-cyan), SpeedOS-Schriftzug in Größe 32 fett
+- QEMU-Auflösung per EDID auf 1280x720 gewünscht (Runner)
+
 ### Geändert (Migration auf bootloader 0.11 — UEFI + Framebuffer)
 - Kernel bootet jetzt per UEFI (edk2/OVMF) und bekommt einen linearen
   Framebuffer vom Bootloader (QEMU: 2560x1600 BGR) — Grundlage für

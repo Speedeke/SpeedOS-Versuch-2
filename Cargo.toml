@@ -62,6 +62,20 @@ conquer-once = { version = "0.4", default-features = false }
 # (interrupt-sicherer Aufbewahrungsort für den Waker).
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 
+# Vorgerenderter Bitmap-Font (Noto Sans Mono) für den Framebuffer:
+# pure Rust (const-Arrays, kein Datei-Parsing wie bei PSF), mit
+# Antialiasing-Intensitäten vorgerastert — und der Latin-1-Block
+# liefert unsere Umlaute (ä ö ü ß). Größe 16 = Konsole,
+# 32 + bold = Boot-Screen-Schriftzug.
+noto-sans-mono-bitmap = { version = "0.3.2", default-features = false, features = [
+    "regular",
+    "bold",
+    "size_16",
+    "size_32",
+    "unicode-basic-latin",
+    "unicode-latin-1-supplement",
+] }
+
 [features]
 # Zum Lernen: alternative Heap-Allocatoren (Standard ist der
 # linked_list_allocator). Aktivieren mit z. B.:

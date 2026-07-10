@@ -18,11 +18,10 @@
   der Runner übersetzt Exit-Code 33 -> Erfolg (Timeout 300 s).
 
 ## Debug
-- **ALLE** Ausgaben laufen über die serielle Schnittstelle (COM1 / Port 0x3F8)
-  ins Terminal. ÜBERGANGSZUSTAND seit der 0.11-Migration: Es gibt noch kein
-  Framebuffer-Text-Rendering, seriell ist die EINZIGE Textausgabe
-  (`konsole.rs` = ANSI-Farben über seriell). Sobald der Text-Renderer steht,
-  gilt wieder: Framebuffer UND seriell, niemals nur Bildschirm.
+- **ALLE** Ausgaben laufen doppelt: FramebufferKonsole (Bildschirm) UND
+  serielle Schnittstelle (COM1 / Port 0x3F8, mit ANSI-Farben) — die Regel
+  steckt in `konsole::_print`, nicht beim Aufrufer. Niemals nur Bildschirm.
+  `serial_println!` nur für reine Debug-Ausgaben.
 
 ## Git
 - Nach **JEDEM** funktionierenden Schritt ein Commit mit klarer Message.
@@ -51,11 +50,17 @@
   `RamFs` (`src/fs/ramfs.rs`, in-memory); FAT32 und ein eigenes
   Disk-Dateisystem sollen später exakt dieselbe Schnittstelle bedienen —
   dann wird nur das gemountete Dateisystem ausgetauscht, kein Befehl ändert sich.
-- **Ausgabe immer doppelt (Ziel-Regel):** `print!`/`println!` (lib.rs) sollen
-  auf Bildschirm UND seriell schreiben — die Regel ist in die Makros eingebaut,
-  nicht dem Aufrufer überlassen. Übergangsweise (bis zum Framebuffer-Text-
-  Renderer) schreiben sie nur seriell; die Naht in `lib.rs::_print` bleibt.
-  `serial_println!` nur für reine Debug-Ausgaben.
+- **Grafik-Architektur (Juli 2026):** `framebuffer.rs` = Double Buffering
+  (Back-Buffer aus `memory::allocate_pages`, `present()` kopiert als Block,
+  `hochscrollen()` = memmove im Back-Buffer, NIE neu rendern). Font:
+  noto-sans-mono-bitmap (vorgerastert, Latin-1 für Umlaute). `konsole.rs` =
+  FramebufferKonsole (Raster, Farben = Obsidian-Aurora-Palette, Software-
+  Cursor als async Blink-Task über `zeit::warte_ms`). Lock-Ordnung:
+  KONSOLE vor FRAMEBUFFER, beide nur mit Interrupts aus. Niemals direkt
+  in den echten Framebuffer zeichnen — immer Back-Buffer + present.
+- **Async-Zeitwarten:** `zeit::warte_ms(ms)` statt yield-Polling — der
+  Timer-Interrupt weckt per AtomicWaker (aktuell EIN Warter; bei Bedarf
+  auf eine Waker-Liste erweitern).
 - **Bootloader-0.11-Migration (Juli 2026, docs/migration-011.md):** UEFI
   statt BIOS (BIOS-Stages von 0.11.15 bauen auf aktuellem Nightly nicht).
   Drei hart erkämpfte UEFI-Lektionen, alle im Code dokumentiert:

@@ -243,10 +243,11 @@ impl Befehl for Farbtest {
             (Color::White, "Weiss"),
         ];
         for (nr, (farbe, name)) in farben.iter().enumerate() {
-            // Farbblock in der Farbe selbst, Name daneben in Grau
-            // (sonst wäre "Schwarz" komplett unsichtbar).
-            konsole::set_color(*farbe, Color::Black);
-            print!("██");
+            // Farbfeld als eingefärbter HINTERGRUND zweier Leerzeichen —
+            // das klappt mit jedem Font (der Noto-Font hat keinen
+            // Vollblock), der Name daneben in Grau.
+            konsole::set_color(Color::LightGray, *farbe);
+            print!("  ");
             konsole::set_color(Color::LightGray, Color::Black);
             print!(" {:<13}", name);
             if (nr + 1) % 4 == 0 {
@@ -547,7 +548,8 @@ fn baum_zeichnen(pfad: &str, einrueckung: &str) {
     let anzahl = eintraege.len();
     for (i, eintrag) in eintraege.iter().enumerate() {
         let letzter = i + 1 == anzahl;
-        let ast = if letzter { "└─" } else { "├─" };
+        // ASCII-Äste: Die Box-Zeichen (└─ etc.) fehlen im Noto-Font.
+        let ast = if letzter { "`--" } else { "|--" };
         match eintrag.typ {
             NodeTyp::Verzeichnis => {
                 konsole::set_color(Color::LightCyan, Color::Black);
@@ -559,7 +561,7 @@ fn baum_zeichnen(pfad: &str, einrueckung: &str) {
                     format!("{}/{}", pfad, eintrag.name)
                 };
                 let kind_einrueckung =
-                    format!("{}{}", einrueckung, if letzter { "  " } else { "│ " });
+                    format!("{}{}", einrueckung, if letzter { "    " } else { "|   " });
                 baum_zeichnen(&kind_pfad, &kind_einrueckung);
             }
             NodeTyp::Datei => {

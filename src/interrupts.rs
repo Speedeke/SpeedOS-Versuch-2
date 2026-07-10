@@ -211,10 +211,12 @@ pub fn timer_ticks() -> u64 {
     TICKS.load(Ordering::Relaxed)
 }
 
-/// Timer-Interrupt: Nur den Zähler erhöhen — KEINE Ausgabe, das würde
-/// den Bildschirm ~18x pro Sekunde vollspammen.
+/// Timer-Interrupt: Zähler erhöhen und wartende Tick-Futures wecken
+/// (beides lock-frei!) — KEINE Ausgabe, das würde den Bildschirm
+/// ~18x pro Sekunde vollspammen.
 extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
     TICKS.fetch_add(1, Ordering::Relaxed);
+    crate::zeit::tick_waker_wecken();
 
     // Dem PIC melden: "fertig behandelt" (End of Interrupt).
     // Ohne das schickt er nie wieder einen Timer-Interrupt!

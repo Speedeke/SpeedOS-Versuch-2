@@ -18,11 +18,11 @@ ist alles selbst gebaut (auf Basis der bewährten Architektur aus
 
 - **Eigenständiger Boot:** `no_std`-Kernel (Target `x86_64-unknown-none`),
   UEFI-Boot über bootloader_api 0.11, startet in QEMU
-- **Linearer Framebuffer:** vom Bootloader eingerichtet (bei QEMU z. B.
-  2560x1600 BGR) — Text-Rendering darauf ist der nächste Meilenstein.
-  Übergangsweise läuft alle Textausgabe über die serielle Konsole
-  (`konsole.rs`, mit ANSI-Farben — die Shell bleibt voll benutzbar:
-  Tippen im QEMU-Fenster, Ausgabe im Terminal)
+- **Grafik-Konsole:** linearer Framebuffer (1280x720) mit Double
+  Buffering, vorgerastertem Noto-Sans-Mono-Font (Antialiasing,
+  Umlaute!), Scrolling per memmove, blinkendem Software-Cursor und
+  Obsidian-Aurora-Boot-Screen — alle Ausgaben laufen zusätzlich mit
+  ANSI-Farben über die serielle Schnittstelle
 - **Absturzsicherheit:** IDT mit Handlern für Breakpoint, Page Fault
   und Double Fault — letzterer mit eigenem Notfall-Stack (IST/TSS),
   sodass selbst ein Kernel-Stack-Overflow sauber gemeldet wird
@@ -71,9 +71,6 @@ Es verpackt den Kernel mit `bootloader::UefiBoot` in ein bootfähiges
 GPT-Image und startet QEMU. Der allererste Build kompiliert dabei
 einmalig die Bootloader-Stages (ein paar Minuten).
 
-Aktueller Übergangszustand: Getippt wird im QEMU-Fenster (PS/2-Tastatur),
-die Shell-Ausgabe erscheint im Terminal (seriell) — bis der
-Framebuffer-Text-Renderer fertig ist.
 
 Alternative Heap-Allocatoren zum Experimentieren:
 
@@ -88,8 +85,9 @@ cargo test --features fixed-block-allocator   # Frei-Listen fester Größen
 src/
 ├── main.rs          Kernel-Einstieg: Init-Reihenfolge, Framebuffer, Shell
 ├── lib.rs           Kern-Bibliothek: init(), Test-Framework, print-Makros
-├── konsole.rs       Übergangs-Konsole: ANSI-Farben über seriell
-├── serial.rs        Serielle Ausgabe (COM1) — aktuell der Text-Kanal
+├── framebuffer.rs   Double Buffering, Font-Rendering, Boot-Screen
+├── konsole.rs       FramebufferKonsole: Raster, Farben, Blink-Cursor
+├── serial.rs        Serielle Ausgabe (COM1), parallel zum Bildschirm
 ├── gdt.rs           GDT/TSS + Notfall-Stack für Double Faults
 ├── interrupts.rs    IDT, Exceptions, PIC/PIT/LAPIC, Timer & Tastatur
 ├── memory.rs        Paging: globale API + Bitmap-Frame-Allocator
@@ -108,8 +106,7 @@ docs/                Migrationsplan bootloader 0.9 -> 0.11
 - [x] Boot, Seriell, Exceptions, Interrupts, Tastatur (QWERTZ)
 - [x] Paging, Heap, async/await, Shell, RAM-Dateisystem
 - [x] **UEFI-Boot mit linearem Framebuffer** (bootloader 0.11)
-- [ ] **Grafik:** Text-Renderer auf dem Framebuffer (eigene Schrift,
-      Software-Cursor) — der nächste Meilenstein
+- [x] **Grafik-Konsole:** Font-Rendering, Double Buffering, Boot-Screen
 - [ ] **Persistenz:** Block-Device-Treiber + Disk-Dateisystem (VFS ist bereit)
 - [ ] **User Space:** Ring-3-Prozesse, Syscalls, präemptiver Scheduler
 - [ ] Ferner: eigene Programme laden (ELF), Netzwerk, Sound

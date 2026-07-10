@@ -22,11 +22,10 @@
 
 extern crate alloc;
 
-use bootloader_api::info::PixelFormat;
 use bootloader_api::{entry_point, BootInfo};
 use core::panic::PanicInfo;
 use speed_os::task::{executor::Executor, Task};
-use speed_os::{allocator, memory, serial_println, shell};
+use speed_os::{allocator, framebuffer, konsole, memory, serial_println, shell};
 use x86_64::VirtAddr;
 
 // Das entry_point!-Makro erzeugt die echte _start-Funktion und prüft
@@ -57,14 +56,11 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     memory::init(VirtAddr::new(phys_mem_offset), &boot_info.memory_regions);
     allocator::init_heap().expect("Heap-Initialisierung fehlgeschlagen");
 
-    // 4. Dateisystem: RamFs als Wurzel mounten (mit Demo-Dateien).
-    speed_os::fs::init();
-
-    // 5. Framebuffer-Beweis: komplett mit SpeedOS-Blau füllen und
-    //    die Eckdaten seriell ausgeben. (Text darauf: nächster Schritt!)
+    // 4. Grafik: Doppel-Puffer + Text-Konsole auf dem Framebuffer,
+    //    dann der Boot-Screen (Obsidian-Aurora, ~1,5 Sekunden).
     match framebuffer {
-        Some(mut framebuffer) => {
-            let info = framebuffer.info();
+        Some(fb) => {
+            let info = fb.info();
             serial_println!(
                 "[FB] Linearer Framebuffer: {}x{} Pixel, Format {:?}, {} Bytes/Pixel, Stride {} Pixel, Puffer {} KiB",
                 info.width,
@@ -74,42 +70,28 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
                 info.stride,
                 info.byte_len / 1024
             );
-
-            // SpeedOS-Blau (das Banner-Blau): R=0, G=40, B=160.
-            let (r, g, b) = (0u8, 40u8, 160u8);
-            let bytes_pro_pixel = info.bytes_per_pixel;
-            for pixel in framebuffer.buffer_mut().chunks_exact_mut(bytes_pro_pixel) {
-                match info.pixel_format {
-                    PixelFormat::Rgb => {
-                        pixel[0] = r;
-                        pixel[1] = g;
-                        pixel[2] = b;
-                    }
-                    PixelFormat::Bgr => {
-                        pixel[0] = b;
-                        pixel[1] = g;
-                        pixel[2] = r;
-                    }
-                    // Graustufen oder Unbekanntes: mittleres Grau.
-                    _ => pixel.fill(0x60),
-                }
-            }
-            serial_println!("[FB] Framebuffer mit SpeedOS-Blau gefuellt.");
+            framebuffer::init(fb);
+            konsole::init();
+            framebuffer::bootscreen_zeigen(1500);
+            konsole::clear_screen();
         }
-        None => serial_println!("[FB] WARNUNG: Bootloader hat KEINEN Framebuffer uebergeben!"),
+        None => serial_println!("[FB] WARNUNG: Kein Framebuffer — Ausgabe nur seriell!"),
     }
 
-    serial_println!("[BOOT] GDT/IDT/PIC, Speicher, Heap und RamFs initialisiert.");
-    serial_println!("[BOOT] Shell-Eingabe: im QEMU-Fenster tippen, Ausgabe HIER im Terminal.");
+    // 5. Dateisystem: RamFs als Wurzel mounten (mit Demo-Dateien).
+    speed_os::fs::init();
+
+    serial_println!("[BOOT] GDT/IDT/PIC, Speicher, Heap, Grafik und RamFs initialisiert.");
 
     // Im Testmodus (cargo test) stattdessen die Tests ausführen.
     #[cfg(test)]
     test_main();
 
-    // 6. Der Executor übernimmt als Hauptschleife und startet die
-    //    SpeedShell — Ausgabe übergangsweise über die serielle Konsole.
+    // 6. Der Executor übernimmt als Hauptschleife: SpeedShell +
+    //    Cursor-Blinken laufen als kooperative Tasks.
     let mut executor = Executor::new();
     executor.spawn(Task::new(shell::run()));
+    executor.spawn(Task::new(konsole::cursor_blink_task()));
     executor.run();
 }
 

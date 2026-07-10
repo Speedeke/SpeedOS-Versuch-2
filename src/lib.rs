@@ -29,6 +29,7 @@ use core::panic::PanicInfo;
 // Unsere Treiber- und System-Module — bewusst voneinander isoliert
 // (Mikrokernel-Prinzip).
 pub mod allocator;
+pub mod framebuffer;
 pub mod fs;
 pub mod gdt;
 pub mod interrupts;
@@ -94,22 +95,20 @@ pub fn init() {
 // ---------------------------------------------------------------------------
 // Die zentralen Ausgabe-Makros print! und println!
 //
-// ÜBERGANGSZUSTAND seit der bootloader-0.11-Migration: Der VGA-
-// Textmodus ist Geschichte (wir booten in einen Grafikmodus). Bis der
-// Framebuffer-Text-Renderer steht, gehen print!/println! NUR über die
-// serielle Schnittstelle — danach wieder doppelt (Framebuffer + seriell).
-// serial_println! bleibt für reine Debug-Ausgaben reserviert.
+// Die Projektregel "Ausgabe immer doppelt" lebt wieder: print!/println!
+// schreiben auf die FramebufferKonsole (Bildschirm) UND seriell —
+// konsole::_print erledigt beides. Ist (noch) kein Framebuffer
+// initialisiert (z. B. in manchen Tests), bleibt automatisch die
+// serielle Ausgabe übrig. serial_println! nur für reine Debug-Ausgaben.
 // ---------------------------------------------------------------------------
 
-/// Interne Hilfsfunktion der Makros.
-/// (Übergangsweise identisch mit serial::_print — die Naht bleibt,
-/// damit der Framebuffer-Renderer hier später nur eingehängt wird.)
+/// Interne Hilfsfunktion der Makros: Bildschirm + seriell.
 #[doc(hidden)]
 pub fn _print(args: core::fmt::Arguments) {
-    serial::_print(args);
+    konsole::_print(args);
 }
 
-/// Gibt formatierten Text aus (übergangsweise nur seriell, s. o.).
+/// Gibt formatierten Text auf Bildschirm UND seriell aus.
 #[macro_export]
 macro_rules! print {
     ($($arg:tt)*) => ($crate::_print(format_args!($($arg)*)));
@@ -211,7 +210,8 @@ fn test_kernel_main(boot_info: &'static mut bootloader_api::BootInfo) -> ! {
 
     init(); // GDT + IDT laden, damit Exception-Tests funktionieren
 
-    // &'static mut zu &'static abwerten — wir brauchen nur Lese-Zugriff.
+    // Framebuffer HERAUSNEHMEN, bevor die BootInfo zu &'static wird.
+    let fb = boot_info.framebuffer.take();
     let boot_info: &'static bootloader_api::BootInfo = boot_info;
 
     // Auch Speicherverwaltung + Heap aufsetzen — die Shell-Tests
@@ -222,6 +222,13 @@ fn test_kernel_main(boot_info: &'static mut bootloader_api::BootInfo) -> ! {
         .expect("Bootloader hat kein Physik-Mapping angelegt");
     memory::init(VirtAddr::new(phys_mem_offset), &boot_info.memory_regions);
     allocator::init_heap().expect("Heap-Initialisierung fehlgeschlagen");
+
+    // Framebuffer + Konsole, damit auch die Grafik-Pfade getestet
+    // werden (println! zeichnet in den Tests wirklich auf den Puffer).
+    if let Some(fb) = fb {
+        framebuffer::init(fb);
+        konsole::init();
+    }
 
     // Dateisystem mounten — die fs- und Shell-Tests brauchen es.
     fs::init();
