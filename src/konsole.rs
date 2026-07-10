@@ -320,6 +320,14 @@ pub fn cursor_aktivieren() {
     });
 }
 
+/// Pausiert den Cursor (z. B. während der Grafik-Demo den ganzen
+/// Bildschirm gehört — sonst malt der Blink-Task hinein).
+pub fn cursor_pausieren() {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        KONSOLE.lock().cursor_aktiv = false;
+    });
+}
+
 /// Der Cursor-Blink-Task: läuft ewig im Executor und schaltet den
 /// Cursor im Halbsekunden-Takt um. Wartet ASYNCHRON auf Timer-Ticks
 /// (zeit::warte_ms) — zwischen den Blinks schläft die CPU.

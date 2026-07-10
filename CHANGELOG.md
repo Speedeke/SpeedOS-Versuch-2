@@ -5,6 +5,20 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### Hinzugefügt (Zeichen-Werkzeuge: grafik.rs)
+- Zeichner auf dem Back-Buffer: Linien (Bresenham), Rechtecke
+  (gefüllt/Rahmen/abgerundet), Kreise (gefüllt/Midpoint-Rahmen),
+  vertikale Farbverläufe, Text an Pixelposition (per Intensität
+  auf jeden Untergrund geblendet), Bitmap-Blitting mit
+  Transparenz-Farbe
+- Rgba-Farben mit Alpha-Blending (reine, unit-getestete Formel)
+- Clipping: optionales Clip-Rechteck für alle Operationen
+  (Schnitt-Mathematik unit-getestet)
+- Eingebettetes Icon-Format (16x16-ASCII-Art + Palette) mit vier
+  Icons: Ordner, Datei, Zahnrad, SpeedOS-Logo
+- Shell-Befehl grafiktest: zeigt alle Primitive, beliebige Taste
+  kehrt zur Konsole zurück; framebuffer::pixel_lesen für Alpha
+
 ### Hinzugefügt (Framebuffer-Konsole — die Konsole ist zurück!)
 - framebuffer.rs: Double Buffering (Back-Buffer aus allocate_pages,
   present() als Block-Kopie), Pixel-/Text-Primitive mit Antialiasing

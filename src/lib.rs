@@ -31,6 +31,7 @@ use core::panic::PanicInfo;
 pub mod allocator;
 pub mod framebuffer;
 pub mod fs;
+pub mod grafik;
 pub mod gdt;
 pub mod interrupts;
 pub mod konsole;

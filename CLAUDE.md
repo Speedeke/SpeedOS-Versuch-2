@@ -61,6 +61,15 @@
 - **Async-Zeitwarten:** `zeit::warte_ms(ms)` statt yield-Polling — der
   Timer-Interrupt weckt per AtomicWaker (aktuell EIN Warter; bei Bedarf
   auf eine Waker-Liste erweitern).
+- **Zeichen-Werkzeuge (Juli 2026):** `grafik.rs` = Zeichner auf dem
+  Back-Buffer mit optionalem Clip-Rechteck und Alpha-Blending (alle
+  Pixel laufen durch EINEN Pfad: Zeichner::pixel). Clipping-Schnitt
+  und Alpha-Formel sind reine, unit-getestete Funktionen. Icons =
+  16x16-ASCII-Art-Konstanten mit gemeinsamer Palette (unbekanntes
+  Zeichen -> Magenta = sichtbarer Tippfehler). Demo-Modi (grafiktest)
+  über AtomicBool-Flag: Shell fängt die nächste Taste ab und stellt
+  die Konsole wieder her. Fließkomma gibt es NICHT (soft-float!) —
+  alle Algorithmen ganzzahlig (Bresenham, Midpoint).
 - **Bootloader-0.11-Migration (Juli 2026, docs/migration-011.md):** UEFI
   statt BIOS (BIOS-Stages von 0.11.15 bauen auf aktuellem Nightly nicht).
   Drei hart erkämpfte UEFI-Lektionen, alle im Code dokumentiert:

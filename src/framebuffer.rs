@@ -82,6 +82,23 @@ impl DoppelPuffer {
         }
     }
 
+    /// Liest ein Pixel aus dem BACK-Buffer (der ist normales RAM —
+    /// den echten Framebuffer darf man nie lesen!). Braucht das
+    /// Alpha-Blending im grafik-Modul: Mischen geht nur, wenn man
+    /// weiß, was schon da ist.
+    pub fn pixel_lesen(&self, x: usize, y: usize) -> Option<Farbe> {
+        if x >= self.info.width || y >= self.info.height {
+            return None;
+        }
+        let offset = (y * self.info.stride + x) * self.info.bytes_per_pixel;
+        let pixel = &self.hinten[offset..offset + self.info.bytes_per_pixel];
+        Some(match self.info.pixel_format {
+            PixelFormat::Rgb => Farbe::neu(pixel[0], pixel[1], pixel[2]),
+            PixelFormat::Bgr => Farbe::neu(pixel[2], pixel[1], pixel[0]),
+            _ => Farbe::neu(pixel[0], pixel[0], pixel[0]),
+        })
+    }
+
     /// Füllt den ganzen Back-Buffer mit einer Farbe.
     pub fn fuellen(&mut self, farbe: Farbe) {
         for y in 0..self.info.height {

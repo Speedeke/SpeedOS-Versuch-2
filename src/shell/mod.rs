@@ -50,6 +50,16 @@ pub async fn run() {
 
     prompt(&kontext);
     while let Some(key) = keys.next().await {
+        // Grafik-Demo aktiv? Dann beendet JEDE Taste sie und wir
+        // kehren zur Konsole zurück (Taste wird verschluckt).
+        if crate::grafik::demo_aktiv() {
+            crate::grafik::demo_beenden();
+            konsole::cursor_aktivieren();
+            konsole::clear_screen();
+            prompt(&kontext);
+            continue;
+        }
+
         // Schritt 1: pc_keyboard-Event -> abstraktes Taste-Event.
         let taste = match key {
             DecodedKey::Unicode('\n') | DecodedKey::Unicode('\r') => Taste::Enter,
@@ -84,7 +94,11 @@ pub async fn run() {
                 if !eingabe.is_empty() {
                     befehl_ausfuehren(&registry, &mut kontext, &eingabe);
                 }
-                prompt(&kontext);
+                // Kein Prompt, wenn gerade die Grafik-Demo läuft —
+                // der würde mitten ins Bild malen.
+                if !crate::grafik::demo_aktiv() {
+                    prompt(&kontext);
+                }
             }
             Reaktion::KandidatenZeigen(kandidaten) => {
                 println!();
@@ -181,6 +195,10 @@ mod tests {
             }
             befehl.ausfuehren("", &mut kontext, &registry);
         }
+        // grafiktest hat den Demo-Modus gesetzt (und dabei alle
+        // Primitive wirklich gezeichnet — guter Test!): aufräumen.
+        crate::grafik::demo_beenden();
+        crate::konsole::cursor_aktivieren();
     }
 
     /// Ein unbekannter Befehl gibt die Fehlermeldung aus, ohne
