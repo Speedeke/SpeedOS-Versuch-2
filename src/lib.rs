@@ -29,6 +29,7 @@ use core::panic::PanicInfo;
 // Unsere Treiber- und System-Module — bewusst voneinander isoliert
 // (Mikrokernel-Prinzip).
 pub mod allocator;
+pub mod fenster;
 pub mod framebuffer;
 pub mod fs;
 pub mod grafik;
@@ -230,6 +231,8 @@ fn test_kernel_main(boot_info: &'static mut bootloader_api::BootInfo) -> ! {
         .expect("Bootloader hat kein Physik-Mapping angelegt");
     memory::init(VirtAddr::new(phys_mem_offset), &boot_info.memory_regions);
     allocator::init_heap().expect("Heap-Initialisierung fehlgeschlagen");
+    // Etwas mehr Luft für Tests mit Fenster-Puffern (1 MiB extra):
+    allocator::heap_erweitern(256).expect("Heap-Erweiterung fehlgeschlagen");
 
     // Framebuffer + Konsole, damit auch die Grafik-Pfade getestet
     // werden (println! zeichnet in den Tests wirklich auf den Puffer).

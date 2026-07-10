@@ -61,6 +61,28 @@
 - **Async-Zeitwarten:** `zeit::warte_ms(ms)` statt yield-Polling — der
   Timer-Interrupt weckt per AtomicWaker (aktuell EIN Warter; bei Bedarf
   auf eine Waker-Liste erweitern).
+- **Fenster & Compositor (Juli 2026):** `src/fenster/mod.rs`. JEDES
+  Fenster = eigener Pixel-Puffer (`FensterPuffer`, Vec<Farbe>) +
+  Metadaten (Position, Größe, Titel, Fokus). Z-Ordnung = Reihenfolge
+  im `Vec<Fenster>` (letztes = ganz vorne). Apps zeichnen NUR in ihren
+  Puffer, NIE auf den Bildschirm — dafür ist `grafik::Zeichner`
+  generisch über das `Zeichenflaeche`-Trait (Bildschirm-Back-Buffer
+  UND Fenster-Puffer implementieren es identisch). Der Compositor-Task
+  setzt pro Frame zusammen: Desktop-Aurora-Hintergrund -> Fenster in
+  Z-Reihenfolge (Schatten/Titelzeile/Rahmen malt der COMPOSITOR, nicht
+  die App) -> present() -> Maus-Cursor obenauf. Dirty-Flags
+  (`alles_dirty` + pro Fenster `dirty`): NUR komponieren, wenn sich
+  etwas geändert hat. Event-Routing: Maus -> oberstes Fenster unter dem
+  Cursor (in Fenster-Koordinaten umgerechnet, Titelzeile zählt nicht
+  zum Inhalt), Klick hebt+fokussiert; Tastatur -> fokussiertes Fenster;
+  Titelzeilen-Drag verschiebt. Lock-Ordnung: FRAMEBUFFER -> MANAGER.
+  Der Desktop-Modus (AtomicBool) pausiert Konsole/Cursor; ESC kehrt
+  zurück, die Fenster bleiben erhalten.
+- **Mehrere Tick-Warter (Juli 2026):** `zeit::warte_ms` nutzt eine
+  feste Slot-Liste von AtomicWakern (nicht EINEN!), weil Cursor,
+  Compositor und Uhr gleichzeitig auf Ticks warten — ein einzelner
+  AtomicWaker ließe alle bis auf den letzten verhungern. Slots werden
+  lock-frei per compare_exchange belegt und in Drop zurückgegeben.
 - **PS/2-Maus (Juli 2026):** `src/maus.rs` — Controller-Init NUR über
   die Maus-Bits (Tastatur-Bits 0/4/6 der 8042-Konfiguration niemals
   anfassen!), alle Handshakes gepollt mit Timeout (fehlende Maus hängt

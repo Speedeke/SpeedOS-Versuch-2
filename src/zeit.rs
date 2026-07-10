@@ -35,52 +35,114 @@ pub fn ms_von_ticks(ticks: u64) -> u64 {
 }
 
 // ---------------------------------------------------------------------------
-// Async-Warten auf Timer-Ticks (fürs Cursor-Blinken u. Ä.)
+// Async-Warten auf Timer-Ticks (Cursor-Blinken, Compositor, Uhr, ...)
 //
 // Ein async Task darf NICHT in einer Schleife pollen ("ist es schon
 // soweit?") — mit yield_now wäre er immer "bereit", der Executor käme
 // nie zum Schlafen, die CPU liefe auf 100 %. Stattdessen: Der Task
 // deponiert seinen Waker hier, der Timer-Interrupt weckt ihn beim
 // nächsten Tick. Zwischen den Ticks schläft die CPU per hlt.
+//
+// WICHTIG (Lektion vom Desktop-Bau): Ein einzelner AtomicWaker kann
+// nur EINEN Warter halten — mit mehreren Tick-Wartern (Cursor,
+// Compositor, Uhr) verhungern alle bis auf den zuletzt registrierten!
+// Deshalb: eine feste Liste von Waker-SLOTS. Jede wartende Future
+// belegt per lock-freiem compare_exchange einen Slot (und gibt ihn
+// in Drop zurück); der Timer-Interrupt weckt ALLE belegten Slots —
+// komplett ohne Locks, wie es sich für Interrupt-Pfade gehört.
 // ---------------------------------------------------------------------------
 
 use core::future::Future;
 use core::pin::Pin;
+use core::sync::atomic::{AtomicBool, Ordering};
 use core::task::{Context, Poll};
 use futures_util::task::AtomicWaker;
 
-/// Der Waker des (einen) wartenden Tasks. Ein AtomicWaker reicht:
-/// Aktuell wartet nur der Cursor-Blink-Task auf Ticks. (Mehrere
-/// Warter bräuchten eine Liste — bauen wir, wenn es soweit ist.)
-static TICK_WAKER: AtomicWaker = AtomicWaker::new();
+/// Wie viele Tasks GLEICHZEITIG auf Ticks warten können.
+const MAX_TICK_WARTER: usize = 8;
 
-/// Wird vom Timer-Interrupt-Handler gerufen (interrupt-sicher:
-/// AtomicWaker::wake ist lock-frei).
+/// Die Waker-Slots samt Belegt-Markierung.
+static TICK_WARTER: [AtomicWaker; MAX_TICK_WARTER] =
+    [const { AtomicWaker::new() }; MAX_TICK_WARTER];
+static SLOT_BELEGT: [AtomicBool; MAX_TICK_WARTER] =
+    [const { AtomicBool::new(false) }; MAX_TICK_WARTER];
+
+/// Wird vom Timer-Interrupt-Handler gerufen: weckt ALLE Warter.
+/// (AtomicWaker::wake ist lock-frei — interrupt-sicher.)
 pub(crate) fn tick_waker_wecken() {
-    TICK_WAKER.wake();
+    for (slot, belegt) in TICK_WARTER.iter().zip(SLOT_BELEGT.iter()) {
+        if belegt.load(Ordering::Acquire) {
+            slot.wake();
+        }
+    }
 }
 
 /// Future, die beim NÄCHSTEN Timer-Tick fertig wird.
 struct NaechsterTick {
     start_ticks: u64,
+    /// Der belegte Waker-Slot (None = noch keiner).
+    slot: Option<usize>,
+}
+
+impl NaechsterTick {
+    fn slot_freigeben(&mut self) {
+        if let Some(index) = self.slot.take() {
+            SLOT_BELEGT[index].store(false, Ordering::Release);
+        }
+    }
 }
 
 impl Future for NaechsterTick {
     type Output = ();
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
         if ticks() > self.start_ticks {
+            self.slot_freigeben();
             return Poll::Ready(());
         }
-        // Waker registrieren, dann NOCHMAL prüfen — schließt die
-        // Race Condition, falls der Tick genau dazwischen kam
-        // (gleiches Muster wie beim Tastatur-Stream).
-        TICK_WAKER.register(cx.waker());
-        if ticks() > self.start_ticks {
-            Poll::Ready(())
-        } else {
-            Poll::Pending
+
+        // Slot belegen (falls noch keiner): lock-freies compare_exchange.
+        if self.slot.is_none() {
+            for (index, belegt) in SLOT_BELEGT.iter().enumerate() {
+                if belegt
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    self.slot = Some(index);
+                    break;
+                }
+            }
         }
+
+        match self.slot {
+            Some(index) => {
+                // Waker registrieren, dann NOCHMAL prüfen — schließt
+                // die Race Condition, falls der Tick genau dazwischen
+                // kam (gleiches Muster wie beim Tastatur-Stream).
+                TICK_WARTER[index].register(cx.waker());
+                if ticks() > self.start_ticks {
+                    self.slot_freigeben();
+                    Poll::Ready(())
+                } else {
+                    Poll::Pending
+                }
+            }
+            None => {
+                // Alle Slots voll (mehr als 8 Warter): Notfall-Modus —
+                // sich selbst sofort wieder einreihen (busy, aber
+                // korrekt; besser als ewig zu schlafen).
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        }
+    }
+}
+
+/// Slot auch beim Abbruch der Future zurückgeben (z. B. wenn ein
+/// Task mitten im warte_ms beendet wird).
+impl Drop for NaechsterTick {
+    fn drop(&mut self) {
+        self.slot_freigeben();
     }
 }
 
@@ -91,6 +153,7 @@ pub async fn warte_ms(ms: u64) {
     while ms_seit_boot() < ziel {
         NaechsterTick {
             start_ticks: ticks(),
+            slot: None,
         }
         .await;
     }

@@ -390,12 +390,16 @@ pub async fn maus_task() {
             (cursor_x, cursor_y) = (neu_x, neu_y);
         }
 
-        // Events weiterreichen (aktuell: die Grafik-Demo).
+        // Events weiterreichen: Desktop-Fenster oder Grafik-Demo.
         for event in events.into_iter().flatten() {
-            crate::grafik::demo_maus_event(&event);
-            // Nach Demo-Zeichnungen den Cursor wieder obenauf legen:
-            if crate::grafik::demo_aktiv() {
-                cursor_zeichnen(cursor_x, cursor_y);
+            if crate::fenster::desktop_aktiv() {
+                crate::fenster::maus_event(&event);
+            } else {
+                crate::grafik::demo_maus_event(&event);
+                // Nach Demo-Zeichnungen den Cursor wieder obenauf legen:
+                if crate::grafik::demo_aktiv() {
+                    cursor_zeichnen(cursor_x, cursor_y);
+                }
             }
         }
     }
@@ -452,6 +456,13 @@ fn cursor_zeichnen(x: i32, y: i32) {
             }
         }
     });
+}
+
+/// Zeichnet den Cursor an der AKTUELLEN Position neu — für den
+/// Compositor, dessen present() das Overlay überschrieben hat.
+pub fn cursor_neu_zeichnen() {
+    let (x, y) = position();
+    cursor_zeichnen(x, y);
 }
 
 /// Stellt den Untergrund an der alten Cursor-Position wieder her

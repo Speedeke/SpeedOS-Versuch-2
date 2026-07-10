@@ -99,12 +99,33 @@ impl DoppelPuffer {
         })
     }
 
+    /// Füllt eine komplette Pixelzeile SCHNELL: baut das Byte-Muster
+    /// des ersten Pixels und vervielfältigt es per copy_within
+    /// (verdoppelnd — O(log n) memcpy-Aufrufe statt Schleife über
+    /// jeden Pixel). Der Compositor braucht das für den Hintergrund.
+    pub fn zeile_fuellen(&mut self, y: usize, farbe: Farbe) {
+        if y >= self.info.height {
+            return;
+        }
+        let bpp = self.info.bytes_per_pixel;
+        let von = y * self.info.stride * bpp;
+        let breite_bytes = self.info.width * bpp;
+        // Erstes Pixel setzen (übernimmt die Formatwandlung) ...
+        self.pixel_setzen(0, y, farbe);
+        // ... dann verdoppelnd über die Zeile kopieren:
+        let zeile = &mut self.hinten[von..von + breite_bytes];
+        let mut gefuellt = bpp;
+        while gefuellt < breite_bytes {
+            let kopieren = gefuellt.min(breite_bytes - gefuellt);
+            zeile.copy_within(0..kopieren, gefuellt);
+            gefuellt += kopieren;
+        }
+    }
+
     /// Füllt den ganzen Back-Buffer mit einer Farbe.
     pub fn fuellen(&mut self, farbe: Farbe) {
         for y in 0..self.info.height {
-            for x in 0..self.info.width {
-                self.pixel_setzen(x, y, farbe);
-            }
+            self.zeile_fuellen(y, farbe);
         }
     }
 

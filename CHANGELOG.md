@@ -5,6 +5,23 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### Hinzugefügt (Fenster-Desktop)
+- src/fenster/mod.rs: Fenster mit eigenem Pixel-Puffer + Metadaten,
+  FensterManager mit Z-Ordnung und Fokus-Verwaltung
+- Compositor-Task mit Dirty-Flags (nur komponieren, wenn nötig):
+  Aurora-Hintergrund -> Fenster in Z-Reihenfolge -> present -> Cursor
+- Event-Routing: Maus -> oberstes Fenster unter dem Cursor (in
+  Fenster-Koordinaten), Klick hebt+fokussiert; Tastatur -> Fokus-
+  Fenster; Drag an der Titelzeile verschiebt
+- grafik::Zeichner generisch über Zeichenflaeche-Trait (Apps malen
+  mit denselben Primitiven in ihren Puffer wie der Compositor auf
+  den Bildschirm); schneller Zeilen-Füller (framebuffer::zeile_fuellen)
+- zeit::warte_ms: mehrere gleichzeitige Tick-Warter (Slot-Liste
+  statt einem AtomicWaker)
+- Shell-Befehl `desktop`: 3 Demo-Fenster (Live-Uhr, Tastatur-Echo,
+  statische Grafik mit Klick-Markern), ESC kehrt zur Konsole zurück
+- 3 Unit-Tests (Fokus/Z-Ordnung, Verschieben, Koordinaten/Routing)
+
 ### Hinzugefügt (PS/2-Maus)
 - Maus-Treiber am zweiten 8042-Port: vorsichtige Controller-Init
   (Tastatur-Bits unangetastet, alles mit Timeouts), IntelliMouse-

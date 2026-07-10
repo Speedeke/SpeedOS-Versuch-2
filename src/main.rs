@@ -93,6 +93,9 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     executor.spawn(Task::new(shell::run()));
     executor.spawn(Task::new(konsole::cursor_blink_task()));
     executor.spawn(Task::new(speed_os::maus::maus_task()));
+    // Desktop-Tasks: schlafen, solange kein Desktop läuft.
+    executor.spawn(Task::new(speed_os::fenster::compositor_task()));
+    executor.spawn(Task::new(speed_os::fenster::uhr_task()));
     executor.run();
 }
 

@@ -102,20 +102,46 @@ impl Rechteck {
 }
 
 // ---------------------------------------------------------------------------
-// Der Zeichner
+// Der Zeichner — generisch über jede Zeichenfläche
 // ---------------------------------------------------------------------------
 
-/// Zeichnet auf den Back-Buffer — mit Clipping und Alpha.
-/// Erzeugen mit `Zeichner::neu(fb)`, dann Methoden aufrufen,
-/// zum Schluss `fb.present()` nicht vergessen!
-pub struct Zeichner<'a> {
-    fb: &'a mut DoppelPuffer,
+/// Alles, worauf man zeichnen kann: der Bildschirm-Back-Buffer
+/// genauso wie der private Pixel-Puffer eines Fensters. Der Zeichner
+/// funktioniert auf beiden identisch — Apps malen mit denselben
+/// Primitiven in ihr Fenster wie der Compositor auf den Bildschirm.
+pub trait Zeichenflaeche {
+    fn flaeche_breite(&self) -> usize;
+    fn flaeche_hoehe(&self) -> usize;
+    fn flaeche_setzen(&mut self, x: usize, y: usize, farbe: Farbe);
+    fn flaeche_lesen(&self, x: usize, y: usize) -> Option<Farbe>;
+}
+
+impl Zeichenflaeche for DoppelPuffer {
+    fn flaeche_breite(&self) -> usize {
+        self.info().width
+    }
+    fn flaeche_hoehe(&self) -> usize {
+        self.info().height
+    }
+    fn flaeche_setzen(&mut self, x: usize, y: usize, farbe: Farbe) {
+        self.pixel_setzen(x, y, farbe);
+    }
+    fn flaeche_lesen(&self, x: usize, y: usize) -> Option<Farbe> {
+        self.pixel_lesen(x, y)
+    }
+}
+
+/// Zeichnet auf eine Zeichenfläche — mit Clipping und Alpha.
+/// Erzeugen mit `Zeichner::neu(flaeche)`, dann Methoden aufrufen
+/// (beim Bildschirm zum Schluss `fb.present()` nicht vergessen!).
+pub struct Zeichner<'a, F: Zeichenflaeche> {
+    fb: &'a mut F,
     /// Optionales Clip-Rechteck: Außerhalb wird NICHTS gezeichnet.
     clip: Option<Rechteck>,
 }
 
-impl<'a> Zeichner<'a> {
-    pub fn neu(fb: &'a mut DoppelPuffer) -> Self {
+impl<'a, F: Zeichenflaeche> Zeichner<'a, F> {
+    pub fn neu(fb: &'a mut F) -> Self {
         Zeichner { fb, clip: None }
     }
 
@@ -136,15 +162,18 @@ impl<'a> Zeichner<'a> {
             }
         }
         let (ux, uy) = (x as usize, y as usize);
+        if ux >= self.fb.flaeche_breite() || uy >= self.fb.flaeche_hoehe() {
+            return;
+        }
         let endgueltig = if farbe.a == 255 {
             farbe.rgb()
         } else {
-            match self.fb.pixel_lesen(ux, uy) {
+            match self.fb.flaeche_lesen(ux, uy) {
                 Some(untergrund) => alpha_mischen(untergrund, farbe),
-                None => return, // außerhalb des Bildschirms
+                None => return, // außerhalb der Fläche
             }
         };
-        self.fb.pixel_setzen(ux, uy, endgueltig);
+        self.fb.flaeche_setzen(ux, uy, endgueltig);
     }
 
     /// Linie von (x0,y0) nach (x1,y1) — Bresenham-Algorithmus:

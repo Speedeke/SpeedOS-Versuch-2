@@ -57,6 +57,7 @@ pub fn alle_befehle() -> Vec<Box<dyn Befehl>> {
         Box::new(Version),
         Box::new(Farbtest),
         Box::new(Grafiktest),
+        Box::new(Desktop),
         Box::new(Neustart),
         // Dateisystem-Befehle:
         Box::new(Dir),
@@ -276,6 +277,25 @@ impl Befehl for Grafiktest {
         // Zeichnet die Demo und setzt den Demo-Modus: Die Shell
         // fängt die nächste Taste ab und kehrt zur Konsole zurück.
         crate::grafik::demo_zeichnen();
+    }
+}
+
+/// desktop — startet den Fenster-Desktop.
+struct Desktop;
+
+impl Befehl for Desktop {
+    fn name(&self) -> &'static str {
+        "desktop"
+    }
+    fn beschreibung(&self) -> &'static str {
+        "Startet den Fenster-Desktop (ESC kehrt zurueck)"
+    }
+    fn ausfuehren(&self, _argumente: &str, _kontext: &mut ShellKontext, _registry: &[Box<dyn Befehl>]) {
+        if !crate::framebuffer::ist_initialisiert() {
+            println!("Kein Framebuffer verfuegbar.");
+            return;
+        }
+        crate::fenster::desktop_starten();
     }
 }
 

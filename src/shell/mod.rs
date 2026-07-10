@@ -50,6 +50,20 @@ pub async fn run() {
 
     prompt(&kontext);
     while let Some(key) = keys.next().await {
+        // Desktop-Modus? ESC beendet ihn, alle anderen Tasten gehen
+        // ans fokussierte Fenster (Event-Routing im FensterManager).
+        if crate::fenster::desktop_aktiv() {
+            if key == DecodedKey::Unicode('\u{1b}') {
+                crate::fenster::desktop_beenden();
+                konsole::cursor_aktivieren();
+                konsole::clear_screen();
+                prompt(&kontext);
+            } else {
+                crate::fenster::taste_event(key);
+            }
+            continue;
+        }
+
         // Grafik-Demo aktiv? Dann beendet JEDE Taste sie und wir
         // kehren zur Konsole zurück (Taste wird verschluckt).
         if crate::grafik::demo_aktiv() {
@@ -94,9 +108,9 @@ pub async fn run() {
                 if !eingabe.is_empty() {
                     befehl_ausfuehren(&registry, &mut kontext, &eingabe);
                 }
-                // Kein Prompt, wenn gerade die Grafik-Demo läuft —
-                // der würde mitten ins Bild malen.
-                if !crate::grafik::demo_aktiv() {
+                // Kein Prompt, wenn gerade Grafik-Demo oder Desktop
+                // laufen — der würde mitten ins Bild malen.
+                if !crate::grafik::demo_aktiv() && !crate::fenster::desktop_aktiv() {
                     prompt(&kontext);
                 }
             }
