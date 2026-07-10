@@ -106,6 +106,8 @@ impl Stream for ScancodeStream {
 pub struct KeyStream {
     scancodes: ScancodeStream,
     keyboard: Keyboard<layouts::De105Key, ScancodeSet1>,
+    /// Ist gerade eine Alt-Taste gedrückt? Für Alt+Tab.
+    alt_gedrueckt: bool,
 }
 
 #[allow(clippy::new_without_default)] // siehe ScancodeStream
@@ -118,6 +120,7 @@ impl KeyStream {
                 layouts::De105Key,
                 HandleControl::Ignore,
             ),
+            alt_gedrueckt: false,
         }
     }
 }
@@ -126,12 +129,39 @@ impl Stream for KeyStream {
     type Item = DecodedKey;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<DecodedKey>> {
+        use pc_keyboard::{KeyCode, KeyState};
+
         let this = self.get_mut();
         // Solange Scancodes da sind: dekodieren. Nicht jeder Scancode
         // ergibt eine Taste (z. B. "Taste losgelassen" oder der erste
         // Teil einer E0-Sequenz bei Pfeiltasten) — dann weiterlesen.
         while let Poll::Ready(Some(scancode)) = Pin::new(&mut this.scancodes).poll_next(cx) {
             if let Ok(Some(key_event)) = this.keyboard.add_byte(scancode) {
+                // ALT+TAB-Abgriff VOR dem Dekodieren: Der Fenster-
+                // Switcher braucht Tastendruck UND -loslassen sowie den
+                // Alt-Status — das gibt eine dekodierte Taste nicht her.
+                let code = key_event.code;
+                let herunter = key_event.state == KeyState::Down;
+                if matches!(code, KeyCode::LAlt | KeyCode::RAltGr) {
+                    this.alt_gedrueckt = herunter;
+                    // Alt losgelassen: den Fensterwechsel bestätigen.
+                    if !herunter {
+                        crate::fenster::switcher_bestaetigen();
+                    }
+                    // Nicht als normale Taste weiterreichen.
+                    let _ = this.keyboard.process_keyevent(key_event);
+                    continue;
+                }
+                if this.alt_gedrueckt
+                    && code == KeyCode::Tab
+                    && herunter
+                    && crate::fenster::desktop_aktiv()
+                {
+                    crate::fenster::switcher_weiter();
+                    let _ = this.keyboard.process_keyevent(key_event);
+                    continue;
+                }
+
                 if let Some(key) = this.keyboard.process_keyevent(key_event) {
                     return Poll::Ready(Some(key));
                 }

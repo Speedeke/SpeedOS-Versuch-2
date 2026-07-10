@@ -1,26 +1,26 @@
 // fenster/mod.rs — Fenster, WindowManager und Compositor: das Herz
-//                  des SpeedOS-Desktops
+//                  des SpeedOS-Desktops (jetzt mit vollem "Gesicht")
 //
 // ARCHITEKTUR (siehe auch CLAUDE.md):
-//   * Jedes Fenster = EIGENER Pixel-Puffer + Metadaten (Position,
-//     Größe, Titel, Z-Ordnung über die Vec-Reihenfolge, Fokus).
-//     Apps zeichnen NUR in ihren Puffer — nie auf den Bildschirm!
+//   * Jedes Fenster = EIGENER Pixel-Puffer (nur der INHALT) +
+//     Metadaten (Position, Größe, Titel, Z-Ordnung über die
+//     Vec-Reihenfolge, Fokus, minimiert/maximiert). Apps zeichnen NUR
+//     in ihren Puffer — nie auf den Bildschirm!
 //   * Der Compositor-Task setzt pro Frame zusammen:
-//     Desktop-Hintergrund -> Fenster in Z-Reihenfolge (hinten zuerst)
-//     -> present() -> Maus-Cursor obenauf.
-//     Dirty-Flags sorgen dafür, dass NUR komponiert wird, wenn sich
-//     wirklich etwas geändert hat.
-//   * Event-Routing: Maus-Events treffen das oberste Fenster unter
-//     dem Cursor (in Fenster-Koordinaten umgerechnet); Klick holt es
-//     nach vorn und fokussiert es. Tastatur-Events gehen ans
-//     fokussierte Fenster. Drag an der Titelzeile verschiebt.
-//
-// Die Titel-/Griffzeile zeichnet der COMPOSITOR (Apps besitzen nur
-// den Inhalt) — hübsche Titelleisten mit Knöpfen kommen später.
+//     Desktop-Hintergrund -> Fenster in Z-Reihenfolge (mit Schatten,
+//     Titelleiste, Rahmen — die DEKO zeichnet der Compositor, nicht die
+//     App) -> Snap-/Switcher-Overlay -> present() -> Maus-Cursor.
+//     Dirty-Flags: nur komponieren, wenn sich etwas geändert hat.
+//   * Event-Routing: Maus -> oberstes Fenster unter dem Cursor (in
+//     Fenster-Koordinaten); Klick hebt+fokussiert; Titelleisten-Knöpfe
+//     (Minimieren/Maximieren/Schließen); Titel-Drag verschiebt;
+//     Rand-Drag ändert die Größe (Cursor wechselt die Form).
+//     Tastatur -> fokussiertes Fenster. Alt+Tab -> Fensterwechsler.
+//     Ziehen an den Bildschirmrand -> halbe Fläche (Snap).
 
 use crate::framebuffer::{self, Farbe};
 use crate::grafik::{Rechteck, Rgba, Zeichenflaeche, Zeichner};
-use crate::maus::{MausEvent, MausTaste};
+use crate::maus::{self, MausEvent, MausTaste};
 use crate::zeit;
 use alloc::format;
 use alloc::string::String;
@@ -31,8 +31,19 @@ use noto_sans_mono_bitmap::{FontWeight, RasterHeight};
 use pc_keyboard::DecodedKey;
 use spin::Mutex;
 
-/// Höhe der Griff-/Titelzeile in Pixeln (Drag-Zone).
-pub const TITEL_HOEHE: i32 = 28;
+/// Höhe der Titel-/Griffzeile in Pixeln.
+pub const TITEL_HOEHE: i32 = 30;
+/// Dicke der Resize-Randzone.
+const RAND: i32 = 6;
+/// Kleinste Fenster-Inhaltsgröße.
+const MIN_BREITE: usize = 220;
+const MIN_HOEHE: usize = 100;
+/// Unten reservierter Streifen (künftige Taskleiste) beim Maximieren.
+const TASKLEISTE_RESERVE: i32 = 40;
+/// Wie nah an den Bildschirmrand fürs Snap-Layout.
+const SNAP_RAND: i32 = 8;
+/// Breite eines Titelleisten-Knopfes.
+const KNOPF_BREITE: i32 = 30;
 
 // ---------------------------------------------------------------------------
 // Fenster und Fenster-Puffer
@@ -48,8 +59,7 @@ impl FensterId {
     }
 }
 
-/// Der private Pixel-Puffer eines Fensters (nur der INHALT —
-/// Titelzeile und Rahmen malt der Compositor drumherum).
+/// Der private Pixel-Puffer eines Fensters (nur der INHALT).
 pub struct FensterPuffer {
     breite: usize,
     hoehe: usize,
@@ -87,57 +97,109 @@ impl Zeichenflaeche for FensterPuffer {
     }
 }
 
-/// Die Demo-Inhalte der drei Test-Fenster. (Sobald es echte Apps
-/// gibt, wird hieraus ein Trait — für den Meilenstein reicht das Enum.)
+/// Die Demo-Inhalte der Test-Fenster.
 pub enum Inhalt {
-    /// Zeigt Ticks und Uptime, aktualisiert vom uhr_task.
     Uhr,
-    /// Zeigt Tastatureingaben (bekommt Events, wenn fokussiert).
     TastaturEcho { text: String },
-    /// Statische Grafik; Klicks setzen Markierungen (beweist die
-    /// Umrechnung in Fenster-Koordinaten).
     Malflaeche { klicks: Vec<(i32, i32)> },
+}
+
+/// Die drei Knöpfe rechts in der Titelleiste.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Knopf {
+    Minimieren,
+    Maximieren,
+    Schliessen,
+}
+
+/// Welche Kante/Ecke wird beim Resize gezogen?
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kante {
+    Links,
+    Rechts,
+    Unten,
+    UntenLinks,
+    UntenRechts,
+}
+
+impl Kante {
+    fn cursor_form(self) -> u8 {
+        match self {
+            Kante::Links | Kante::Rechts => maus::FORM_HORIZONTAL,
+            Kante::Unten => maus::FORM_VERTIKAL,
+            Kante::UntenRechts => maus::FORM_DIAG_NWSE,
+            Kante::UntenLinks => maus::FORM_DIAG_NESW,
+        }
+    }
 }
 
 pub struct Fenster {
     pub id: FensterId,
     titel: String,
-    /// Position der oberen linken Ecke (der TITELZEILE) am Bildschirm.
     x: i32,
     y: i32,
     puffer: FensterPuffer,
     inhalt: Inhalt,
-    /// Muss der Inhalt neu komponiert werden?
     dirty: bool,
+    minimiert: bool,
+    /// Vor dem Maximieren/Snappen gespeicherte Geometrie (Rückkehr).
+    vorher: Option<(i32, i32, usize, usize)>,
 }
 
 impl Fenster {
-    /// Gesamtfläche inkl. Titelzeile (fürs Hit-Testing).
-    fn gesamt_rechteck(&self) -> Rechteck {
-        Rechteck::neu(
-            self.x,
-            self.y,
-            self.puffer.breite as i32,
-            TITEL_HOEHE + self.puffer.hoehe as i32,
-        )
+    fn breite(&self) -> i32 {
+        self.puffer.breite as i32
+    }
+    fn hoehe(&self) -> i32 {
+        self.puffer.hoehe as i32
     }
 
-    /// Liegt der Punkt in der Griff-/Titelzeile?
+    /// Gesamtfläche inkl. Titelzeile.
+    fn gesamt_rechteck(&self) -> Rechteck {
+        Rechteck::neu(self.x, self.y, self.breite(), TITEL_HOEHE + self.hoehe())
+    }
+
     fn in_titelzeile(&self, px: i32, py: i32) -> bool {
-        px >= self.x
-            && px < self.x + self.puffer.breite as i32
-            && py >= self.y
-            && py < self.y + TITEL_HOEHE
+        px >= self.x && px < self.x + self.breite() && py >= self.y && py < self.y + TITEL_HOEHE
     }
 
     /// Bildschirm- -> Fensterinhalts-Koordinaten (None = außerhalb).
     fn lokal(&self, px: i32, py: i32) -> Option<(i32, i32)> {
         let lx = px - self.x;
         let ly = py - self.y - TITEL_HOEHE;
-        if lx >= 0 && ly >= 0 && lx < self.puffer.breite as i32 && ly < self.puffer.hoehe as i32 {
+        if lx >= 0 && ly >= 0 && lx < self.breite() && ly < self.hoehe() {
             Some((lx, ly))
         } else {
             None
+        }
+    }
+
+    /// Die drei Knopf-Rechtecke (Bildschirmkoordinaten), von rechts:
+    /// Schließen, Maximieren, Minimieren.
+    fn knoepfe(&self) -> [(Knopf, Rechteck); 3] {
+        let rechts = self.x + self.breite();
+        let y = self.y + 3;
+        let h = TITEL_HOEHE - 6;
+        [
+            (Knopf::Schliessen, Rechteck::neu(rechts - KNOPF_BREITE, y, KNOPF_BREITE - 4, h)),
+            (Knopf::Maximieren, Rechteck::neu(rechts - 2 * KNOPF_BREITE, y, KNOPF_BREITE - 4, h)),
+            (Knopf::Minimieren, Rechteck::neu(rechts - 3 * KNOPF_BREITE, y, KNOPF_BREITE - 4, h)),
+        ]
+    }
+
+    fn knopf_bei(&self, px: i32, py: i32) -> Option<Knopf> {
+        self.knoepfe()
+            .into_iter()
+            .find(|(_, r)| r.enthaelt(px, py))
+            .map(|(k, _)| k)
+    }
+
+    /// Setzt die Inhaltsgröße neu (realloziert den Puffer).
+    fn groesse_setzen(&mut self, breite: usize, hoehe: usize) {
+        let breite = breite.max(MIN_BREITE);
+        let hoehe = hoehe.max(MIN_HOEHE);
+        if breite != self.puffer.breite || hoehe != self.puffer.hoehe {
+            self.puffer = FensterPuffer::neu(breite, hoehe, INHALT_HINTERGRUND);
         }
     }
 }
@@ -146,20 +208,36 @@ impl Fenster {
 // Der WindowManager
 // ---------------------------------------------------------------------------
 
-/// Ein laufender Verschiebe-Vorgang (Drag an der Titelzeile).
-struct DragZustand {
-    id: FensterId,
-    /// Wo im Fenster wurde gegriffen (damit es nicht "springt")?
-    griff_dx: i32,
-    griff_dy: i32,
+/// Was tut die Maus gerade mit gedrückter Taste?
+enum Interaktion {
+    Keine,
+    Verschieben { id: FensterId, griff_dx: i32, griff_dy: i32 },
+    Groesse {
+        id: FensterId,
+        kante: Kante,
+        start_px: i32,
+        start_py: i32,
+        start_x: i32,
+        start_y: i32,
+        start_breite: i32,
+        start_hoehe: i32,
+    },
+}
+
+/// Der Alt+Tab-Fensterwechsler.
+struct Switcher {
+    reihenfolge: Vec<FensterId>,
+    auswahl: usize,
 }
 
 pub struct FensterManager {
-    /// Z-Ordnung über die Reihenfolge: LETZTES Element = ganz vorne.
+    /// Z-Ordnung: LETZTES Element = ganz vorne.
     fenster: Vec<Fenster>,
     fokus: Option<FensterId>,
-    drag: Option<DragZustand>,
-    /// Alles neu komponieren (Hintergrund sichtbar geworden o. Ä.)?
+    interaktion: Interaktion,
+    /// Snap-Vorschau während des Verschiebens (-1 links, +1 rechts).
+    snap_hinweis: i8,
+    switcher: Option<Switcher>,
     alles_dirty: bool,
     bildschirm_breite: i32,
     bildschirm_hoehe: i32,
@@ -170,14 +248,15 @@ impl FensterManager {
         FensterManager {
             fenster: Vec::new(),
             fokus: None,
-            drag: None,
+            interaktion: Interaktion::Keine,
+            snap_hinweis: 0,
+            switcher: None,
             alles_dirty: true,
             bildschirm_breite,
             bildschirm_hoehe,
         }
     }
 
-    /// Erzeugt ein Fenster und legt es ganz nach vorne (mit Fokus).
     pub fn fenster_erstellen(
         &mut self,
         titel: &str,
@@ -196,6 +275,8 @@ impl FensterManager {
             puffer: FensterPuffer::neu(breite, hoehe, INHALT_HINTERGRUND),
             inhalt,
             dirty: true,
+            minimiert: false,
+            vorher: None,
         };
         inhalt_zeichnen(&mut fenster);
         self.fenster.push(fenster);
@@ -208,74 +289,298 @@ impl FensterManager {
         self.fenster.iter().position(|f| f.id == id)
     }
 
-    /// Das OBERSTE Fenster unter dem Punkt (Suche von vorne = hinten
-    /// in der Vec nach vorne).
+    /// Oberstes SICHTBARES Fenster unter dem Punkt.
     pub fn fenster_unter(&self, px: i32, py: i32) -> Option<FensterId> {
         self.fenster
             .iter()
             .rev()
-            .find(|f| f.gesamt_rechteck().enthaelt(px, py))
+            .find(|f| !f.minimiert && f.gesamt_rechteck().enthaelt(px, py))
             .map(|f| f.id)
     }
 
-    /// Holt ein Fenster nach ganz vorne und gibt ihm den Fokus.
     pub fn fokussieren_und_heben(&mut self, id: FensterId) {
         if let Some(index) = self.index_von(id) {
             let fenster = self.fenster.remove(index);
             self.fenster.push(fenster);
-            if self.fokus != Some(id) || index != self.fenster.len() - 1 {
-                self.alles_dirty = true; // Z-Ordnung/Fokus-Optik ändert sich
-            }
             self.fokus = Some(id);
+            self.alles_dirty = true;
         }
     }
 
-    /// Verarbeitet ein Maus-Event an Bildschirmposition (px, py).
+    /// Nach Minimieren/Schließen: das oberste sichtbare Fenster fokussieren.
+    fn fokus_neu_bestimmen(&mut self) {
+        self.fokus = self
+            .fenster
+            .iter()
+            .rev()
+            .find(|f| !f.minimiert)
+            .map(|f| f.id);
+    }
+
+    /// Resize-Kante am Punkt (nur unterhalb der Titelzeile relevant).
+    fn kante_bei(fenster: &Fenster, px: i32, py: i32) -> Option<Kante> {
+        let r = fenster.gesamt_rechteck();
+        let links = px >= r.x && px < r.x + RAND;
+        let rechts = px < r.x + r.breite && px >= r.x + r.breite - RAND;
+        let unten = py < r.y + r.hoehe && py >= r.y + r.hoehe - RAND;
+        match (links, rechts, unten) {
+            (true, _, true) => Some(Kante::UntenLinks),
+            (_, true, true) => Some(Kante::UntenRechts),
+            (_, _, true) => Some(Kante::Unten),
+            (true, _, _) => Some(Kante::Links),
+            (_, true, _) => Some(Kante::Rechts),
+            _ => None,
+        }
+    }
+
+    /// Setzt die passende Cursor-Form für die Hover-Position.
+    fn cursor_aktualisieren(&self, px: i32, py: i32) {
+        let form = self
+            .fenster
+            .iter()
+            .rev()
+            .find(|f| !f.minimiert && f.gesamt_rechteck().enthaelt(px, py))
+            .and_then(|f| {
+                if f.in_titelzeile(px, py) {
+                    None
+                } else {
+                    Self::kante_bei(f, px, py)
+                }
+            })
+            .map(Kante::cursor_form)
+            .unwrap_or(maus::FORM_PFEIL);
+        maus::cursor_form_setzen(form);
+    }
+
     pub fn maus_event(&mut self, event: &MausEvent, px: i32, py: i32) {
         match event {
-            MausEvent::Gedrueckt(MausTaste::Links) => {
-                if let Some(id) = self.fenster_unter(px, py) {
-                    self.fokussieren_und_heben(id);
-                    let fenster = self.fenster.last_mut().unwrap();
-                    if fenster.in_titelzeile(px, py) {
-                        // Drag beginnen: Griffpunkt merken.
-                        self.drag = Some(DragZustand {
-                            id,
-                            griff_dx: px - fenster.x,
-                            griff_dy: py - fenster.y,
-                        });
-                    } else if let Some((lx, ly)) = fenster.lokal(px, py) {
-                        // Klick in den Inhalt: an die "App" weiterreichen.
-                        if let Inhalt::Malflaeche { klicks } = &mut fenster.inhalt {
-                            klicks.push((lx, ly));
-                            inhalt_zeichnen(fenster);
-                            fenster.dirty = true;
-                        }
-                    }
-                }
-            }
-            MausEvent::Losgelassen(MausTaste::Links) => {
-                self.drag = None;
-            }
-            MausEvent::Bewegt { x, y } => {
-                if let Some(drag) = &self.drag {
-                    let (id, dx, dy) = (drag.id, drag.griff_dx, drag.griff_dy);
-                    let (max_x, max_y) = (self.bildschirm_breite, self.bildschirm_hoehe);
-                    if let Some(index) = self.index_von(id) {
-                        let fenster = &mut self.fenster[index];
-                        // Titelzeile muss greifbar bleiben: klemmen.
-                        fenster.x = (x - dx)
-                            .clamp(-(fenster.puffer.breite as i32) + 60, max_x - 60);
-                        fenster.y = (y - dy).clamp(0, max_y - TITEL_HOEHE);
-                        self.alles_dirty = true; // Hintergrund wird frei
-                    }
-                }
-            }
+            MausEvent::Gedrueckt(MausTaste::Links) => self.maus_gedrueckt(px, py),
+            MausEvent::Losgelassen(MausTaste::Links) => self.maus_losgelassen(px, py),
+            MausEvent::Bewegt { x, y } => self.maus_bewegt(*x, *y),
             _ => {}
         }
     }
 
-    /// Tastatur-Event ans fokussierte Fenster.
+    fn maus_gedrueckt(&mut self, px: i32, py: i32) {
+        let id = match self.fenster_unter(px, py) {
+            Some(id) => id,
+            None => return,
+        };
+        self.fokussieren_und_heben(id);
+        // "fenster" ist jetzt garantiert das letzte Element.
+        let index = self.fenster.len() - 1;
+
+        if self.fenster[index].in_titelzeile(px, py) {
+            if let Some(knopf) = self.fenster[index].knopf_bei(px, py) {
+                self.knopf_aktion(id, knopf);
+                return;
+            }
+            // Maximiertes Fenster beim Ziehen wiederherstellen:
+            if self.fenster[index].vorher.is_some() {
+                self.wiederherstellen(id, Some((px, py)));
+            }
+            let f = &self.fenster[index];
+            self.interaktion = Interaktion::Verschieben {
+                id,
+                griff_dx: px - f.x,
+                griff_dy: py - f.y,
+            };
+        } else if let Some(kante) = Self::kante_bei(&self.fenster[index], px, py) {
+            let f = &self.fenster[index];
+            self.interaktion = Interaktion::Groesse {
+                id,
+                kante,
+                start_px: px,
+                start_py: py,
+                start_x: f.x,
+                start_y: f.y,
+                start_breite: f.breite(),
+                start_hoehe: f.hoehe(),
+            };
+        } else if let Some((lx, ly)) = self.fenster[index].lokal(px, py) {
+            // Klick in den Inhalt -> an die "App".
+            if let Inhalt::Malflaeche { klicks } = &mut self.fenster[index].inhalt {
+                klicks.push((lx, ly));
+                let f = &mut self.fenster[index];
+                inhalt_zeichnen(f);
+                f.dirty = true;
+            }
+        }
+    }
+
+    fn maus_losgelassen(&mut self, _px: i32, _py: i32) {
+        // Snap anwenden, wenn während des Ziehens die Vorschau lief —
+        // so ist das Ergebnis konsistent mit dem, was der Nutzer sah
+        // (unabhängig von der exakten Cursor-Position beim Loslassen).
+        if let Interaktion::Verschieben { id, .. } = self.interaktion {
+            if self.snap_hinweis != 0 {
+                self.snappen(id, self.snap_hinweis);
+            }
+        }
+        self.interaktion = Interaktion::Keine;
+        self.snap_hinweis = 0;
+        self.alles_dirty = true;
+    }
+
+    fn maus_bewegt(&mut self, x: i32, y: i32) {
+        match &self.interaktion {
+            Interaktion::Verschieben { id, griff_dx, griff_dy } => {
+                let (id, dx, dy) = (*id, *griff_dx, *griff_dy);
+                if let Some(index) = self.index_von(id) {
+                    let (bb, bh) = (self.bildschirm_breite, self.bildschirm_hoehe);
+                    let f = &mut self.fenster[index];
+                    f.x = (x - dx).clamp(-(f.breite()) + 80, bb - 80);
+                    f.y = (y - dy).clamp(0, bh - TITEL_HOEHE);
+                    // Snap-Vorschau:
+                    self.snap_hinweis = if x <= SNAP_RAND {
+                        -1
+                    } else if x >= bb - SNAP_RAND {
+                        1
+                    } else {
+                        0
+                    };
+                    self.alles_dirty = true;
+                }
+            }
+            Interaktion::Groesse {
+                id, kante, start_px, start_py, start_x, start_y, start_breite, start_hoehe,
+            } => {
+                let (id, kante) = (*id, *kante);
+                let dx = x - *start_px;
+                let dy = y - *start_py;
+                let (mut nx, ny) = (*start_x, *start_y);
+                let (mut nb, mut nh) = (*start_breite, *start_hoehe);
+                match kante {
+                    Kante::Rechts => nb = start_breite + dx,
+                    Kante::Unten => nh = start_hoehe + dy,
+                    Kante::UntenRechts => {
+                        nb = start_breite + dx;
+                        nh = start_hoehe + dy;
+                    }
+                    Kante::Links => {
+                        nb = start_breite - dx;
+                        nx = start_x + dx;
+                    }
+                    Kante::UntenLinks => {
+                        nb = start_breite - dx;
+                        nx = start_x + dx;
+                        nh = start_hoehe + dy;
+                    }
+                }
+                // Mindestgröße einhalten (und beim Links-Ziehen x korrigieren):
+                if nb < MIN_BREITE as i32 {
+                    if matches!(kante, Kante::Links | Kante::UntenLinks) {
+                        nx = start_x + (start_breite - MIN_BREITE as i32);
+                    }
+                    nb = MIN_BREITE as i32;
+                }
+                nh = nh.max(MIN_HOEHE as i32);
+
+                if let Some(index) = self.index_von(id) {
+                    let f = &mut self.fenster[index];
+                    f.x = nx;
+                    f.y = ny;
+                    f.groesse_setzen(nb as usize, nh as usize);
+                    inhalt_zeichnen(f);
+                    self.alles_dirty = true;
+                }
+            }
+            Interaktion::Keine => {
+                self.cursor_aktualisieren(x, y);
+            }
+        }
+    }
+
+    fn knopf_aktion(&mut self, id: FensterId, knopf: Knopf) {
+        match knopf {
+            Knopf::Minimieren => {
+                if let Some(index) = self.index_von(id) {
+                    self.fenster[index].minimiert = true;
+                }
+                self.fokus_neu_bestimmen();
+                self.alles_dirty = true;
+            }
+            Knopf::Maximieren => {
+                let maximiert = self
+                    .index_von(id)
+                    .map(|i| self.fenster[i].vorher.is_some())
+                    .unwrap_or(false);
+                if maximiert {
+                    self.wiederherstellen(id, None);
+                } else {
+                    self.maximieren(id);
+                }
+            }
+            Knopf::Schliessen => {
+                if let Some(index) = self.index_von(id) {
+                    // Fenster (und sein Puffer-Vec) wird hier gedroppt —
+                    // der Heap-Speicher geht sauber zurück.
+                    self.fenster.remove(index);
+                }
+                self.fokus_neu_bestimmen();
+                self.alles_dirty = true;
+            }
+        }
+    }
+
+    fn maximieren(&mut self, id: FensterId) {
+        let bb = self.bildschirm_breite;
+        let bh = self.bildschirm_hoehe;
+        if let Some(index) = self.index_von(id) {
+            let f = &mut self.fenster[index];
+            f.vorher = Some((f.x, f.y, f.puffer.breite, f.puffer.hoehe));
+            f.x = 0;
+            f.y = 0;
+            let breite = bb.max(MIN_BREITE as i32) as usize;
+            let hoehe = (bh - TITEL_HOEHE - TASKLEISTE_RESERVE).max(MIN_HOEHE as i32) as usize;
+            f.groesse_setzen(breite, hoehe);
+            inhalt_zeichnen(f);
+        }
+        self.alles_dirty = true;
+    }
+
+    /// Stellt Maximieren/Snap zurück. `unter_cursor`: wenn beim Ziehen,
+    /// das Fenster an die Cursor-Position setzen.
+    fn wiederherstellen(&mut self, id: FensterId, unter_cursor: Option<(i32, i32)>) {
+        if let Some(index) = self.index_von(id) {
+            let f = &mut self.fenster[index];
+            if let Some((vx, vy, vb, vh)) = f.vorher.take() {
+                f.groesse_setzen(vb, vh);
+                match unter_cursor {
+                    Some((px, py)) => {
+                        f.x = px - f.breite() / 2;
+                        f.y = (py - TITEL_HOEHE / 2).max(0);
+                    }
+                    None => {
+                        f.x = vx;
+                        f.y = vy;
+                    }
+                }
+                inhalt_zeichnen(f);
+            }
+        }
+        self.alles_dirty = true;
+    }
+
+    /// Snap an die linke (-1) oder rechte (+1) Bildschirmhälfte.
+    fn snappen(&mut self, id: FensterId, seite: i8) {
+        let bb = self.bildschirm_breite;
+        let bh = self.bildschirm_hoehe;
+        if let Some(index) = self.index_von(id) {
+            let f = &mut self.fenster[index];
+            if f.vorher.is_none() {
+                f.vorher = Some((f.x, f.y, f.puffer.breite, f.puffer.hoehe));
+            }
+            let breite = (bb / 2).max(MIN_BREITE as i32) as usize;
+            let hoehe = (bh - TITEL_HOEHE - TASKLEISTE_RESERVE).max(MIN_HOEHE as i32) as usize;
+            f.x = if seite < 0 { 0 } else { bb / 2 };
+            f.y = 0;
+            f.groesse_setzen(breite, hoehe);
+            inhalt_zeichnen(f);
+        }
+        self.alles_dirty = true;
+    }
+
     pub fn taste_event(&mut self, taste: DecodedKey) {
         let fokus = match self.fokus {
             Some(id) => id,
@@ -290,7 +595,7 @@ impl FensterManager {
                     }
                     DecodedKey::Unicode('\n') | DecodedKey::Unicode('\r') => text.clear(),
                     DecodedKey::Unicode(c) if c >= ' ' => {
-                        if text.chars().count() < 28 {
+                        if text.chars().count() < 40 {
                             text.push(c);
                         }
                     }
@@ -302,17 +607,50 @@ impl FensterManager {
         }
     }
 
-    /// Uhr-Fenster neu zeichnen (ruft der uhr_task periodisch).
+    // ----- Alt+Tab-Fensterwechsler -----
+
+    fn switcher_weiter(&mut self) {
+        match &mut self.switcher {
+            Some(sw) => {
+                if !sw.reihenfolge.is_empty() {
+                    sw.auswahl = (sw.auswahl + 1) % sw.reihenfolge.len();
+                }
+            }
+            None => {
+                // Reihenfolge: oberstes zuerst (MRU), inkl. minimierte.
+                let reihenfolge: Vec<FensterId> =
+                    self.fenster.iter().rev().map(|f| f.id).collect();
+                if !reihenfolge.is_empty() {
+                    // Erster Tab wählt das NÄCHSTE Fenster.
+                    let auswahl = if reihenfolge.len() > 1 { 1 } else { 0 };
+                    self.switcher = Some(Switcher { reihenfolge, auswahl });
+                }
+            }
+        }
+        self.alles_dirty = true;
+    }
+
+    fn switcher_bestaetigen(&mut self) {
+        if let Some(sw) = self.switcher.take() {
+            if let Some(&id) = sw.reihenfolge.get(sw.auswahl) {
+                if let Some(index) = self.index_von(id) {
+                    self.fenster[index].minimiert = false;
+                }
+                self.fokussieren_und_heben(id);
+            }
+            self.alles_dirty = true;
+        }
+    }
+
     pub fn uhr_aktualisieren(&mut self) {
         for fenster in self.fenster.iter_mut() {
-            if matches!(fenster.inhalt, Inhalt::Uhr) {
+            if !fenster.minimiert && matches!(fenster.inhalt, Inhalt::Uhr) {
                 inhalt_zeichnen(fenster);
                 fenster.dirty = true;
             }
         }
     }
 
-    /// Muss komponiert werden?
     pub fn ist_dirty(&self) -> bool {
         self.alles_dirty || self.fenster.iter().any(|f| f.dirty)
     }
@@ -324,106 +662,173 @@ impl FensterManager {
         }
     }
 
-    /// Bildschirm- in Fensterinhalts-Koordinaten (für Tests/Router).
-    pub fn fenster_lokal(&self, id: FensterId, px: i32, py: i32) -> Option<(i32, i32)> {
-        self.index_von(id)
-            .and_then(|i| self.fenster[i].lokal(px, py))
-    }
+    // ----- Test-Hilfen -----
 
-    /// Position eines Fensters (für Tests).
+    pub fn fenster_lokal(&self, id: FensterId, px: i32, py: i32) -> Option<(i32, i32)> {
+        self.index_von(id).and_then(|i| self.fenster[i].lokal(px, py))
+    }
     pub fn fenster_position(&self, id: FensterId) -> Option<(i32, i32)> {
         self.index_von(id).map(|i| (self.fenster[i].x, self.fenster[i].y))
     }
-
-    /// Das aktuell fokussierte Fenster (für Tests).
     pub fn fokus(&self) -> Option<FensterId> {
         self.fokus
     }
 
-    /// Komponiert alles in den Back-Buffer (ohne present).
+    // ----- Compositing -----
+
     fn komponieren(&self, fb: &mut framebuffer::DoppelPuffer) {
-        // 1. Desktop-Hintergrund: Obsidian-Aurora-Verlauf, Zeile für
-        //    Zeile über den SCHNELLEN Zeilen-Füller.
         let hoehe = fb.info().height;
-        let oben = Farbe::neu(0x17, 0x12, 0x33); // dunkles Aurora-Violett
-        let unten = Farbe::neu(0x0b, 0x0e, 0x14); // Obsidian
+
+        // 1. Desktop-Hintergrund: Obsidian-Aurora-Verlauf (schnell).
+        let oben = Farbe::neu(0x17, 0x12, 0x33);
+        let unten = Farbe::neu(0x0b, 0x0e, 0x14);
         for y in 0..hoehe {
             let t = (y * 255 / hoehe.max(1)) as u8;
             fb.zeile_fuellen(y, oben.mischen(unten, t));
         }
 
-        {
-            let mut z = Zeichner::neu(fb);
-            z.text(
-                24,
-                (hoehe - 36) as i32,
-                "SpeedOS Desktop  |  Fenster: Klick = Fokus, Titelzeile ziehen = verschieben  |  ESC = Konsole",
-                RasterHeight::Size16,
-                FontWeight::Regular,
-                Rgba::mit_alpha(0xc4, 0xca, 0xd6, 200),
-            );
+        let mut z = Zeichner::neu(fb);
+        z.text(
+            24,
+            (hoehe as i32) - 30,
+            "SpeedOS Desktop   |   Titelleiste ziehen/Knoepfe   |   Rand = Groesse   |   Alt+Tab   |   ESC = Konsole",
+            RasterHeight::Size16,
+            FontWeight::Regular,
+            Rgba::mit_alpha(0xc4, 0xca, 0xd6, 180),
+        );
 
-            // 2. Fenster von hinten nach vorne:
-            for fenster in self.fenster.iter() {
-                let fokussiert = self.fokus == Some(fenster.id);
-                fenster_komponieren(&mut z, fenster, fokussiert);
+        // 2. Snap-Vorschau (halbtransparente Hälfte):
+        if self.snap_hinweis != 0 {
+            let halb = self.bildschirm_breite / 2;
+            let x = if self.snap_hinweis < 0 { 0 } else { halb };
+            z.rechteck_fuellen(
+                Rechteck::neu(x, 0, halb, self.bildschirm_hoehe - TASKLEISTE_RESERVE),
+                Rgba::mit_alpha(0x7c, 0x3a, 0xed, 60),
+            );
+        }
+
+        // 3. Fenster von hinten nach vorne (minimierte überspringen):
+        for fenster in self.fenster.iter() {
+            if fenster.minimiert {
+                continue;
+            }
+            let fokussiert = self.fokus == Some(fenster.id);
+            fenster_komponieren(&mut z, fenster, fokussiert);
+        }
+
+        // 4. Alt+Tab-Overlay:
+        if let Some(sw) = &self.switcher {
+            self.switcher_zeichnen(&mut z, sw);
+        }
+    }
+
+    fn switcher_zeichnen<F: Zeichenflaeche>(&self, z: &mut Zeichner<'_, F>, sw: &Switcher) {
+        let n = sw.reihenfolge.len() as i32;
+        let zeilen_h = 30;
+        let box_b = 420;
+        let box_h = 54 + n * zeilen_h;
+        let bx = (self.bildschirm_breite - box_b) / 2;
+        let by = (self.bildschirm_hoehe - box_h) / 2;
+
+        z.rechteck_abgerundet(Rechteck::neu(bx + 8, by + 8, box_b, box_h), 14, Rgba::mit_alpha(0, 0, 0, 120));
+        z.rechteck_abgerundet(Rechteck::neu(bx, by, box_b, box_h), 14, Rgba::neu(0x1a, 0x1f, 0x2e));
+        z.rechteck_rahmen(Rechteck::neu(bx, by, box_b, box_h), Rgba::neu(0x7c, 0x3a, 0xed));
+        z.text(bx + 18, by + 14, "Fenster wechseln", RasterHeight::Size16, FontWeight::Bold, Rgba::neu(0xc4, 0xca, 0xd6));
+
+        for (i, id) in sw.reihenfolge.iter().enumerate() {
+            let zy = by + 46 + i as i32 * zeilen_h;
+            if i == sw.auswahl {
+                z.rechteck_abgerundet(
+                    Rechteck::neu(bx + 10, zy - 4, box_b - 20, zeilen_h - 2),
+                    6,
+                    Rgba::neu(0x3b, 0x2e, 0x7a),
+                );
+            }
+            let (titel, minimiert) = self
+                .index_von(*id)
+                .map(|idx| (self.fenster[idx].titel.as_str(), self.fenster[idx].minimiert))
+                .unwrap_or(("?", false));
+            let farbe = if i == sw.auswahl {
+                Rgba::neu(0xf8, 0xfa, 0xfc)
+            } else {
+                Rgba::neu(0x8a, 0x91, 0xa3)
+            };
+            z.icon(bx + 16, zy, &crate::grafik::ICON_LOGO, 1);
+            z.text(bx + 40, zy, titel, RasterHeight::Size16, FontWeight::Regular, farbe);
+            if minimiert {
+                z.text(bx + box_b - 110, zy, "(minimiert)", RasterHeight::Size16, FontWeight::Regular, Rgba::neu(0x56, 0x5f, 0x73));
             }
         }
     }
 }
 
-/// Hintergrundfarbe frischer Fenster-Puffer.
 const INHALT_HINTERGRUND: Farbe = Farbe::neu(0x12, 0x16, 0x20);
 
-/// Zeichnet EIN Fenster (Schatten, Titelzeile, Rahmen, Inhalt) in
-/// die Zielfläche.
+/// Zeichnet EIN Fenster (Schatten, Titelleiste + Knöpfe, Rahmen, Inhalt).
 fn fenster_komponieren<F: Zeichenflaeche>(z: &mut Zeichner<'_, F>, fenster: &Fenster, fokussiert: bool) {
     let rect = fenster.gesamt_rechteck();
 
-    // Schatten: zwei halbtransparente Streifen rechts und unten.
-    z.rechteck_fuellen(
-        Rechteck::neu(rect.x + rect.breite, rect.y + 8, 8, rect.hoehe),
-        Rgba::mit_alpha(0, 0, 0, 90),
-    );
-    z.rechteck_fuellen(
-        Rechteck::neu(rect.x + 8, rect.y + rect.hoehe, rect.breite, 8),
-        Rgba::mit_alpha(0, 0, 0, 90),
-    );
+    // Schatten (Alpha) rechts und unten:
+    z.rechteck_fuellen(Rechteck::neu(rect.x + rect.breite, rect.y + 10, 10, rect.hoehe), Rgba::mit_alpha(0, 0, 0, 90));
+    z.rechteck_fuellen(Rechteck::neu(rect.x + 10, rect.y + rect.hoehe, rect.breite, 10), Rgba::mit_alpha(0, 0, 0, 90));
 
-    // Titel-/Griffzeile: fokussiert = Aurora-Verlauf, sonst gedeckt.
+    // Titelleiste: fokussiert = Aurora-Verlauf, sonst gedimmt.
     let titel_rect = Rechteck::neu(rect.x, rect.y, rect.breite, TITEL_HOEHE);
     if fokussiert {
         z.verlauf_vertikal(titel_rect, Farbe::neu(0x5b, 0x2e, 0xc7), Farbe::neu(0x2a, 0x4a, 0x9e));
     } else {
-        z.rechteck_fuellen(titel_rect, Rgba::neu(0x2a, 0x30, 0x3e));
+        z.rechteck_fuellen(titel_rect, Rgba::neu(0x23, 0x28, 0x34));
     }
+
+    // Fenster-Icon links:
+    z.icon(rect.x + 7, rect.y + 7, &crate::grafik::ICON_LOGO, 1);
+    // Titel-Text:
     z.text(
-        rect.x + 10,
-        rect.y + 5,
+        rect.x + 30,
+        rect.y + 7,
         &fenster.titel,
         RasterHeight::Size16,
         FontWeight::Bold,
-        if fokussiert {
-            Rgba::neu(0xf8, 0xfa, 0xfc)
-        } else {
-            Rgba::neu(0x8a, 0x91, 0xa3)
-        },
+        if fokussiert { Rgba::neu(0xf8, 0xfa, 0xfc) } else { Rgba::neu(0x8a, 0x91, 0xa3) },
     );
 
-    // Rahmen um alles:
+    // Die drei Knöpfe:
+    for (knopf, r) in fenster.knoepfe() {
+        let symbol = match knopf {
+            Knopf::Schliessen => Rgba::neu(0xef, 0x44, 0x44),
+            _ => if fokussiert { Rgba::neu(0xc4, 0xca, 0xd6) } else { Rgba::neu(0x6a, 0x72, 0x84) },
+        };
+        let cx = r.x + r.breite / 2;
+        let cy = r.y + r.hoehe / 2;
+        match knopf {
+            Knopf::Minimieren => z.linie(cx - 5, cy + 4, cx + 5, cy + 4, symbol),
+            Knopf::Maximieren => {
+                if fenster.vorher.is_some() {
+                    // "Wiederherstellen": zwei versetzte Rahmen.
+                    z.rechteck_rahmen(Rechteck::neu(cx - 3, cy - 5, 8, 8), symbol);
+                    z.rechteck_rahmen(Rechteck::neu(cx - 5, cy - 3, 8, 8), symbol);
+                } else {
+                    z.rechteck_rahmen(Rechteck::neu(cx - 5, cy - 5, 10, 10), symbol);
+                }
+            }
+            Knopf::Schliessen => {
+                z.linie(cx - 5, cy - 5, cx + 5, cy + 5, symbol);
+                z.linie(cx + 5, cy - 5, cx - 5, cy + 5, symbol);
+            }
+        }
+    }
+
+    // Rahmen:
     z.rechteck_rahmen(
         rect,
-        if fokussiert {
-            Rgba::neu(0x7c, 0x3a, 0xed)
-        } else {
-            Rgba::neu(0x3a, 0x41, 0x52)
-        },
+        if fokussiert { Rgba::neu(0x7c, 0x3a, 0xed) } else { Rgba::neu(0x33, 0x3a, 0x4a) },
     );
 
-    // Inhalt: der private Fenster-Puffer, 1:1 kopiert.
+    // Inhalt (privater Puffer, 1:1):
     for zeile in 0..fenster.puffer.hoehe {
+        let basis = zeile * fenster.puffer.breite;
         for spalte in 0..fenster.puffer.breite {
-            let farbe = fenster.puffer.pixel[zeile * fenster.puffer.breite + spalte];
+            let farbe = fenster.puffer.pixel[basis + spalte];
             z.pixel(
                 rect.x + spalte as i32,
                 rect.y + TITEL_HOEHE + zeile as i32,
@@ -434,7 +839,6 @@ fn fenster_komponieren<F: Zeichenflaeche>(z: &mut Zeichner<'_, F>, fenster: &Fen
 }
 
 /// Zeichnet den Demo-Inhalt eines Fensters in SEINEN Puffer.
-/// (Die "App" — sie kennt nur ihren Puffer, nie den Bildschirm.)
 fn inhalt_zeichnen(fenster: &mut Fenster) {
     let breite = fenster.puffer.breite as i32;
     let hoehe = fenster.puffer.hoehe as i32;
@@ -445,64 +849,23 @@ fn inhalt_zeichnen(fenster: &mut Fenster) {
         Inhalt::Uhr => {
             let ticks = zeit::ticks();
             let ms = zeit::ms_seit_boot();
-            z.text(
-                20, 16,
-                &format!("{} Ticks", ticks),
-                RasterHeight::Size32, FontWeight::Bold,
-                Rgba::neu(0x22, 0xd3, 0xee),
-            );
-            z.text(
-                20, 60,
-                &format!("Uptime: {},{:03} s", ms / 1000, ms % 1000),
-                RasterHeight::Size16, FontWeight::Regular,
-                Rgba::neu(0xc4, 0xca, 0xd6),
-            );
-            z.text(
-                20, 90,
-                "(aktualisiert sich live)",
-                RasterHeight::Size16, FontWeight::Regular,
-                Rgba::neu(0x56, 0x5f, 0x73),
-            );
+            z.text(20, 16, &format!("{} Ticks", ticks), RasterHeight::Size32, FontWeight::Bold, Rgba::neu(0x22, 0xd3, 0xee));
+            z.text(20, 60, &format!("Uptime: {},{:03} s", ms / 1000, ms % 1000), RasterHeight::Size16, FontWeight::Regular, Rgba::neu(0xc4, 0xca, 0xd6));
+            z.text(20, 90, "(aktualisiert sich live)", RasterHeight::Size16, FontWeight::Regular, Rgba::neu(0x56, 0x5f, 0x73));
         }
         Inhalt::TastaturEcho { text } => {
-            z.text(
-                20, 12,
-                "Tippe (bei Fokus!):",
-                RasterHeight::Size16, FontWeight::Regular,
-                Rgba::neu(0x8a, 0x91, 0xa3),
-            );
+            z.text(20, 12, "Tippe (bei Fokus!):", RasterHeight::Size16, FontWeight::Regular, Rgba::neu(0x8a, 0x91, 0xa3));
             z.rechteck_abgerundet(Rechteck::neu(16, 40, breite - 32, 40), 8, Rgba::neu(0x1c, 0x22, 0x30));
-            z.text(
-                26, 50,
-                text,
-                RasterHeight::Size16, FontWeight::Regular,
-                Rgba::neu(0xf8, 0xfa, 0xfc),
-            );
-            z.text(
-                20, 96,
-                "Enter leert, Backspace loescht",
-                RasterHeight::Size16, FontWeight::Regular,
-                Rgba::neu(0x56, 0x5f, 0x73),
-            );
+            z.text(26, 50, text, RasterHeight::Size16, FontWeight::Regular, Rgba::neu(0xf8, 0xfa, 0xfc));
+            z.text(20, 96, "Enter leert, Backspace loescht", RasterHeight::Size16, FontWeight::Regular, Rgba::neu(0x56, 0x5f, 0x73));
         }
         Inhalt::Malflaeche { klicks } => {
-            // Statische Grafik: kleiner Verlauf + Formen ...
-            z.verlauf_vertikal(
-                Rechteck::neu(0, 0, breite, 60),
-                Farbe::neu(0x2a, 0x1e, 0x52),
-                Farbe::neu(0x12, 0x16, 0x20),
-            );
-            z.text(
-                16, 8,
-                "Statische Grafik + Klicks",
-                RasterHeight::Size16, FontWeight::Bold,
-                Rgba::neu(0xf8, 0xfa, 0xfc),
-            );
+            z.verlauf_vertikal(Rechteck::neu(0, 0, breite, 60), Farbe::neu(0x2a, 0x1e, 0x52), Farbe::neu(0x12, 0x16, 0x20));
+            z.text(16, 8, "Statische Grafik + Klicks", RasterHeight::Size16, FontWeight::Bold, Rgba::neu(0xf8, 0xfa, 0xfc));
             z.kreis_fuellen(50, 110, 28, Rgba::mit_alpha(0x7c, 0x3a, 0xed, 180));
             z.kreis_fuellen(90, 110, 28, Rgba::mit_alpha(0x22, 0xd3, 0xee, 180));
             z.rechteck_abgerundet(Rechteck::neu(140, 84, 90, 52), 10, Rgba::neu(0x22, 0xc5, 0x5e));
             z.icon(breite - 50, 76, &crate::grafik::ICON_LOGO, 2);
-            // ... plus eine Markierung pro Klick (in FENSTER-Koordinaten!):
             for (kx, ky) in klicks.iter() {
                 z.linie(kx - 6, *ky, kx + 6, *ky, Rgba::neu(0xfb, 0xbf, 0x24));
                 z.linie(*kx, ky - 6, *kx, ky + 6, Rgba::neu(0xfb, 0xbf, 0x24));
@@ -519,43 +882,39 @@ fn inhalt_zeichnen(fenster: &mut Fenster) {
 static MANAGER: Mutex<Option<FensterManager>> = Mutex::new(None);
 static DESKTOP_AKTIV: AtomicBool = AtomicBool::new(false);
 
-/// Läuft gerade der Desktop (Shell/Konsole schlafen dann)?
 pub fn desktop_aktiv() -> bool {
     DESKTOP_AKTIV.load(Ordering::Relaxed)
 }
 
 fn mit_manager<T>(f: impl FnOnce(&mut FensterManager) -> T) -> Option<T> {
-    x86_64::instructions::interrupts::without_interrupts(|| {
-        MANAGER.lock().as_mut().map(f)
-    })
+    x86_64::instructions::interrupts::without_interrupts(|| MANAGER.lock().as_mut().map(f))
 }
 
-/// Startet den Desktop (Shell-Befehl `desktop`). Beim ersten Mal
-/// werden Heap erweitert und die drei Demo-Fenster erzeugt — danach
-/// überleben die Fenster das Verlassen (ESC) und kommen wieder.
 pub fn desktop_starten() {
     let info = match framebuffer::mit_framebuffer(|fb| fb.info()) {
         Some(info) => info,
         None => return,
     };
 
-    let erster_start = x86_64::instructions::interrupts::without_interrupts(|| {
-        MANAGER.lock().is_none()
-    });
+    let erster_start =
+        x86_64::instructions::interrupts::without_interrupts(|| MANAGER.lock().is_none());
     if erster_start {
-        // Platz für die Fenster-Puffer (einmalig, großzügig 4 MiB):
-        let _ = crate::allocator::heap_erweitern(1024);
+        // Heap passend zur Auflösung wachsen lassen: ein maximiertes
+        // Fenster braucht einen fast bildschirmgroßen Puffer
+        // (Breite*Höhe*3 Bytes). Wir reservieren Platz für ~3 solche
+        // Puffer plus Reserve — bei 2560x1600 sind das ~37 MiB.
+        let noetig_bytes = info.width * info.height * 3 * 3;
+        let noetig_pages = noetig_bytes.div_ceil(4096);
+        let _ = crate::allocator::heap_erweitern(noetig_pages);
 
         let mut manager = FensterManager::neu(info.width as i32, info.height as i32);
+        manager.fenster_erstellen("Uhr", 140, 120, 420, 150, Inhalt::Uhr);
         manager.fenster_erstellen(
-            "Uhr", 140, 120, 420, 150, Inhalt::Uhr,
-        );
-        manager.fenster_erstellen(
-            "Tastatur", 420, 300, 520, 140,
+            "Tastatur", 420, 320, 560, 140,
             Inhalt::TastaturEcho { text: String::new() },
         );
         manager.fenster_erstellen(
-            "Grafik", 760, 180, 380, 220,
+            "Grafik", 820, 200, 380, 220,
             Inhalt::Malflaeche { klicks: Vec::new() },
         );
         x86_64::instructions::interrupts::without_interrupts(|| {
@@ -569,36 +928,40 @@ pub fn desktop_starten() {
     DESKTOP_AKTIV.store(true, Ordering::Relaxed);
 }
 
-/// Beendet den Desktop (ESC) — die Fenster bleiben für später erhalten.
 pub fn desktop_beenden() {
     DESKTOP_AKTIV.store(false, Ordering::Relaxed);
+    maus::cursor_form_setzen(maus::FORM_PFEIL);
 }
 
-/// Maus-Router (ruft der maus_task): Position kommt vom globalen
-/// Maus-Zustand, das Event wandert zum Manager.
 pub fn maus_event(event: &MausEvent) {
     if !desktop_aktiv() {
         return;
     }
-    let (px, py) = crate::maus::position();
+    let (px, py) = maus::position();
     let _ = mit_manager(|m| m.maus_event(event, px, py));
 }
 
-/// Tastatur-Router (ruft die Shell im Desktop-Modus).
 pub fn taste_event(taste: DecodedKey) {
     let _ = mit_manager(|m| m.taste_event(taste));
+}
+
+/// Alt+Tab weiterschalten (ruft der KeyStream).
+pub fn switcher_weiter() {
+    let _ = mit_manager(|m| m.switcher_weiter());
+}
+
+/// Alt losgelassen: Fensterwechsel bestätigen (ruft der KeyStream).
+pub fn switcher_bestaetigen() {
+    let _ = mit_manager(|m| m.switcher_bestaetigen());
 }
 
 // ---------------------------------------------------------------------------
 // Die Tasks: Compositor und Uhr
 // ---------------------------------------------------------------------------
 
-/// Der Compositor: prüft ~20x pro Sekunde die Dirty-Flags und setzt
-/// NUR DANN neu zusammen. Reihenfolge pro Frame: Hintergrund ->
-/// Fenster (Z-Ordnung) -> present -> Cursor obenauf.
 pub async fn compositor_task() {
     loop {
-        zeit::warte_ms(50).await;
+        zeit::warte_ms(30).await;
         if !desktop_aktiv() {
             continue;
         }
@@ -615,8 +978,7 @@ pub async fn compositor_task() {
         }
 
         framebuffer::mit_framebuffer(|fb| {
-            // Lock-Ordnung: FRAMEBUFFER -> MANAGER (nirgendwo anders
-            // werden beide zugleich gehalten — kein Deadlock möglich).
+            // Lock-Ordnung: FRAMEBUFFER -> MANAGER.
             x86_64::instructions::interrupts::without_interrupts(|| {
                 if let Some(manager) = MANAGER.lock().as_ref() {
                     manager.komponieren(fb);
@@ -624,12 +986,10 @@ pub async fn compositor_task() {
             });
             fb.present();
         });
-        // Cursor wieder obenauf (present hat ihn überschrieben):
-        crate::maus::cursor_neu_zeichnen();
+        maus::cursor_neu_zeichnen();
     }
 }
 
-/// Hält das Uhr-Fenster lebendig (2x pro Sekunde).
 pub async fn uhr_task() {
     loop {
         zeit::warte_ms(500).await;
@@ -647,63 +1007,45 @@ pub async fn uhr_task() {
 mod tests {
     use super::*;
 
-    /// Kleine Fenster (100x60) — die Logik ist größenunabhängig,
-    /// aber der Test-Heap ist begrenzt.
     fn test_manager() -> (FensterManager, FensterId, FensterId) {
         let mut manager = FensterManager::neu(1000, 800);
-        let hinten = manager.fenster_erstellen(
-            "Hinten", 100, 100, 100, 60, Inhalt::Uhr,
-        );
+        let hinten = manager.fenster_erstellen("Hinten", 100, 100, 220, 100, Inhalt::Uhr);
         let vorne = manager.fenster_erstellen(
-            "Vorne", 150, 140, 100, 60,
+            "Vorne", 150, 140, 220, 100,
             Inhalt::TastaturEcho { text: String::new() },
         );
         (manager, hinten, vorne)
     }
 
-    /// Klick trifft das OBERSTE Fenster; Klick aufs hintere holt es
-    /// nach vorne und fokussiert es.
     #[test_case]
     fn test_fokus_und_z_ordnung() {
         let (mut manager, hinten, vorne) = test_manager();
-        // Beide überlappen bei (160, 150) -> das vordere gewinnt:
-        assert_eq!(manager.fenster_unter(160, 150), Some(vorne));
-        // (110, 110) liegt nur im hinteren:
+        assert_eq!(manager.fenster_unter(200, 160), Some(vorne));
         assert_eq!(manager.fenster_unter(110, 110), Some(hinten));
-        // Klick dorthin: hinteres kommt nach vorn + Fokus.
         manager.maus_event(&MausEvent::Gedrueckt(MausTaste::Links), 110, 110);
         assert_eq!(manager.fokus(), Some(hinten));
-        assert_eq!(manager.fenster_unter(160, 150), Some(hinten));
-        // Daneben (Desktop): niemand.
+        assert_eq!(manager.fenster_unter(200, 160), Some(hinten));
         assert_eq!(manager.fenster_unter(900, 700), None);
     }
 
-    /// Drag an der Titelzeile verschiebt das Fenster exakt ums
-    /// Maus-Delta; Loslassen beendet den Drag.
     #[test_case]
     fn test_fenster_verschieben() {
         let (mut manager, _, vorne) = test_manager();
-        // In der Titelzeile des vorderen Fensters (y=140..168) greifen:
-        manager.maus_event(&MausEvent::Gedrueckt(MausTaste::Links), 160, 150);
-        manager.maus_event(&MausEvent::Bewegt { x: 200, y: 220 }, 200, 220);
+        // In der Titelzeile (y=140..170), links von den Knöpfen greifen:
+        manager.maus_event(&MausEvent::Gedrueckt(MausTaste::Links), 200, 150);
+        manager.maus_event(&MausEvent::Bewegt { x: 240, y: 220 }, 240, 220);
         assert_eq!(manager.fenster_position(vorne), Some((190, 210)));
-        // Loslassen -> weitere Bewegung verschiebt NICHT mehr:
-        manager.maus_event(&MausEvent::Losgelassen(MausTaste::Links), 200, 220);
+        manager.maus_event(&MausEvent::Losgelassen(MausTaste::Links), 240, 220);
         manager.maus_event(&MausEvent::Bewegt { x: 500, y: 500 }, 500, 500);
         assert_eq!(manager.fenster_position(vorne), Some((190, 210)));
     }
 
-    /// Bildschirm- -> Fensterkoordinaten (Titelzeile zählt nicht
-    /// zum Inhalt!), und Tasten landen nur im fokussierten Fenster.
     #[test_case]
     fn test_koordinaten_und_tastatur_routing() {
         let (mut manager, hinten, vorne) = test_manager();
-        // Fenster "vorne" bei (150,140): Inhalt beginnt bei y=168.
-        assert_eq!(manager.fenster_lokal(vorne, 160, 178), Some((10, 10)));
-        // In der Titelzeile: KEINE Inhalts-Koordinate.
+        assert_eq!(manager.fenster_lokal(vorne, 160, 180), Some((10, 10)));
         assert_eq!(manager.fenster_lokal(vorne, 160, 150), None);
 
-        // Tasten gehen ans fokussierte Echo-Fenster ("vorne"):
         manager.taste_event(DecodedKey::Unicode('h'));
         manager.taste_event(DecodedKey::Unicode('i'));
         let text = match &manager.fenster[manager.index_von(vorne).unwrap()].inhalt {
@@ -712,8 +1054,59 @@ mod tests {
         };
         assert_eq!(text, "hi");
 
-        // Fokus aufs Uhr-Fenster: Tasten verpuffen (kein Panic).
         manager.fokussieren_und_heben(hinten);
         manager.taste_event(DecodedKey::Unicode('x'));
+    }
+
+    /// Minimieren blendet aus (Hit-Test ignoriert es), Schließen
+    /// entfernt es ganz und wechselt den Fokus.
+    #[test_case]
+    fn test_minimieren_und_schliessen() {
+        let (mut manager, hinten, vorne) = test_manager();
+        // (350,200) liegt NUR im vorderen Fenster (rechts vom hinteren).
+        assert_eq!(manager.fenster_unter(350, 200), Some(vorne));
+        // "vorne" minimieren:
+        manager.knopf_aktion(vorne, Knopf::Minimieren);
+        assert_eq!(manager.fenster_unter(350, 200), None); // ausgeblendet
+        assert_eq!(manager.fokus(), Some(hinten)); // Fokus fiel aufs hintere
+        // Alt+Tab: Reihenfolge [vorne, hinten], erster Tab wählt hinten,
+        // zweiter Tab wählt vorne -> bestätigen holt vorne zurück.
+        manager.switcher_weiter();
+        manager.switcher_weiter();
+        manager.switcher_bestaetigen();
+        assert_eq!(manager.fokus(), Some(vorne));
+        assert_eq!(manager.fenster_unter(350, 200), Some(vorne)); // wieder sichtbar
+        // "hinten" schließen -> nur noch "vorne" existiert:
+        manager.knopf_aktion(hinten, Knopf::Schliessen);
+        assert_eq!(manager.index_von(hinten), None);
+        assert_eq!(manager.fokus(), Some(vorne));
+    }
+
+    /// Ziehen an den linken Rand snappt auf die linke Bildschirmhälfte.
+    #[test_case]
+    fn test_snap_links() {
+        let (mut manager, _, vorne) = test_manager();
+        // Titelzeile greifen (200,150), dann fast an den linken Rand:
+        manager.maus_event(&MausEvent::Gedrueckt(MausTaste::Links), 200, 150);
+        manager.maus_event(&MausEvent::Bewegt { x: 3, y: 150 }, 3, 150);
+        // Loslassen -> Snap: x=0, Breite = halber Bildschirm (1000/2).
+        manager.maus_event(&MausEvent::Losgelassen(MausTaste::Links), 3, 150);
+        let index = manager.index_von(vorne).unwrap();
+        assert_eq!(manager.fenster[index].x, 0);
+        assert_eq!(manager.fenster[index].breite(), 500);
+        // Höhe = Bildschirm - Titelzeile - Taskleisten-Reserve.
+        assert_eq!(manager.fenster[index].hoehe(), 800 - TITEL_HOEHE - TASKLEISTE_RESERVE);
+    }
+
+    /// Resize an der rechten Kante vergrößert die Breite.
+    #[test_case]
+    fn test_groesse_aendern() {
+        let (mut manager, _, vorne) = test_manager();
+        // Rechte Kante des vorderen Fensters: x = 150+220-2 = 368,
+        // unterhalb der Titelzeile (y=200):
+        manager.maus_event(&MausEvent::Gedrueckt(MausTaste::Links), 368, 200);
+        manager.maus_event(&MausEvent::Bewegt { x: 468, y: 200 }, 468, 200);
+        let index = manager.index_von(vorne).unwrap();
+        assert_eq!(manager.fenster[index].breite(), 320); // 220 + 100
     }
 }

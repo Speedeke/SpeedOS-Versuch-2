@@ -231,8 +231,9 @@ fn test_kernel_main(boot_info: &'static mut bootloader_api::BootInfo) -> ! {
         .expect("Bootloader hat kein Physik-Mapping angelegt");
     memory::init(VirtAddr::new(phys_mem_offset), &boot_info.memory_regions);
     allocator::init_heap().expect("Heap-Initialisierung fehlgeschlagen");
-    // Etwas mehr Luft für Tests mit Fenster-Puffern (1 MiB extra):
-    allocator::heap_erweitern(256).expect("Heap-Erweiterung fehlgeschlagen");
+    // Mehr Luft für Tests mit Fenster-Puffern (4 MiB extra — ein
+    // gesnapptes/maximiertes Test-Fenster braucht ~1 MiB).
+    allocator::heap_erweitern(1024).expect("Heap-Erweiterung fehlgeschlagen");
 
     // Framebuffer + Konsole, damit auch die Grafik-Pfade getestet
     // werden (println! zeichnet in den Tests wirklich auf den Puffer).

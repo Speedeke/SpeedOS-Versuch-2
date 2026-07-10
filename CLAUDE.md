@@ -78,6 +78,24 @@
   Titelzeilen-Drag verschiebt. Lock-Ordnung: FRAMEBUFFER -> MANAGER.
   Der Desktop-Modus (AtomicBool) pausiert Konsole/Cursor; ESC kehrt
   zurück, die Fenster bleiben erhalten.
+- **Fenster-Deko & Bedienung (Juli 2026):** Die Titelleiste (Icon,
+  Titel, 3 Knöpfe Minimieren/Maximieren/Schließen — Schließen rot)
+  zeichnet der COMPOSITOR, nicht die App. Interaktion-Enum:
+  Verschieben (Titel-Drag), Größe (Rand-Drag; kante_bei berechnet die
+  Zone, Cursor wechselt die Form via `maus::cursor_form_setzen`).
+  Maximieren speichert die Vorher-Geometrie (Vollbild minus 40px
+  Taskleisten-Reserve); Schließen droppt den Fenster-Puffer (Heap
+  frei). Snap: Ziehen an den Bildschirmrand -> halbe Fläche; Vorschau
+  (snap_hinweis) UND Loslassen nutzen denselben Wert (konsistent,
+  positionsunabhängig). Alt+Tab: Der KeyStream greift LAlt/Tab VOR dem
+  Dekodieren ab (KeyEvent.state), der Switcher lebt im Manager,
+  Loslassen von Alt bestätigt. WICHTIG: Ein maximiertes/gesnapptes
+  Fenster braucht einen fast bildschirmgroßen Puffer — desktop_starten
+  lässt den Heap passend zur Auflösung wachsen (Breite*Höhe*3*3 Bytes).
+- **PS/2-Paket-Grenze:** Ein Maus-Paket trägt nur 9-Bit-Deltas
+  (±255); größere Bewegungen setzen das Overflow-Bit und werden
+  verworfen (Spec-konform). Automatisierte QMP-Tests müssen die Maus
+  in kleinen Schritten bewegen.
 - **Mehrere Tick-Warter (Juli 2026):** `zeit::warte_ms` nutzt eine
   feste Slot-Liste von AtomicWakern (nicht EINEN!), weil Cursor,
   Compositor und Uhr gleichzeitig auf Ticks warten — ein einzelner

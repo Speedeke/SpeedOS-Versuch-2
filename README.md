@@ -8,6 +8,12 @@ ist alles selbst gebaut (auf Basis der bewährten Architektur aus
 > Lernprojekt: Der Code ist bewusst ausführlich auf Deutsch kommentiert —
 > jede Datei erklärt, *was* sie tut und *warum* es so funktioniert.
 
+![Fenster-Desktop](docs/screenshots/desktop-fenster.png)
+*Der Desktop: Fenster mit Titelleiste, Icon, Knöpfen (Minimieren/Maximieren/Schließen), Schatten und Aurora-Fokus.*
+
+![Alt+Tab](docs/screenshots/alt-tab.png)
+*Alt+Tab-Fensterwechsler mit zentriertem Overlay und Auswahl-Highlight.*
+
 ![Boot-Screen](docs/screenshots/bootscreen.png)
 *Der Boot-Screen: Obsidian-Aurora-Farbverlauf, gerendert Pixel für Pixel.*
 
@@ -107,6 +113,8 @@ docs/                Migrationsplan bootloader 0.9 -> 0.11
 - [x] Paging, Heap, async/await, Shell, RAM-Dateisystem
 - [x] **UEFI-Boot mit linearem Framebuffer** (bootloader 0.11)
 - [x] **Grafik-Konsole:** Font-Rendering, Double Buffering, Boot-Screen
+- [x] **Desktop:** Maus, Zeichen-Werkzeuge, Fenster mit Compositor,
+      Titelleisten, Verschieben/Größe/Min/Max/Close, Snap, Alt+Tab
 - [ ] **Persistenz:** Block-Device-Treiber + Disk-Dateisystem (VFS ist bereit)
 - [ ] **User Space:** Ring-3-Prozesse, Syscalls, präemptiver Scheduler
 - [ ] Ferner: eigene Programme laden (ELF), Netzwerk, Sound

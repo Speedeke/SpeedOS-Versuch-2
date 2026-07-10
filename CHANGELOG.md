@@ -5,6 +5,28 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### Hinzugefügt (Fenster-Deko & volle Bedienung)
+- Titelleiste pro Fenster: Icon, Titel, 3 Knöpfe (Minimieren,
+  Maximieren/Wiederherstellen, Schließen rot); Aurora-Verlauf beim
+  fokussierten, gedimmt beim inaktiven Fenster; Schatten (Alpha)
+- Verschieben per Titel-Drag, Größe ändern per Rand-/Ecken-Drag
+  (Cursor wechselt die Form: horizontal/vertikal/diagonal)
+- Minimieren (lebt weiter), Maximieren (Vollbild minus 40px
+  Taskleisten-Reserve), Schließen (Fenster-Puffer wird freigegeben)
+- Alt+Tab-Fensterwechsler mit zentriertem Overlay (Titelliste +
+  Auswahl-Highlight), Loslassen von Alt wechselt; holt auch
+  minimierte Fenster zurück
+- Snap-Layouts: Ziehen an den linken/rechten Rand = halbe Fläche
+  (mit halbtransparenter Vorschau)
+- grafik::Zeichner generisch über Zeichenflaeche-Trait (Apps malen
+  in ihren Puffer, Compositor auf den Bildschirm — identisch);
+  framebuffer::zeile_fuellen (schneller Zeilen-Füller),
+  present_bereich, pixel_setzen_vorne
+- zeit::warte_ms nutzt eine Slot-Liste von AtomicWakern (mehrere
+  gleichzeitige Tick-Warter: Cursor, Compositor, Uhr)
+- Heap wächst beim Desktop-Start passend zur Auflösung
+- 3 neue Unit-Tests (Minimieren/Schließen, Größe ändern, Snap)
+
 ### Hinzugefügt (Fenster-Desktop)
 - src/fenster/mod.rs: Fenster mit eigenem Pixel-Puffer + Metadaten,
   FensterManager mit Z-Ordnung und Fokus-Verwaltung

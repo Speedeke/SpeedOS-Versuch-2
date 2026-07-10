@@ -22,7 +22,7 @@ use crate::framebuffer::{self, Farbe};
 use crate::zeit;
 use conquer_once::spin::OnceCell;
 use core::pin::Pin;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use core::task::{Context, Poll};
 use crossbeam_queue::ArrayQueue;
 use futures_util::stream::{Stream, StreamExt};
@@ -431,31 +431,102 @@ const CURSOR_BILD: [&str; 17] = [
     "......DD....",
 ];
 const CURSOR_SKALIERUNG: usize = 2;
-const CURSOR_BREITE: usize = 12 * CURSOR_SKALIERUNG;
-const CURSOR_HOEHE: usize = 17 * CURSOR_SKALIERUNG;
+/// Restore-Box: groß genug für JEDE Cursor-Form (Pfeil + Resize-Pfeile).
+const CURSOR_BREITE: usize = 34;
+const CURSOR_HOEHE: usize = 36;
 
-/// Malt den Pfeil als Overlay in den FRONT-Buffer.
+/// Die Cursor-Form (der Fenster-Manager stellt sie an Fensterrändern um).
+pub const FORM_PFEIL: u8 = 0;
+pub const FORM_HORIZONTAL: u8 = 1; // <->  (Breite ändern)
+pub const FORM_VERTIKAL: u8 = 2; //   arrow up/down (Höhe ändern)
+pub const FORM_DIAG_NWSE: u8 = 3; // \   (Ecke oben-links / unten-rechts)
+pub const FORM_DIAG_NESW: u8 = 4; // /   (Ecke oben-rechts / unten-links)
+
+static CURSOR_FORM: AtomicU8 = AtomicU8::new(FORM_PFEIL);
+
+/// Stellt die Cursor-Form um (0 = Pfeil, siehe FORM_*-Konstanten).
+pub fn cursor_form_setzen(form: u8) {
+    if CURSOR_FORM.swap(form, Ordering::Relaxed) != form {
+        // Form geändert: sofort neu zeichnen (alte Form wegräumen).
+        let (x, y) = position();
+        cursor_entfernen(x, y);
+        cursor_zeichnen(x, y);
+    }
+}
+
+/// Malt den Cursor als Overlay in den FRONT-Buffer — Pfeil oder,
+/// je nach eingestellter Form, einen Resize-Doppelpfeil.
 fn cursor_zeichnen(x: i32, y: i32) {
+    let form = CURSOR_FORM.load(Ordering::Relaxed);
     framebuffer::mit_framebuffer(|fb| {
-        for (zeile, text) in CURSOR_BILD.iter().enumerate() {
-            for (spalte, zeichen) in text.chars().enumerate() {
-                let farbe = match zeichen {
-                    'D' => Farbe::neu(0x10, 0x14, 0x1c),
-                    'w' => Farbe::neu(0xf8, 0xfa, 0xfc),
-                    _ => continue, // transparent
-                };
-                for dy in 0..CURSOR_SKALIERUNG {
-                    for dx in 0..CURSOR_SKALIERUNG {
-                        let px = x + (spalte * CURSOR_SKALIERUNG + dx) as i32;
-                        let py = y + (zeile * CURSOR_SKALIERUNG + dy) as i32;
-                        if px >= 0 && py >= 0 {
-                            fb.pixel_setzen_vorne(px as usize, py as usize, farbe);
+        if form == FORM_PFEIL {
+            for (zeile, text) in CURSOR_BILD.iter().enumerate() {
+                for (spalte, zeichen) in text.chars().enumerate() {
+                    let farbe = match zeichen {
+                        'D' => Farbe::neu(0x10, 0x14, 0x1c),
+                        'w' => Farbe::neu(0xf8, 0xfa, 0xfc),
+                        _ => continue,
+                    };
+                    for dy in 0..CURSOR_SKALIERUNG {
+                        for dx in 0..CURSOR_SKALIERUNG {
+                            let px = x + (spalte * CURSOR_SKALIERUNG + dx) as i32;
+                            let py = y + (zeile * CURSOR_SKALIERUNG + dy) as i32;
+                            if px >= 0 && py >= 0 {
+                                fb.pixel_setzen_vorne(px as usize, py as usize, farbe);
+                            }
                         }
                     }
                 }
             }
+        } else {
+            resize_cursor_zeichnen(fb, x + 14, y + 16, form);
         }
     });
+}
+
+/// Zeichnet einen Resize-Doppelpfeil (weiß mit dunklem Rand) um das
+/// Zentrum (cx, cy). Richtung ergibt sich aus der Form.
+fn resize_cursor_zeichnen(fb: &mut framebuffer::DoppelPuffer, cx: i32, cy: i32, form: u8) {
+    let (ex, ey) = match form {
+        FORM_HORIZONTAL => (1, 0),
+        FORM_VERTIKAL => (0, 1),
+        FORM_DIAG_NWSE => (1, 1),
+        _ => (1, -1), // FORM_DIAG_NESW
+    };
+    let (px, py) = (-ey, ex); // Senkrechte (für die Pfeilspitzen)
+    let laenge = 9;
+
+    // Alle Pixel des Doppelpfeils einsammeln (Linie + zwei Spitzen):
+    let mut punkte: alloc::vec::Vec<(i32, i32)> = alloc::vec::Vec::new();
+    for t in -laenge..=laenge {
+        punkte.push((cx + ex * t, cy + ey * t));
+    }
+    for ende in [laenge, -laenge] {
+        let (sx, sy) = (cx + ex * ende, cy + ey * ende);
+        let (rx, ry) = (-ex * ende.signum(), -ey * ende.signum()); // nach innen
+        for k in 1..=4 {
+            punkte.push((sx + rx * k + px * k, sy + ry * k + py * k));
+            punkte.push((sx + rx * k - px * k, sy + ry * k - py * k));
+        }
+    }
+
+    // Erst dunkler Rand (3x3 um jeden Punkt), dann weiße Kerne obenauf.
+    let rand = Farbe::neu(0x10, 0x14, 0x1c);
+    let kern = Farbe::neu(0xf8, 0xfa, 0xfc);
+    for &(ax, ay) in punkte.iter() {
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                if ax + dx >= 0 && ay + dy >= 0 {
+                    fb.pixel_setzen_vorne((ax + dx) as usize, (ay + dy) as usize, rand);
+                }
+            }
+        }
+    }
+    for &(ax, ay) in punkte.iter() {
+        if ax >= 0 && ay >= 0 {
+            fb.pixel_setzen_vorne(ax as usize, ay as usize, kern);
+        }
+    }
 }
 
 /// Zeichnet den Cursor an der AKTUELLEN Position neu — für den
