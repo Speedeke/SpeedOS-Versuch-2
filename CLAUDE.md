@@ -61,6 +61,15 @@
 - **Async-Zeitwarten:** `zeit::warte_ms(ms)` statt yield-Polling — der
   Timer-Interrupt weckt per AtomicWaker (aktuell EIN Warter; bei Bedarf
   auf eine Waker-Liste erweitern).
+- **PS/2-Maus (Juli 2026):** `src/maus.rs` — Controller-Init NUR über
+  die Maus-Bits (Tastatur-Bits 0/4/6 der 8042-Konfiguration niemals
+  anfassen!), alle Handshakes gepollt mit Timeout (fehlende Maus hängt
+  den Boot nicht), VOR sti. IntelliMouse-Rad per 200/100/80-Sequenz.
+  Paket-Parsing ist eine reine, unit-getestete Funktion (Sync-Bit,
+  9-Bit-Vorzeichen, Overflow -> verwerfen). IRQ 12 -> lock-freie Queue
+  -> async maus_task (Tastatur-Muster). Cursor = Overlay NUR im
+  Front-Buffer: Der Back-Buffer bleibt die "Wahrheit ohne Cursor",
+  Wiederherstellen = present_bereich der alten Position.
 - **Zeichen-Werkzeuge (Juli 2026):** `grafik.rs` = Zeichner auf dem
   Back-Buffer mit optionalem Clip-Rechteck und Alpha-Blending (alle
   Pixel laufen durch EINEN Pfad: Zeichner::pixel). Clipping-Schnitt

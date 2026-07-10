@@ -122,6 +122,44 @@ impl DoppelPuffer {
         self.vorne[von..bis].copy_from_slice(&self.hinten[von..bis]);
     }
 
+    /// Kopiert ein RECHTECK vom Back- in den Front-Buffer — stellt
+    /// z. B. das Bild unter dem Maus-Cursor wieder her.
+    pub fn present_bereich(&mut self, x: usize, y: usize, breite: usize, hoehe: usize) {
+        let bpp = self.info.bytes_per_pixel;
+        for zeile in y..(y + hoehe).min(self.info.height) {
+            let von = (zeile * self.info.stride + x.min(self.info.width)) * bpp;
+            let bis = (zeile * self.info.stride + (x + breite).min(self.info.width)) * bpp;
+            if von < bis {
+                self.vorne[von..bis].copy_from_slice(&self.hinten[von..bis]);
+            }
+        }
+    }
+
+    /// Setzt ein Pixel DIREKT im echten Framebuffer (Front-Buffer) —
+    /// NUR für Overlays wie den Maus-Cursor! Der Back-Buffer bleibt
+    /// unberührt und ist damit die "Wahrheit ohne Cursor": Das nächste
+    /// present_bereich stellt den Untergrund automatisch wieder her.
+    pub fn pixel_setzen_vorne(&mut self, x: usize, y: usize, farbe: Farbe) {
+        if x >= self.info.width || y >= self.info.height {
+            return;
+        }
+        let offset = (y * self.info.stride + x) * self.info.bytes_per_pixel;
+        let pixel = &mut self.vorne[offset..offset + self.info.bytes_per_pixel];
+        match self.info.pixel_format {
+            PixelFormat::Rgb => {
+                pixel[0] = farbe.r;
+                pixel[1] = farbe.g;
+                pixel[2] = farbe.b;
+            }
+            PixelFormat::Bgr => {
+                pixel[0] = farbe.b;
+                pixel[1] = farbe.g;
+                pixel[2] = farbe.r;
+            }
+            _ => pixel.fill(((farbe.r as u16 + farbe.g as u16 + farbe.b as u16) / 3) as u8),
+        }
+    }
+
     /// Scrollt den Back-Buffer um `pixel_zeilen` nach oben (memmove —
     /// KEIN Neu-Rendern!) und füllt den freigewordenen Streifen unten.
     pub fn hochscrollen(&mut self, pixel_zeilen: usize, fuellfarbe: Farbe) {

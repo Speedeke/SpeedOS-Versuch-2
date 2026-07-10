@@ -46,8 +46,9 @@ pub static PICS: spin::Mutex<ChainedPics> =
 #[derive(Debug, Clone, Copy)]
 #[repr(u8)]
 pub enum InterruptIndex {
-    Timer = PIC_1_OFFSET, // 32: der PIT-Timer (tickt ~18,2x pro Sekunde)
-    Keyboard,             // 33: die PS/2-Tastatur
+    Timer = PIC_1_OFFSET,      // 32: der PIT-Timer (tickt ~18,2x pro Sekunde)
+    Keyboard,                  // 33: die PS/2-Tastatur
+    Maus = PIC_2_OFFSET + 4,   // 44: die PS/2-Maus (IRQ 12, am zweiten PIC)
 }
 
 impl InterruptIndex {
@@ -127,6 +128,7 @@ lazy_static! {
         // Hardware-Interrupts (nach dem PIC-Remapping):
         idt[InterruptIndex::Timer.as_usize()].set_handler_fn(timer_interrupt_handler);
         idt[InterruptIndex::Keyboard.as_usize()].set_handler_fn(keyboard_interrupt_handler);
+        idt[InterruptIndex::Maus.as_usize()].set_handler_fn(maus_interrupt_handler);
         idt
     };
 }
@@ -250,6 +252,23 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
     unsafe {
         PICS.lock()
             .notify_end_of_interrupt(InterruptIndex::Keyboard.as_u8());
+    }
+}
+
+/// Maus-Interrupt (IRQ 12): exakt das Tastatur-Muster — Byte lesen,
+/// in die lock-freie Queue, Task wecken, EOI. Nicht mehr!
+extern "x86-interrupt" fn maus_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    use x86_64::instructions::port::Port;
+
+    // unsafe (Port-I/O): 0x60 ist der Datenport des PS/2-Controllers.
+    let mut port = Port::new(0x60);
+    let byte: u8 = unsafe { port.read() };
+    crate::maus::byte_hinzufuegen(byte);
+
+    // unsafe: korrekte Interrupt-Nummer, siehe Timer-Handler.
+    unsafe {
+        PICS.lock()
+            .notify_end_of_interrupt(InterruptIndex::Maus.as_u8());
     }
 }
 

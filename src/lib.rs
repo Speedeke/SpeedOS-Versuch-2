@@ -35,6 +35,7 @@ pub mod grafik;
 pub mod gdt;
 pub mod interrupts;
 pub mod konsole;
+pub mod maus;
 pub mod memory;
 pub mod serial;
 pub mod shell;
@@ -78,18 +79,24 @@ pub fn init() {
     // ZWEITE UEFI-Lektion: initialize() stellt die VORHERIGEN
     // IRQ-Masken wieder her. Das klassische BIOS ließ Timer und
     // Tastatur offen — OVMF maskiert ALLES (0xFF). Deshalb explizit
-    // freischalten: IRQ 0 (Timer), 1 (Tastatur), 2 (Kaskade zum
-    // zweiten PIC); alles andere bleibt aus (Bit = 1 heißt maskiert).
+    // freischalten: IRQ 0 (Timer), 1 (Tastatur), 2 (Kaskade) am
+    // ersten PIC, IRQ 12 (Maus) am zweiten (Bit = 1 heißt maskiert).
     unsafe {
         interrupts::PICS
             .lock()
-            .write_masks(0b1111_1000, 0b1111_1111)
+            .write_masks(0b1111_1000, 0b1110_1111)
     };
     // Den Timer selbst programmieren (unter UEFI macht das sonst
     // niemand — siehe Kommentar an pit_initialisieren).
     interrupts::pit_initialisieren();
-    // Interrupts auf der CPU aktivieren (sti-Befehl):
-    // Ab jetzt können Timer und Tastatur jederzeit "dazwischenfunken".
+    // Die PS/2-Maus initialisieren — VOR dem sti, denn die ACK-
+    // Handshakes werden gepollt (alle Warteschleifen mit Timeout:
+    // fehlt die Maus, bootet SpeedOS trotzdem).
+    if !maus::initialisieren() {
+        serial_println!("[BOOT] WARNUNG: Keine PS/2-Maus gefunden.");
+    }
+    // Interrupts auf der CPU aktivieren (sti-Befehl): Ab jetzt können
+    // Timer, Tastatur und Maus jederzeit "dazwischenfunken".
     x86_64::instructions::interrupts::enable();
 }
 

@@ -11,7 +11,8 @@
 // ohne Bildschirm.
 
 use crate::framebuffer::{DoppelPuffer, Farbe};
-use core::sync::atomic::{AtomicBool, Ordering};
+use crate::maus::{MausEvent, MausTaste};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use noto_sans_mono_bitmap::{get_raster, FontWeight, RasterHeight};
 
 // ---------------------------------------------------------------------------
@@ -586,13 +587,95 @@ pub fn demo_zeichnen() {
         // Fußzeile.
         z.text(
             40, hoehe - 40,
-            "Beliebige Taste: zurueck zur Konsole",
+            "Maus: Klick = Punkt, Rad = Farbe  |  Beliebige Taste: zurueck zur Konsole",
             RasterHeight::Size16, FontWeight::Regular,
             Rgba::neu(0x8a, 0x91, 0xa3),
         );
 
         fb.present();
     });
+
+    // Farbanzeige fürs Malen initial zeichnen:
+    demo_farbfeld_zeichnen();
+}
+
+// ---------------------------------------------------------------------------
+// Maus-Interaktion in der Demo: Klicken malt, das Rad wechselt die Farbe
+// ---------------------------------------------------------------------------
+
+/// Die Malfarben, durch die das Scrollrad blättert.
+const DEMO_FARBEN: [(Rgba, &str); 6] = [
+    (Rgba::neu(0x22, 0xd3, 0xee), "Cyan   "),
+    (Rgba::neu(0x7c, 0x3a, 0xed), "Violett"),
+    (Rgba::neu(0x3b, 0x82, 0xf6), "Blau   "),
+    (Rgba::neu(0x22, 0xc5, 0x5e), "Gruen  "),
+    (Rgba::neu(0xfb, 0xbf, 0x24), "Gelb   "),
+    (Rgba::neu(0xef, 0x44, 0x44), "Rot    "),
+];
+
+/// Index der aktuellen Malfarbe.
+static DEMO_FARBE: AtomicUsize = AtomicUsize::new(0);
+
+/// Zeichnet die Farbanzeige unten rechts (aktuelle Malfarbe).
+fn demo_farbfeld_zeichnen() {
+    use crate::framebuffer::mit_framebuffer;
+
+    let (farbe, name) = DEMO_FARBEN[DEMO_FARBE.load(Ordering::Relaxed) % DEMO_FARBEN.len()];
+    mit_framebuffer(|fb| {
+        let breite = fb.info().width as i32;
+        let hoehe = fb.info().height as i32;
+        let mut z = Zeichner::neu(fb);
+        z.rechteck_abgerundet(Rechteck::neu(breite - 260, hoehe - 56, 32, 32), 6, farbe);
+        // Namensfeld erst leeren (alter Name könnte länger gewesen sein):
+        z.rechteck_fuellen(
+            Rechteck::neu(breite - 220, hoehe - 52, 200, 24),
+            Rgba::neu(0x0b, 0x0e, 0x14),
+        );
+        z.text(
+            breite - 220, hoehe - 52,
+            name,
+            RasterHeight::Size16, FontWeight::Regular,
+            Rgba::neu(0xc4, 0xca, 0xd6),
+        );
+        let y = (hoehe - 60).max(0) as usize;
+        fb.present_zeilen(y, 44);
+    });
+}
+
+/// Wird vom Maus-Task für jedes Event gerufen — tut nur im
+/// Demo-Modus etwas: Linksklick malt einen Punkt an der Cursor-
+/// Position, das Scrollrad wechselt die Malfarbe.
+pub fn demo_maus_event(event: &MausEvent) {
+    use crate::framebuffer::mit_framebuffer;
+
+    if !demo_aktiv() {
+        return;
+    }
+    match event {
+        MausEvent::Gedrueckt(MausTaste::Links) => {
+            let (x, y) = crate::maus::position();
+            let (farbe, _) = DEMO_FARBEN[DEMO_FARBE.load(Ordering::Relaxed) % DEMO_FARBEN.len()];
+            mit_framebuffer(|fb| {
+                let mut z = Zeichner::neu(fb);
+                z.kreis_fuellen(x, y, 8, farbe);
+                // Nur den Fleck übertragen:
+                fb.present_bereich(
+                    (x - 9).max(0) as usize,
+                    (y - 9).max(0) as usize,
+                    20,
+                    20,
+                );
+            });
+        }
+        MausEvent::Gescrollt(delta) => {
+            let anzahl = DEMO_FARBEN.len() as i32;
+            let alt = DEMO_FARBE.load(Ordering::Relaxed) as i32;
+            let neu = (alt + *delta as i32).rem_euclid(anzahl) as usize;
+            DEMO_FARBE.store(neu, Ordering::Relaxed);
+            demo_farbfeld_zeichnen();
+        }
+        _ => {}
+    }
 }
 
 // ---------------------------------------------------------------------------

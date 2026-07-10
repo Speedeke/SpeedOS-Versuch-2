@@ -92,6 +92,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     let mut executor = Executor::new();
     executor.spawn(Task::new(shell::run()));
     executor.spawn(Task::new(konsole::cursor_blink_task()));
+    executor.spawn(Task::new(speed_os::maus::maus_task()));
     executor.run();
 }
 

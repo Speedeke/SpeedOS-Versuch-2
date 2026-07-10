@@ -5,6 +5,20 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### Hinzugefügt (PS/2-Maus)
+- Maus-Treiber am zweiten 8042-Port: vorsichtige Controller-Init
+  (Tastatur-Bits unangetastet, alles mit Timeouts), IntelliMouse-
+  Scrollrad (200/100/80-Magie, 4-Byte-Pakete)
+- Reines, unit-getestetes Paket-Parsing (Sync, 9-Bit-Vorzeichen,
+  Overflow, Tasten, 4-Bit-Rad)
+- IRQ 12 -> lock-freie Queue -> async maus_task; globaler Zustand
+  (geklemmte Position, Tasten) und MausEvent-Typ (Bewegt/Gedrueckt/
+  Losgelassen/Gescrollt)
+- Pfeil-Cursor als Front-Buffer-Overlay (Back-Buffer bleibt
+  cursorfrei; Wiederherstellen = present_bereich)
+- grafiktest interaktiv: Klick malt Punkte, Rad wechselt die
+  Malfarbe (Anzeige unten rechts)
+
 ### Hinzugefügt (Zeichen-Werkzeuge: grafik.rs)
 - Zeichner auf dem Back-Buffer: Linien (Bresenham), Rechtecke
   (gefüllt/Rahmen/abgerundet), Kreise (gefüllt/Midpoint-Rahmen),
