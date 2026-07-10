@@ -8,11 +8,11 @@ ist alles selbst gebaut (auf Basis der bewährten Architektur aus
 > Lernprojekt: Der Code ist bewusst ausführlich auf Deutsch kommentiert —
 > jede Datei erklärt, *was* sie tut und *warum* es so funktioniert.
 
-![SpeedShell mit Banner](docs/screenshots/shell.png)
-*<!-- Screenshot-Platzhalter: SpeedShell nach dem Boot (Banner + Prompt) -->*
+![Boot-Screen](docs/screenshots/bootscreen.png)
+*Der Boot-Screen: Obsidian-Aurora-Farbverlauf, gerendert Pixel für Pixel.*
 
-![Dateisystem-Befehle](docs/screenshots/dateisystem.png)
-*<!-- Screenshot-Platzhalter: dir, cd, type und tree in Aktion -->*
+![SpeedShell](docs/screenshots/shell.png)
+*Die SpeedShell auf der Framebuffer-Konsole: help, farbtest, blinkender Cursor.*
 
 ## Features (Stand: Juli 2026)
 
