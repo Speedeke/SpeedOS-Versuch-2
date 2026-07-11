@@ -14,10 +14,20 @@
   Kernel baut auch im dev-Profil mit `opt-level = 2` (Cargo.toml) —
   unoptimiert braucht ein Compositor-Frame hunderte ms. (2) QEMU läuft
   mit `-accel whpx,kernel-irqchip=off -accel tcg` (Hardware-
-  Virtualisierung, TCG nur als Fallback). (3) `vgamem_mb=4` am
-  VGA-Device deckelt die Auflösung auf ~1360x768 — der EDID-Wunsch
-  allein wird von OVMF ignoriert (nimmt sonst 2560x1600). (4) PIT auf
+  Virtualisierung, TCG nur als Fallback). (3) Auflösung standardmäßig
+  klein (720p-Klasse), wählbar per SPEEDOS_AUFLOESUNG. (4) PIT auf
   250 Hz, (5) Maus-Abtastrate nach der IntelliMouse-Sequenz auf 200/s.
+- **Auflösungswahl (Juli 2026):** SPEEDOS_AUFLOESUNG (720p Standard,
+  1080p, 2k, 4k, ... oder BREITExHOEHE) — Logik im boot/-Runner.
+  Mechanik: Der Bootloader nimmt den GRÖSSTEN GOP-Modus, der seine
+  Minimums erfüllt (.last()), und die Firmware bietet nur Modi an, die
+  ins VRAM passen — also wird vgamem_mb (Zweierpotenz!) gerade so groß
+  gewählt, dass der Wunschmodus der größte verfügbare ist; der
+  EDID-Wunsch allein wird von OVMF ignoriert. RAM (-m) skaliert mit
+  (~20 B/Pixel + 96 MiB, max 1 GiB = Bitmap-Allocator-Grenze).
+  Firmware-Obergrenze: 4096x2160 (5120x2880 fehlt in der edk2-Tabelle,
+  8K/128-MiB-VRAM hängt die Firmware auf) — größere Wünsche werden mit
+  Meldung gedeckelt. Der Kernel selbst ist auflösungsunabhängig.
 - `cargo run`/`cargo test` rufen als Runner das Host-Programm **boot/** auf:
   Es baut per `bootloader::UefiBoot` das GPT-Disk-Image und startet
   **QEMU** (`qemu-system-x86_64`) mit der edk2/OVMF-Firmware aus dem

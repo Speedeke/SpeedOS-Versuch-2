@@ -89,6 +89,26 @@ Es verpackt den Kernel mit `bootloader::UefiBoot` in ein bootfähiges
 GPT-Image und startet QEMU. Der allererste Build kompiliert dabei
 einmalig die Bootloader-Stages (ein paar Minuten).
 
+### Auflösung wählen
+
+SpeedOS ist auflösungsunabhängig — die Umgebungsvariable
+`SPEEDOS_AUFLOESUNG` wählt den Grafikmodus (Standard: 720p, die
+flotteste Wahl). Der Runner dimensioniert VRAM und Arbeitsspeicher
+automatisch passend:
+
+```
+$env:SPEEDOS_AUFLOESUNG="4k"; cargo run        # PowerShell
+SPEEDOS_AUFLOESUNG=1080p cargo run             # bash
+```
+
+Presets: `720p`, `1080p`, `1200p`, `2k`/`1440p`, `1600p`, `4k`,
+`5k`, `8k` — oder frei als `BREITExHOEHE` (z. B. `1600x900`).
+1080p und 4K treffen exakt; dazwischen nimmt die Firmware den
+nächstgrößeren Modus ihrer Tabelle (720p → 1360x768, 2k → 2560x1600).
+5K/8K versteht der Runner, deckelt sie aber ehrlich auf das Maximum
+der QEMU-VGA-Firmware (4096x2160) — der Kernel selbst könnte sie
+darstellen.
+
 
 Alternative Heap-Allocatoren zum Experimentieren:
 

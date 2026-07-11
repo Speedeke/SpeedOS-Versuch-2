@@ -32,15 +32,54 @@ fn main() {
         .map(|name| name == "deps")
         .unwrap_or(false);
 
+    // 0. Wunsch-Auflösung bestimmen (SPEEDOS_AUFLOESUNG, siehe
+    //    aufloesung_waehlen) und daraus VRAM + Arbeitsspeicher ableiten.
+    //
+    //    Der Trick hinter der Auflösungswahl: Der Bootloader nimmt den
+    //    GRÖSSTEN Grafikmodus, der seine Minimums erfüllt (.last() über
+    //    die GOP-Modi), und die Firmware bietet nur Modi an, die ins
+    //    VRAM passen. Also machen wir das VRAM (vgamem_mb, Zweierpotenz)
+    //    gerade so groß, dass der Wunschmodus hineinpasst — dann IST
+    //    der größte verfügbare Modus (fast) genau der Wunsch.
+    let (breite, hoehe) = aufloesung_waehlen();
+    // Obergrenze der QEMU-VGA-Firmware: Die edk2-Modustabelle endet
+    // bei 4096x2160 (empirisch geprüft) — 5120x2880 existiert nicht
+    // (Fallback auf winzige 1280x800), und 8K (VRAM 128 MiB) lässt
+    // die Firmware komplett hängen. SpeedOS selbst ist auflösungs-
+    // unabhängig; wir deckeln also EHRLICH mit einer Meldung, statt
+    // den Nutzer in einen Hänger booten zu lassen.
+    let (breite, hoehe) = if breite > 4096 || hoehe > 2160 {
+        eprintln!(
+            "[Runner] {breite}x{hoehe} liegt oberhalb der QEMU-VGA-Firmware \
+             (max. 4096x2160) — nutze 4096x2160."
+        );
+        (4096, 2160)
+    } else {
+        (breite, hoehe)
+    };
+    let bedarf_bytes = breite * hoehe * 4;
+    let mut vgamem_mb: u64 = 4;
+    while vgamem_mb * 1024 * 1024 < bedarf_bytes {
+        vgamem_mb *= 2;
+    }
+    let vgamem_mb = vgamem_mb.min(256);
+    // Arbeitsspeicher passend zur Auflösung: Back-Buffer (4 B/Pixel)
+    // plus die Fenster-Puffer-Reserve des Desktops (~9 B/Pixel) plus
+    // Grundbedarf — großzügig auf 64er-Schritte gerundet. Obergrenze
+    // 1 GiB: mehr verwaltet der Bitmap-Frame-Allocator nicht.
+    let ram_mb = ((breite * hoehe * 20) / (1024 * 1024) + 96)
+        .next_multiple_of(64)
+        .clamp(128, 1024);
+
     // 1. Bootfähiges UEFI-Disk-Image (GPT) neben dem Kernel erzeugen.
-    //    Über die BootConfig wünschen wir uns einen Framebuffer mit
-    //    mindestens 1280x720 — geht das nicht, fällt der Bootloader
-    //    dokumentiert auf einen kleineren Modus zurück. Außerdem:
-    //    Boot-Logging leise (nur Fehler), damit weder Framebuffer
-    //    noch serielle Ausgabe vollgeschrieben werden.
+    //    Über die BootConfig wünschen wir uns die gewählte Auflösung
+    //    als Minimum — geht das nicht (krumme Custom-Auflösung), fällt
+    //    der Bootloader dokumentiert auf einen anderen Modus zurück.
+    //    Außerdem: Boot-Logging leise (nur Fehler), damit weder
+    //    Framebuffer noch serielle Ausgabe vollgeschrieben werden.
     let mut boot_config = bootloader::BootConfig::default();
-    boot_config.frame_buffer.minimum_framebuffer_width = Some(1280);
-    boot_config.frame_buffer.minimum_framebuffer_height = Some(720);
+    boot_config.frame_buffer.minimum_framebuffer_width = Some(breite);
+    boot_config.frame_buffer.minimum_framebuffer_height = Some(hoehe);
     boot_config.log_level = bootloader_boot_config::LevelFilter::Error;
     boot_config.frame_buffer_logging = false;
 
@@ -76,15 +115,23 @@ fn main() {
     // unser PIC/PIT von QEMU emuliert werden soll (WHPX-Eigenheit).
     qemu.arg("-accel").arg("whpx,kernel-irqchip=off");
     qemu.arg("-accel").arg("tcg");
-    // Grafikkarte mit Wunsch-Auflösung 1280x720 (per EDID). Der
-    // EDID-Wunsch allein reicht nicht — OVMF wählt sonst trotzdem
-    // den größten Modus (2560x1600 = 4x so viele Pixel pro Frame!).
-    // Deshalb zusätzlich vgamem_mb=4: Mit 4 MiB VRAM passen nur
-    // Modi bis 1280x720 (3,5 MiB) — die Firmware MUSS klein wählen.
-    // (Der Kernel kommt trotzdem mit jeder Auflösung klar.)
+    // Arbeitsspeicher passend zur Auflösung (siehe Rechnung oben):
+    qemu.arg("-m").arg(format!("{ram_mb}M"));
+    // Grafikkarte: Das VRAM (vgamem_mb) ist der eigentliche
+    // Auflösungs-Wähler — der EDID-Wunsch allein wird von OVMF
+    // ignoriert (es nähme sonst immer den größten Modus überhaupt).
+    // Der Kernel kommt mit JEDER Auflösung klar (720p bis 8K).
     qemu.arg("-vga").arg("none");
-    qemu.arg("-device")
-        .arg("VGA,edid=on,xres=1280,yres=720,vgamem_mb=4");
+    qemu.arg("-device").arg(format!(
+        "VGA,edid=on,xres={breite},yres={hoehe},vgamem_mb={vgamem_mb}"
+    ));
+    if !test_modus {
+        eprintln!(
+            "[Runner] Aufloesung {breite}x{hoehe} gewuenscht \
+             (VRAM {vgamem_mb} MiB, RAM {ram_mb} MiB) — \
+             andere Groesse: SPEEDOS_AUFLOESUNG=1080p|2k|4k|8k|BREITExHOEHE"
+        );
+    }
     // Die serielle Schnittstelle ist unser Debug-Lebensnerv:
     // immer ins Terminal spiegeln.
     qemu.arg("-serial").arg("stdio");
@@ -119,6 +166,48 @@ fn main() {
     } else {
         let status = kind.wait().expect("Warten auf QEMU fehlgeschlagen");
         process::exit(status.code().unwrap_or(0));
+    }
+}
+
+/// Liest die Wunsch-Auflösung aus der Umgebungsvariablen
+/// SPEEDOS_AUFLOESUNG. Verstanden werden die gängigen Namen
+/// (720p/hd, 1080p/fhd, 1440p/2k/qhd, 2160p/4k/uhd, 2880p/5k,
+/// 4320p/8k) sowie freie Angaben wie "1600x900". Ohne Variable:
+/// 720p — die flotteste Wahl für die Emulation.
+///
+/// Hinweise: Die Firmware bietet eine feste Modus-Tabelle an; bei
+/// Wünschen zwischen zwei Modi landet man auf dem nächstgrößeren
+/// (z. B. 720p -> 1360x768, 2k -> 2560x1600); 1080p und 4k treffen
+/// exakt. 5k/8k werden verstanden, aber auf das Firmware-Maximum
+/// 4096x2160 gedeckelt (siehe Kommentar in main) — SpeedOS selbst
+/// könnte sie darstellen.
+fn aufloesung_waehlen() -> (u64, u64) {
+    let wunsch = std::env::var("SPEEDOS_AUFLOESUNG").unwrap_or_default();
+    let klein = wunsch.trim().to_ascii_lowercase();
+    match klein.as_str() {
+        "" | "720p" | "hd" => (1280, 720),
+        "1080p" | "fhd" | "fullhd" => (1920, 1080),
+        "1200p" | "wuxga" => (1920, 1200),
+        "1440p" | "2k" | "qhd" | "wqhd" => (2560, 1440),
+        "1600p" => (2560, 1600),
+        "2160p" | "4k" | "uhd" => (3840, 2160),
+        "2880p" | "5k" => (5120, 2880),
+        "4320p" | "8k" => (7680, 4320),
+        _ => {
+            // Freie Angabe "BREITExHOEHE" (z. B. "1600x900"):
+            if let Some((b, h)) = klein.split_once('x') {
+                if let (Ok(b), Ok(h)) = (b.trim().parse::<u64>(), h.trim().parse::<u64>()) {
+                    if (640..=4096).contains(&b) && (480..=2160).contains(&h) {
+                        return (b, h);
+                    }
+                }
+            }
+            eprintln!(
+                "[Runner] SPEEDOS_AUFLOESUNG '{wunsch}' nicht verstanden — nutze 720p. \
+                 Presets: 720p, 1080p, 2k, 4k, 5k, 8k oder BREITExHOEHE."
+            );
+            (1280, 720)
+        }
     }
 }
 

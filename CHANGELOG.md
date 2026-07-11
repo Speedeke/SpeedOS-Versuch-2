@@ -5,6 +5,25 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### Hinzugefügt (Auflösungswahl 720p bis 4K)
+- SPEEDOS_AUFLOESUNG wählt den Grafikmodus (720p Standard, 1080p,
+  1200p, 2k, 1600p, 4k, 5k, 8k oder frei BREITExHOEHE) — der Runner
+  leitet VRAM (vgamem_mb als Modus-Wähler, da OVMF den EDID-Wunsch
+  ignoriert und immer den größten passenden Modus nimmt) und
+  Arbeitsspeicher (-m, ~20 B/Pixel + Grundbedarf) automatisch ab
+- 1080p und 4K treffen exakt; 5K/8K werden ehrlich auf das
+  Firmware-Maximum 4096x2160 gedeckelt (5K fehlt in der
+  edk2-Modustabelle, 8K lässt die Firmware hängen) — der Kernel
+  selbst ist auflösungsunabhängig (in 4K end-to-end geprüft)
+
+### Geändert (Performance gegen Maus-/Desktop-Lag)
+- QEMU mit Hardware-Virtualisierung (-accel whpx, TCG-Fallback)
+- Kernel baut im dev-Profil mit opt-level 2 (Debug-Checks bleiben)
+- Standard-Auflösung 1360x768 statt 2560x1600 (4x weniger Pixel)
+- PIT von ~18,2 Hz auf 250 Hz (zeit::PIT_TEILER zentral) — 4-ms-
+  statt 55-ms-Auflösung für warte_ms, Compositor erreicht ~33 FPS
+- Maus-Abtastrate nach IntelliMouse-Init auf 200/s (statt 80/s)
+
 ### Hinzugefügt (Desktop komplett: Theme, Taskleiste, Startmenü, Terminal)
 - Theme-System (src/theme.rs): ALLE UI-Farben in einer zentralen
   Struktur, zwei Themes "Aurora Dunkel" (Standard) und "Aurora Hell",
