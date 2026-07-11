@@ -29,6 +29,7 @@ use core::panic::PanicInfo;
 // Unsere Treiber- und System-Module — bewusst voneinander isoliert
 // (Mikrokernel-Prinzip).
 pub mod allocator;
+pub mod apps;
 pub mod fenster;
 pub mod framebuffer;
 pub mod fs;
@@ -157,6 +158,24 @@ pub fn exit_qemu(exit_code: QemuExitCode) {
         let mut port = Port::new(0xf4);
         port.write(exit_code as u32);
     }
+}
+
+/// Startet die Maschine neu — der klassische PC-Reset-Trick: Der
+/// 8042-Tastatur-Controller (Port 0x64) hat eine Leitung zur
+/// Reset-Pin der CPU, das Kommando 0xFE zieht sie. Gemeinsame
+/// Grundlage für den Shell-Befehl `neustart` und die Startmenü-App.
+pub fn neustart() {
+    use x86_64::instructions::port::Port;
+
+    let mut port: Port<u8> = Port::new(0x64);
+    // unsafe (Port-I/O): 0x64 ist der Kommando-Port des 8042. Der
+    // Reset ist die GEWOLLTE Wirkung — Datenverlust im RamFs
+    // inklusive, das ist dem Aufrufer bewusst.
+    unsafe {
+        port.write(0xFE);
+    }
+    // Falls der Reset einen Wimpernschlag braucht: CPU anhalten.
+    hlt_loop();
 }
 
 /// Legt die CPU schlafen, bis der nächste Interrupt kommt — für immer,

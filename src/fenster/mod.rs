@@ -221,6 +221,15 @@ struct Switcher {
     auswahl: usize,
 }
 
+/// Das offene Startmenü (None im Manager = zu).
+struct StartMenue {
+    /// Der getippte Suchtext — filtert die App-Liste live.
+    suchtext: String,
+    /// Ausgewählter Eintrag (Index in der GEFILTERTEN Liste) —
+    /// Pfeiltasten bewegen ihn, Enter startet ihn, Maus-Hover setzt ihn.
+    auswahl: usize,
+}
+
 pub struct FensterManager {
     /// Z-Ordnung: LETZTES Element = ganz vorne.
     fenster: Vec<Fenster>,
@@ -229,6 +238,7 @@ pub struct FensterManager {
     /// Snap-Vorschau während des Verschiebens (-1 links, +1 rechts).
     snap_hinweis: i8,
     switcher: Option<Switcher>,
+    start_menue: Option<StartMenue>,
     alles_dirty: bool,
     bildschirm_breite: i32,
     bildschirm_hoehe: i32,
@@ -245,6 +255,7 @@ impl FensterManager {
             interaktion: Interaktion::Keine,
             snap_hinweis: 0,
             switcher: None,
+            start_menue: None,
             alles_dirty: true,
             bildschirm_breite,
             bildschirm_hoehe,
@@ -357,7 +368,7 @@ impl FensterManager {
     /// Klick in die Taskleiste (Startknopf / Fenster-Knöpfe).
     fn taskleiste_klick(&mut self, px: i32, py: i32) {
         if self.start_knopf_rechteck().enthaelt(px, py) {
-            // Startmenü — kommt im nächsten Schritt.
+            self.startmenue_umschalten();
             return;
         }
         for (id, rect) in self.taskleisten_knoepfe() {
@@ -383,6 +394,137 @@ impl FensterManager {
             self.fokussieren_und_heben(id);
         }
         self.alles_dirty = true;
+    }
+
+    // ----- Startmenü -----
+
+    /// Öffnet/schließt das Startmenü (Startknopf oder Super-Taste).
+    fn startmenue_umschalten(&mut self) {
+        self.start_menue = match self.start_menue {
+            Some(_) => None,
+            None => Some(StartMenue { suchtext: String::new(), auswahl: 0 }),
+        };
+        self.alles_dirty = true;
+    }
+
+    fn startmenue_schliessen(&mut self) {
+        if self.start_menue.take().is_some() {
+            self.alles_dirty = true;
+        }
+    }
+
+    /// Das Panel-Rechteck des Startmenüs — direkt über dem Startknopf,
+    /// die Höhe wächst mit der (gefilterten) App-Liste.
+    fn menue_rechteck(&self, anzahl_eintraege: usize) -> Rechteck {
+        let n = anzahl_eintraege.max(1) as i32;
+        let hoehe = METRIK.menue_suchfeld_hoehe + n * METRIK.menue_eintrag_hoehe + METRIK.abstand;
+        Rechteck::neu(
+            METRIK.abstand,
+            self.taskleiste_y() - hoehe - METRIK.abstand,
+            METRIK.menue_breite,
+            hoehe,
+        )
+    }
+
+    /// Das Rechteck des i-ten Menü-Eintrags (innerhalb von `menue`).
+    fn menue_eintrag_rechteck(menue: Rechteck, i: usize) -> Rechteck {
+        Rechteck::neu(
+            menue.x + METRIK.abstand,
+            menue.y + METRIK.menue_suchfeld_hoehe + i as i32 * METRIK.menue_eintrag_hoehe,
+            menue.breite - 2 * METRIK.abstand,
+            METRIK.menue_eintrag_hoehe,
+        )
+    }
+
+    /// Tastatur im offenen Startmenü: Tippen filtert, Pfeile wählen,
+    /// Enter startet. Liefert die Start-Funktion der gewählten App —
+    /// der Aufrufer führt sie NACH dem Loslassen des Locks aus!
+    fn startmenue_taste(&mut self, taste: DecodedKey) -> Option<fn()> {
+        self.start_menue.as_ref()?;
+
+        // Enter: gewählte App starten und Menü schließen.
+        if matches!(taste, DecodedKey::Unicode('\n') | DecodedKey::Unicode('\r')) {
+            let menue = self.start_menue.as_ref().unwrap();
+            let start = crate::apps::filtern(&menue.suchtext)
+                .get(menue.auswahl)
+                .map(|app| app.start);
+            if start.is_some() {
+                self.start_menue = None;
+                self.alles_dirty = true;
+            }
+            return start;
+        }
+
+        let menue = self.start_menue.as_mut().unwrap();
+        match taste {
+            DecodedKey::Unicode('\u{8}') | DecodedKey::Unicode('\u{7f}') => {
+                menue.suchtext.pop();
+                menue.auswahl = 0;
+            }
+            DecodedKey::RawKey(pc_keyboard::KeyCode::ArrowUp) => {
+                menue.auswahl = menue.auswahl.saturating_sub(1);
+            }
+            DecodedKey::RawKey(pc_keyboard::KeyCode::ArrowDown) => {
+                let anzahl = crate::apps::filtern(&menue.suchtext).len();
+                if menue.auswahl + 1 < anzahl {
+                    menue.auswahl += 1;
+                }
+            }
+            DecodedKey::Unicode(zeichen) if zeichen >= ' ' => {
+                if menue.suchtext.chars().count() < 24 {
+                    menue.suchtext.push(zeichen);
+                    menue.auswahl = 0;
+                }
+            }
+            _ => return None,
+        }
+        self.alles_dirty = true;
+        None
+    }
+
+    /// Klick bei offenem Startmenü. Liefert wie startmenue_taste ggf.
+    /// eine Start-Funktion nach draußen.
+    fn startmenue_klick(&mut self, px: i32, py: i32) -> Option<fn()> {
+        let suchtext = self.start_menue.as_ref()?.suchtext.clone();
+        let gefiltert = crate::apps::filtern(&suchtext);
+        let rect = self.menue_rechteck(gefiltert.len());
+
+        if rect.enthaelt(px, py) {
+            for (i, app) in gefiltert.iter().enumerate() {
+                if Self::menue_eintrag_rechteck(rect, i).enthaelt(px, py) {
+                    self.start_menue = None;
+                    self.alles_dirty = true;
+                    return Some(app.start);
+                }
+            }
+            // Klick ins Menü, aber auf keinen Eintrag (Suchfeld, Rand):
+            return None;
+        }
+
+        // Klick AUSSERHALB schließt das Menü und wird verschluckt —
+        // auch auf dem Startknopf (das ist der Toggle-Effekt).
+        self.startmenue_schliessen();
+        None
+    }
+
+    /// Maus-Hover im offenen Menü wählt den Eintrag unter dem Cursor.
+    fn startmenue_hover(&mut self, px: i32, py: i32) {
+        let suchtext = match &self.start_menue {
+            Some(menue) => menue.suchtext.clone(),
+            None => return,
+        };
+        let anzahl = crate::apps::filtern(&suchtext).len();
+        let rect = self.menue_rechteck(anzahl);
+        for i in 0..anzahl {
+            if Self::menue_eintrag_rechteck(rect, i).enthaelt(px, py) {
+                let menue = self.start_menue.as_mut().unwrap();
+                if menue.auswahl != i {
+                    menue.auswahl = i;
+                    self.alles_dirty = true;
+                }
+                return;
+            }
+        }
     }
 
     /// Resize-Kante am Punkt (nur unterhalb der Titelzeile relevant).
@@ -425,26 +567,31 @@ impl FensterManager {
         maus::cursor_form_setzen(form);
     }
 
-    pub fn maus_event(&mut self, event: &MausEvent, px: i32, py: i32) {
+    /// Liefert ggf. eine App-Start-Funktion (aus dem Startmenü) —
+    /// der Aufrufer MUSS sie erst nach dem Loslassen des MANAGER-Locks
+    /// ausführen (Deadlock-Regel: Start-Funktionen nehmen den Lock).
+    pub fn maus_event(&mut self, event: &MausEvent, px: i32, py: i32) -> Option<fn()> {
         match event {
-            MausEvent::Gedrueckt(MausTaste::Links) => self.maus_gedrueckt(px, py),
+            MausEvent::Gedrueckt(MausTaste::Links) => return self.maus_gedrueckt(px, py),
             MausEvent::Losgelassen(MausTaste::Links) => self.maus_losgelassen(px, py),
             MausEvent::Bewegt { x, y } => self.maus_bewegt(*x, *y),
             _ => {}
         }
+        None
     }
 
-    fn maus_gedrueckt(&mut self, px: i32, py: i32) {
+    fn maus_gedrueckt(&mut self, px: i32, py: i32) -> Option<fn()> {
+        // Ein offenes Startmenü fängt ALLE Klicks ab (liegt zuoberst).
+        if self.start_menue.is_some() {
+            return self.startmenue_klick(px, py);
+        }
         // Die Taskleiste liegt IMMER obenauf — sie fängt Klicks vor
         // allen Fenstern ab.
         if py >= self.taskleiste_y() {
             self.taskleiste_klick(px, py);
-            return;
+            return None;
         }
-        let id = match self.fenster_unter(px, py) {
-            Some(id) => id,
-            None => return,
-        };
+        let id = self.fenster_unter(px, py)?;
         self.fokussieren_und_heben(id);
         // "fenster" ist jetzt garantiert das letzte Element.
         let index = self.fenster.len() - 1;
@@ -452,7 +599,7 @@ impl FensterManager {
         if self.fenster[index].in_titelzeile(px, py) {
             if let Some(knopf) = self.fenster[index].knopf_bei(px, py) {
                 self.knopf_aktion(id, knopf);
-                return;
+                return None;
             }
             // Maximiertes Fenster beim Ziehen wiederherstellen:
             if self.fenster[index].vorher.is_some() {
@@ -485,6 +632,7 @@ impl FensterManager {
                 f.dirty = true;
             }
         }
+        None
     }
 
     fn maus_losgelassen(&mut self, _px: i32, _py: i32) {
@@ -567,6 +715,10 @@ impl FensterManager {
                 }
             }
             Interaktion::Keine => {
+                // Hover im offenen Startmenü wählt den Eintrag darunter:
+                if self.start_menue.is_some() {
+                    self.startmenue_hover(x, y);
+                }
                 self.cursor_aktualisieren(x, y);
             }
         }
@@ -799,9 +951,78 @@ impl FensterManager {
         // 4. Taskleiste — IMMER im Vordergrund, deshalb NACH den Fenstern:
         self.taskleiste_zeichnen(&mut z);
 
-        // 5. Alt+Tab-Overlay (ganz oben):
+        // 5. Startmenü (über der Taskleiste):
+        if let Some(menue) = &self.start_menue {
+            self.startmenue_zeichnen(&mut z, menue);
+        }
+
+        // 6. Alt+Tab-Overlay (ganz oben):
         if let Some(sw) = &self.switcher {
             self.switcher_zeichnen(&mut z, sw);
+        }
+    }
+
+    /// Zeichnet das Startmenü: Panel im Aurora-Stil, Suchfeld oben,
+    /// darunter die (gefilterte) App-Liste aus der Registry.
+    fn startmenue_zeichnen<F: Zeichenflaeche>(&self, z: &mut Zeichner<'_, F>, menue: &StartMenue) {
+        let thema = theme::aktuell();
+        let gefiltert = crate::apps::filtern(&menue.suchtext);
+        let rect = self.menue_rechteck(gefiltert.len());
+
+        // Schatten, Panel, Akzent-Rahmen:
+        z.rechteck_abgerundet(
+            Rechteck::neu(rect.x + METRIK.abstand, rect.y + METRIK.abstand, rect.breite, rect.hoehe),
+            METRIK.radius_gross,
+            thema.schatten,
+        );
+        z.rechteck_abgerundet(rect, METRIK.radius_gross, thema.flaeche);
+        z.rechteck_rahmen(rect, thema.akzent);
+
+        // Suchfeld: getippter Text oder Platzhalter, dazu ein Cursor.
+        let feld = Rechteck::neu(
+            rect.x + METRIK.abstand,
+            rect.y + METRIK.abstand,
+            rect.breite - 2 * METRIK.abstand,
+            METRIK.menue_suchfeld_hoehe - 2 * METRIK.abstand + 2,
+        );
+        z.rechteck_abgerundet(feld, METRIK.radius_klein, thema.eingabefeld);
+        let feld_text_y = feld.y + (feld.hoehe - METRIK.zeilen_hoehe) / 2;
+        if menue.suchtext.is_empty() {
+            z.text(feld.x + 10, feld_text_y, "Suchen ...", METRIK.schrift_ui, FontWeight::Regular, thema.text_gedimmt);
+        } else {
+            let text = format!("{}_", menue.suchtext);
+            z.text(feld.x + 10, feld_text_y, &text, METRIK.schrift_ui, FontWeight::Regular, thema.text_stark);
+        }
+
+        // Die App-Liste (jeder Eintrag: Icon + Name):
+        if gefiltert.is_empty() {
+            let leer = Self::menue_eintrag_rechteck(rect, 0);
+            z.text(
+                leer.x + 10,
+                leer.y + (leer.hoehe - METRIK.zeilen_hoehe) / 2,
+                "Keine Treffer",
+                METRIK.schrift_ui,
+                FontWeight::Regular,
+                thema.text_gedimmt,
+            );
+            return;
+        }
+        for (i, app) in gefiltert.iter().enumerate() {
+            let eintrag = Self::menue_eintrag_rechteck(rect, i);
+            let gewaehlt = i == menue.auswahl;
+            if gewaehlt {
+                z.rechteck_abgerundet(eintrag, METRIK.radius_klein, thema.auswahl);
+            }
+            let text_y = eintrag.y + (eintrag.hoehe - METRIK.zeilen_hoehe) / 2;
+            z.icon(eintrag.x + 10, text_y, app.icon, 1);
+            z.text(
+                eintrag.x + 38,
+                text_y,
+                app.name,
+                METRIK.schrift_ui,
+                FontWeight::Regular,
+                if gewaehlt { thema.text_stark } else { thema.text_normal },
+            );
         }
     }
 
@@ -820,8 +1041,16 @@ impl FensterManager {
         );
         z.linie(0, y, breite - 1, y, thema.leiste_linie);
 
-        // Startknopf: das SpeedOS-Logo (2x skaliert = 32 Pixel).
+        // Startknopf: das SpeedOS-Logo (2x skaliert = 32 Pixel);
+        // bei offenem Startmenü hervorgehoben.
         let start = self.start_knopf_rechteck();
+        if self.start_menue.is_some() {
+            z.rechteck_abgerundet(
+                Rechteck::neu(start.x + 4, start.y + 3, start.breite - 8, start.hoehe - 6),
+                METRIK.radius_klein,
+                thema.leiste_knopf_aktiv,
+            );
+        }
         z.icon(start.x + (start.breite - 32) / 2, y + 4, &crate::grafik::ICON_LOGO, 2);
 
         // Ein Knopf pro offenem Fenster:
@@ -1115,11 +1344,64 @@ pub fn maus_event(event: &MausEvent) {
         return;
     }
     let (px, py) = maus::position();
-    let _ = mit_manager(|m| m.maus_event(event, px, py));
+    // Eine vom Startmenü gewählte App wird ERST HIER gestartet —
+    // nach dem Loslassen des MANAGER-Locks (die Start-Funktion nimmt
+    // ihn selbst wieder, sonst gäbe es einen Deadlock).
+    let aktion = mit_manager(|m| m.maus_event(event, px, py)).flatten();
+    if let Some(start) = aktion {
+        start();
+    }
 }
 
 pub fn taste_event(taste: DecodedKey) {
     let _ = mit_manager(|m| m.taste_event(taste));
+}
+
+// ----- Startmenü (Startknopf in der Taskleiste oder Super-Taste) -----
+
+pub fn startmenue_offen() -> bool {
+    mit_manager(|m| m.start_menue.is_some()).unwrap_or(false)
+}
+
+/// Öffnet/schließt das Startmenü (ruft der KeyStream bei Super).
+pub fn startmenue_umschalten() {
+    let _ = mit_manager(|m| m.startmenue_umschalten());
+}
+
+pub fn startmenue_schliessen() {
+    let _ = mit_manager(|m| m.startmenue_schliessen());
+}
+
+/// Taste ins offene Startmenü (ruft die Shell). Startet die gewählte
+/// App — wie bei maus_event erst NACH dem Loslassen des Locks.
+pub fn startmenue_taste(taste: DecodedKey) {
+    let aktion = mit_manager(|m| m.startmenue_taste(taste)).flatten();
+    if let Some(start) = aktion {
+        start();
+    }
+}
+
+// ----- Schnittstelle für die App-Registry (apps.rs) -----
+
+/// Öffnet ein neues App-Fenster — leicht versetzt (Kaskade), damit
+/// mehrere Fenster nicht exakt übereinander liegen.
+pub fn app_fenster_oeffnen(titel: &str, breite: usize, hoehe: usize, inhalt: Inhalt) {
+    let _ = mit_manager(|m| {
+        let versatz = (m.fenster.len() as i32 % 5) * 40;
+        m.fenster_erstellen(titel, 120 + versatz, 90 + versatz, breite, hoehe, inhalt);
+    });
+}
+
+/// Wechselt das Theme und zeichnet ALLE Fenster neu (Inhalte nutzen
+/// Theme-Farben, deshalb reicht alles_dirty allein nicht).
+pub fn theme_wechseln() {
+    crate::theme::umschalten();
+    let _ = mit_manager(|m| {
+        for index in 0..m.fenster.len() {
+            inhalt_zeichnen(&mut m.fenster[index]);
+        }
+        m.alles_dirty = true;
+    });
 }
 
 /// Alt+Tab weiterschalten (ruft der KeyStream).
@@ -1273,6 +1555,47 @@ mod tests {
         assert_eq!(manager.fenster[index].breite(), 500);
         // Höhe = Bildschirm - Titelzeile - Taskleisten-Reserve.
         assert_eq!(manager.fenster[index].hoehe(), 800 - METRIK.titel_hoehe - METRIK.taskleiste_hoehe);
+    }
+
+    /// Startmenü: Umschalten, Suchtext filtert, Enter liefert die
+    /// Start-Funktion des Treffers nach draußen (Deadlock-Regel).
+    #[test_case]
+    fn test_startmenue_suche_und_start() {
+        let (mut manager, _, _) = test_manager();
+        manager.startmenue_umschalten();
+        assert!(manager.start_menue.is_some());
+
+        // "uhr" tippen -> genau ein Treffer, Enter startet ihn:
+        for zeichen in "uhr".chars() {
+            assert!(manager.startmenue_taste(DecodedKey::Unicode(zeichen)).is_none());
+        }
+        let aktion = manager.startmenue_taste(DecodedKey::Unicode('\n'));
+        assert!(aktion.is_some());
+        assert!(manager.start_menue.is_none()); // Menü hat sich geschlossen
+
+        // Ohne Treffer startet Enter nichts (Menü bleibt offen):
+        manager.startmenue_umschalten();
+        for zeichen in "xyz".chars() {
+            manager.startmenue_taste(DecodedKey::Unicode(zeichen));
+        }
+        assert!(manager.startmenue_taste(DecodedKey::Unicode('\n')).is_none());
+        assert!(manager.start_menue.is_some());
+
+        // Klick weit außerhalb schließt das Menü:
+        manager.maus_event(&MausEvent::Gedrueckt(MausTaste::Links), 900, 100);
+        assert!(manager.start_menue.is_none());
+    }
+
+    /// Der Startknopf in der Taskleiste togglet das Menü.
+    #[test_case]
+    fn test_startknopf_toggle() {
+        let (mut manager, _, _) = test_manager();
+        // Klick auf den Startknopf (unten links): öffnet ...
+        manager.maus_event(&MausEvent::Gedrueckt(MausTaste::Links), 20, 780);
+        assert!(manager.start_menue.is_some());
+        // ... zweiter Klick schließt wieder (Klick außerhalb des Panels).
+        manager.maus_event(&MausEvent::Gedrueckt(MausTaste::Links), 20, 780);
+        assert!(manager.start_menue.is_none());
     }
 
     /// Der Taskleisten-Knopf togglet: fokussiert -> minimieren,

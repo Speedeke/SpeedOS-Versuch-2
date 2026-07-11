@@ -161,6 +161,15 @@ impl Stream for KeyStream {
                     let _ = this.keyboard.process_keyevent(key_event);
                     continue;
                 }
+                // Super-/Windows-Taste: öffnet/schließt das Startmenü
+                // (nur im Desktop-Modus; in der Konsole ignoriert).
+                if matches!(code, KeyCode::LWin | KeyCode::RWin) {
+                    if herunter && crate::fenster::desktop_aktiv() {
+                        crate::fenster::startmenue_umschalten();
+                    }
+                    let _ = this.keyboard.process_keyevent(key_event);
+                    continue;
+                }
 
                 if let Some(key) = this.keyboard.process_keyevent(key_event) {
                     return Poll::Ready(Some(key));

@@ -50,14 +50,21 @@ pub async fn run() {
 
     prompt(&kontext);
     while let Some(key) = keys.next().await {
-        // Desktop-Modus? ESC beendet ihn, alle anderen Tasten gehen
-        // ans fokussierte Fenster (Event-Routing im FensterManager).
+        // Desktop-Modus? ESC schließt erst das Startmenü, dann den
+        // Desktop; Tasten gehen ins offene Startmenü oder ans
+        // fokussierte Fenster (Event-Routing im FensterManager).
         if crate::fenster::desktop_aktiv() {
             if key == DecodedKey::Unicode('\u{1b}') {
-                crate::fenster::desktop_beenden();
-                konsole::cursor_aktivieren();
-                konsole::clear_screen();
-                prompt(&kontext);
+                if crate::fenster::startmenue_offen() {
+                    crate::fenster::startmenue_schliessen();
+                } else {
+                    crate::fenster::desktop_beenden();
+                    konsole::cursor_aktivieren();
+                    konsole::clear_screen();
+                    prompt(&kontext);
+                }
+            } else if crate::fenster::startmenue_offen() {
+                crate::fenster::startmenue_taste(key);
             } else {
                 crate::fenster::taste_event(key);
             }

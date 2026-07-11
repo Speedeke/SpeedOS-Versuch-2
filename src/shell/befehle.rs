@@ -310,21 +310,10 @@ impl Befehl for Neustart {
         "Startet SpeedOS neu (Reset ueber den Tastatur-Controller)"
     }
     fn ausfuehren(&self, _argumente: &str, _kontext: &mut ShellKontext, _registry: &[Box<dyn Befehl>]) {
-        use x86_64::instructions::port::Port;
-
         println!("SpeedOS startet neu ...");
-        // Der klassische PC-Reset-Trick: Der 8042-Tastatur-Controller
-        // (Port 0x64) hat eine Leitung zur Reset-Pin der CPU. Das
-        // Kommando 0xFE zieht sie — die Maschine bootet sofort neu.
-        let mut port: Port<u8> = Port::new(0x64);
-        // unsafe (Port-I/O): 0x64 ist der Kommando-Port des 8042.
-        // Der Reset ist hier die GEWOLLTE Wirkung — Datenverlust im
-        // RamFs inklusive, das ist dem Nutzer des Befehls bewusst.
-        unsafe {
-            port.write(0xFE);
-        }
-        // Falls der Reset einen Wimpernschlag braucht: CPU anhalten.
-        crate::hlt_loop();
+        // Der eigentliche Reset lebt in lib.rs (crate::neustart) —
+        // dieselbe Funktion nutzt auch die Startmenü-App.
+        crate::neustart();
     }
 }
 
