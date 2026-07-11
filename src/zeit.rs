@@ -35,6 +35,88 @@ pub fn ms_von_ticks(ticks: u64) -> u64 {
 }
 
 // ---------------------------------------------------------------------------
+// Datum und Uhrzeit — abgeleitet aus den Ticks
+//
+// BEKANNTES TODO (Kalibrierung): SpeedOS liest noch keine echte Uhr
+// (die CMOS/RTC-Hardware kommt später). Bis dahin tun wir so, als
+// wäre die Maschine zu einem festen Zeitpunkt gestartet, und zählen
+// die Uptime dazu — Datum und Uhrzeit LAUFEN damit korrekt (inklusive
+// Tages-, Monats- und Jahreswechsel), nur der Startpunkt ist erfunden.
+// ---------------------------------------------------------------------------
+
+/// Der angenommene Boot-Zeitpunkt (siehe TODO oben).
+const BOOT_JAHR: u64 = 2026;
+const BOOT_MONAT: u64 = 7;
+const BOOT_TAG: u64 = 11;
+const BOOT_SEKUNDEN_AM_TAG: u64 = 9 * 3600; // 09:00:00
+
+/// Ein aufgeschlüsselter Zeitpunkt (für Taskleiste, Uhr-Fenster, ...).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DatumUhrzeit {
+    pub jahr: u64,
+    pub monat: u64,
+    pub tag: u64,
+    pub stunde: u64,
+    pub minute: u64,
+    pub sekunde: u64,
+}
+
+/// Das aktuelle Datum samt Uhrzeit (Boot-Zeitpunkt + Uptime).
+pub fn datum_uhrzeit() -> DatumUhrzeit {
+    datum_nach(ms_seit_boot() / 1000)
+}
+
+fn schaltjahr(jahr: u64) -> bool {
+    jahr.is_multiple_of(4) && (!jahr.is_multiple_of(100) || jahr.is_multiple_of(400))
+}
+
+fn tage_im_monat(jahr: u64, monat: u64) -> u64 {
+    match monat {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        _ => {
+            if schaltjahr(jahr) {
+                29
+            } else {
+                28
+            }
+        }
+    }
+}
+
+/// Boot-Zeitpunkt + `sekunden_seit_boot` als Kalenderdatum — reine,
+/// unit-getestete Funktion. Der Tages-Übertrag läuft schlicht Tag für
+/// Tag (die Uptime ist klein, das ist völlig ausreichend).
+pub fn datum_nach(sekunden_seit_boot: u64) -> DatumUhrzeit {
+    let gesamt = BOOT_SEKUNDEN_AM_TAG + sekunden_seit_boot;
+    let mut uebrige_tage = gesamt / 86_400;
+    let tages_sekunden = gesamt % 86_400;
+
+    let (mut jahr, mut monat, mut tag) = (BOOT_JAHR, BOOT_MONAT, BOOT_TAG);
+    while uebrige_tage > 0 {
+        tag += 1;
+        if tag > tage_im_monat(jahr, monat) {
+            tag = 1;
+            monat += 1;
+            if monat > 12 {
+                monat = 1;
+                jahr += 1;
+            }
+        }
+        uebrige_tage -= 1;
+    }
+
+    DatumUhrzeit {
+        jahr,
+        monat,
+        tag,
+        stunde: tages_sekunden / 3600,
+        minute: (tages_sekunden / 60) % 60,
+        sekunde: tages_sekunden % 60,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Async-Warten auf Timer-Ticks (Cursor-Blinken, Compositor, Uhr, ...)
 //
 // Ein async Task darf NICHT in einer Schleife pollen ("ist es schon
@@ -177,6 +259,32 @@ mod tests {
         // ~18,2 Ticks sollten fast genau 1 Sekunde sein:
         assert_eq!(ms_von_ticks(18), 988);
         assert_eq!(ms_von_ticks(19), 1043);
+    }
+
+    /// Die Datums-Arithmetik: Sekunden-, Tages-, Monatsübertrag.
+    #[test_case]
+    fn test_datum_nach() {
+        // Boot-Zeitpunkt selbst: 11.07.2026, 09:00:00.
+        let start = datum_nach(0);
+        assert_eq!((start.jahr, start.monat, start.tag), (2026, 7, 11));
+        assert_eq!((start.stunde, start.minute, start.sekunde), (9, 0, 0));
+
+        // 90 Sekunden später: 09:01:30.
+        let bald = datum_nach(90);
+        assert_eq!((bald.stunde, bald.minute, bald.sekunde), (9, 1, 30));
+
+        // 15 Stunden später: Mitternacht -> naechster Tag.
+        let morgen = datum_nach(15 * 3600);
+        assert_eq!((morgen.tag, morgen.stunde), (12, 0));
+
+        // 25 Tage später: Monatswechsel Juli (31 Tage) -> August.
+        let august = datum_nach(25 * 86_400);
+        assert_eq!((august.monat, august.tag), (8, 5));
+
+        // 2028 ist ein Schaltjahr, 2100 keins, 2000 doch:
+        assert!(schaltjahr(2028));
+        assert!(!schaltjahr(2100));
+        assert!(schaltjahr(2000));
     }
 
     /// Die Uhr läuft vorwärts: Nach ein paar hlt-Schlafrunden ist

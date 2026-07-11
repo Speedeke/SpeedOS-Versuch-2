@@ -28,7 +28,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use noto_sans_mono_bitmap::FontWeight;
+use noto_sans_mono_bitmap::{get_raster_width, FontWeight};
 use pc_keyboard::DecodedKey;
 use spin::Mutex;
 
@@ -232,6 +232,9 @@ pub struct FensterManager {
     alles_dirty: bool,
     bildschirm_breite: i32,
     bildschirm_hoehe: i32,
+    /// Zuletzt in der Taskleiste angezeigte Sekunde — nur bei einem
+    /// Wechsel wird neu komponiert (nicht bei jedem Uhr-Task-Lauf).
+    letzte_uhr_sekunde: u64,
 }
 
 impl FensterManager {
@@ -245,6 +248,7 @@ impl FensterManager {
             alles_dirty: true,
             bildschirm_breite,
             bildschirm_hoehe,
+            letzte_uhr_sekunde: 0,
         }
     }
 
@@ -308,6 +312,79 @@ impl FensterManager {
             .map(|f| f.id);
     }
 
+    // ----- Taskleiste -----
+
+    /// Y-Position der Oberkante der Taskleiste.
+    fn taskleiste_y(&self) -> i32 {
+        self.bildschirm_hoehe - METRIK.taskleiste_hoehe
+    }
+
+    /// Das Rechteck des Startknopfs (ganz links in der Leiste).
+    fn start_knopf_rechteck(&self) -> Rechteck {
+        Rechteck::neu(
+            0,
+            self.taskleiste_y(),
+            METRIK.start_knopf_breite,
+            METRIK.taskleiste_hoehe,
+        )
+    }
+
+    /// Die Fenster-Knöpfe der Taskleiste: (FensterId, Rechteck).
+    /// Nach FensterId (= Erstellungsreihenfolge) sortiert, damit die
+    /// Knöpfe beim Fokuswechsel nicht in der Leiste herumspringen —
+    /// die Z-Ordnung im fenster-Vec ändert sich ja bei jedem Klick.
+    fn taskleisten_knoepfe(&self) -> Vec<(FensterId, Rechteck)> {
+        let mut ids: Vec<u64> = self.fenster.iter().map(|f| f.id.0).collect();
+        ids.sort_unstable();
+        if ids.is_empty() {
+            return Vec::new();
+        }
+        let von = METRIK.start_knopf_breite + METRIK.abstand;
+        let bis = self.bildschirm_breite - METRIK.systray_breite;
+        // Standardbreite, aber schrumpfen, wenn es eng wird:
+        let breite =
+            ((bis - von) / ids.len() as i32 - 4).clamp(40, METRIK.leisten_knopf_breite);
+        let y = self.taskleiste_y() + 5;
+        ids.into_iter()
+            .enumerate()
+            .map(|(i, id)| {
+                let x = von + i as i32 * (breite + 4);
+                (FensterId(id), Rechteck::neu(x, y, breite, METRIK.taskleiste_hoehe - 10))
+            })
+            .collect()
+    }
+
+    /// Klick in die Taskleiste (Startknopf / Fenster-Knöpfe).
+    fn taskleiste_klick(&mut self, px: i32, py: i32) {
+        if self.start_knopf_rechteck().enthaelt(px, py) {
+            // Startmenü — kommt im nächsten Schritt.
+            return;
+        }
+        for (id, rect) in self.taskleisten_knoepfe() {
+            if rect.enthaelt(px, py) {
+                self.taskleisten_knopf_aktion(id);
+                return;
+            }
+        }
+    }
+
+    /// Fenster-Knopf: fokussieren ODER minimieren (Toggle wie bei den
+    /// "Großen": Klick aufs fokussierte Fenster legt es weg).
+    fn taskleisten_knopf_aktion(&mut self, id: FensterId) {
+        let index = match self.index_von(id) {
+            Some(i) => i,
+            None => return,
+        };
+        if self.fokus == Some(id) && !self.fenster[index].minimiert {
+            self.fenster[index].minimiert = true;
+            self.fokus_neu_bestimmen();
+        } else {
+            self.fenster[index].minimiert = false;
+            self.fokussieren_und_heben(id);
+        }
+        self.alles_dirty = true;
+    }
+
     /// Resize-Kante am Punkt (nur unterhalb der Titelzeile relevant).
     fn kante_bei(fenster: &Fenster, px: i32, py: i32) -> Option<Kante> {
         let r = fenster.gesamt_rechteck();
@@ -326,6 +403,11 @@ impl FensterManager {
 
     /// Setzt die passende Cursor-Form für die Hover-Position.
     fn cursor_aktualisieren(&self, px: i32, py: i32) {
+        // Über der Taskleiste gibt es nie Resize-Pfeile:
+        if py >= self.taskleiste_y() {
+            maus::cursor_form_setzen(maus::FORM_PFEIL);
+            return;
+        }
         let form = self
             .fenster
             .iter()
@@ -353,6 +435,12 @@ impl FensterManager {
     }
 
     fn maus_gedrueckt(&mut self, px: i32, py: i32) {
+        // Die Taskleiste liegt IMMER obenauf — sie fängt Klicks vor
+        // allen Fenstern ab.
+        if py >= self.taskleiste_y() {
+            self.taskleiste_klick(px, py);
+            return;
+        }
         let id = match self.fenster_unter(px, py) {
             Some(id) => id,
             None => return,
@@ -418,10 +506,12 @@ impl FensterManager {
             Interaktion::Verschieben { id, griff_dx, griff_dy } => {
                 let (id, dx, dy) = (*id, *griff_dx, *griff_dy);
                 if let Some(index) = self.index_von(id) {
-                    let (bb, bh) = (self.bildschirm_breite, self.bildschirm_hoehe);
+                    let bb = self.bildschirm_breite;
+                    // Die Titelzeile bleibt immer über der Taskleiste greifbar:
+                    let max_y = self.taskleiste_y() - METRIK.titel_hoehe;
                     let f = &mut self.fenster[index];
                     f.x = (x - dx).clamp(-(f.breite()) + 80, bb - 80);
-                    f.y = (y - dy).clamp(0, bh - METRIK.titel_hoehe);
+                    f.y = (y - dy).clamp(0, max_y);
                     // Snap-Vorschau:
                     self.snap_hinweis = if x <= METRIK.snap_rand {
                         -1
@@ -640,6 +730,13 @@ impl FensterManager {
                 fenster.dirty = true;
             }
         }
+        // Taskleisten-Uhr: nur neu komponieren, wenn die angezeigte
+        // Sekunde wirklich gewechselt hat (der Uhr-Task läuft öfter).
+        let sekunde = zeit::ms_seit_boot() / 1000;
+        if sekunde != self.letzte_uhr_sekunde {
+            self.letzte_uhr_sekunde = sekunde;
+            self.alles_dirty = true;
+        }
     }
 
     pub fn ist_dirty(&self) -> bool {
@@ -699,10 +796,81 @@ impl FensterManager {
             fenster_komponieren(&mut z, fenster, fokussiert);
         }
 
-        // 4. Alt+Tab-Overlay:
+        // 4. Taskleiste — IMMER im Vordergrund, deshalb NACH den Fenstern:
+        self.taskleiste_zeichnen(&mut z);
+
+        // 5. Alt+Tab-Overlay (ganz oben):
         if let Some(sw) = &self.switcher {
             self.switcher_zeichnen(&mut z, sw);
         }
+    }
+
+    /// Zeichnet die Taskleiste: Startknopf | Fenster-Knöpfe | Systray
+    /// (Platzhalter-Icons + Uhrzeit/Datum).
+    fn taskleiste_zeichnen<F: Zeichenflaeche>(&self, z: &mut Zeichner<'_, F>) {
+        let thema = theme::aktuell();
+        let y = self.taskleiste_y();
+        let breite = self.bildschirm_breite;
+        let zeichen_breite = get_raster_width(FontWeight::Regular, METRIK.schrift_ui) as i32;
+
+        // Leisten-Grund (leicht transparent — der Desktop schimmert durch):
+        z.rechteck_fuellen(
+            Rechteck::neu(0, y, breite, METRIK.taskleiste_hoehe),
+            thema.leiste_hintergrund,
+        );
+        z.linie(0, y, breite - 1, y, thema.leiste_linie);
+
+        // Startknopf: das SpeedOS-Logo (2x skaliert = 32 Pixel).
+        let start = self.start_knopf_rechteck();
+        z.icon(start.x + (start.breite - 32) / 2, y + 4, &crate::grafik::ICON_LOGO, 2);
+
+        // Ein Knopf pro offenem Fenster:
+        for (id, rect) in self.taskleisten_knoepfe() {
+            let fenster = match self.index_von(id) {
+                Some(index) => &self.fenster[index],
+                None => continue,
+            };
+            let aktiv = self.fokus == Some(id) && !fenster.minimiert;
+            z.rechteck_abgerundet(
+                rect,
+                METRIK.radius_klein,
+                if aktiv { thema.leiste_knopf_aktiv } else { thema.leiste_knopf },
+            );
+            if aktiv {
+                // Akzent-Streifen unter dem fokussierten Fenster:
+                z.rechteck_fuellen(
+                    Rechteck::neu(rect.x + 6, rect.y + rect.hoehe - 3, rect.breite - 12, 2),
+                    thema.akzent,
+                );
+            }
+            let text_y = rect.y + (rect.hoehe - METRIK.zeilen_hoehe) / 2;
+            z.icon(rect.x + 6, text_y, inhalt_icon(&fenster.inhalt), 1);
+            // Titel auf die Knopfbreite kürzen:
+            let platz = ((rect.breite - 34) / zeichen_breite).max(0) as usize;
+            let titel: String = fenster.titel.chars().take(platz).collect();
+            let farbe = if fenster.minimiert {
+                thema.text_gedimmt
+            } else if aktiv {
+                thema.text_stark
+            } else {
+                thema.text_sekundaer
+            };
+            z.text(rect.x + 28, text_y, &titel, METRIK.schrift_ui, FontWeight::Regular, farbe);
+        }
+
+        // Systray rechts: Platzhalter-Icons (echte Features folgen),
+        // daneben Uhrzeit und Datum (aus Ticks — Kalibrierung: TODO).
+        let systray_x = breite - METRIK.systray_breite;
+        z.icon(systray_x, y + 12, &crate::grafik::ICON_ZAHNRAD, 1);
+        z.icon(systray_x + 22, y + 12, &crate::grafik::ICON_ORDNER, 1);
+
+        let jetzt = zeit::datum_uhrzeit();
+        let uhr = format!("{:02}:{:02}:{:02}", jetzt.stunde, jetzt.minute, jetzt.sekunde);
+        let datum = format!("{:02}.{:02}.{}", jetzt.tag, jetzt.monat, jetzt.jahr);
+        let uhr_x = breite - METRIK.abstand - uhr.chars().count() as i32 * zeichen_breite;
+        let datum_x = breite - METRIK.abstand - datum.chars().count() as i32 * zeichen_breite;
+        z.text(uhr_x, y + 4, &uhr, METRIK.schrift_ui, FontWeight::Bold, thema.text_normal);
+        z.text(datum_x, y + 21, &datum, METRIK.schrift_ui, FontWeight::Regular, thema.text_gedimmt);
     }
 
     fn switcher_zeichnen<F: Zeichenflaeche>(&self, z: &mut Zeichner<'_, F>, sw: &Switcher) {
@@ -1105,6 +1273,32 @@ mod tests {
         assert_eq!(manager.fenster[index].breite(), 500);
         // Höhe = Bildschirm - Titelzeile - Taskleisten-Reserve.
         assert_eq!(manager.fenster[index].hoehe(), 800 - METRIK.titel_hoehe - METRIK.taskleiste_hoehe);
+    }
+
+    /// Der Taskleisten-Knopf togglet: fokussiert -> minimieren,
+    /// minimiert/im Hintergrund -> holen + fokussieren.
+    #[test_case]
+    fn test_taskleisten_knopf_toggle() {
+        let (mut manager, hinten, vorne) = test_manager();
+        // Knöpfe sind nach Erstellungs-Reihenfolge sortiert:
+        let knoepfe = manager.taskleisten_knoepfe();
+        assert_eq!(knoepfe.len(), 2);
+        assert_eq!(knoepfe[0].0, hinten);
+        let (id, rect) = knoepfe[1];
+        assert_eq!(id, vorne);
+
+        // Klick auf den Knopf des FOKUSSIERTEN Fensters minimiert es:
+        let (cx, cy) = (rect.x + rect.breite / 2, rect.y + rect.hoehe / 2);
+        manager.maus_event(&MausEvent::Gedrueckt(MausTaste::Links), cx, cy);
+        let index = manager.index_von(vorne).unwrap();
+        assert!(manager.fenster[index].minimiert);
+        assert_eq!(manager.fokus(), Some(hinten));
+
+        // Zweiter Klick holt es zurück und fokussiert es wieder:
+        manager.maus_event(&MausEvent::Gedrueckt(MausTaste::Links), cx, cy);
+        let index = manager.index_von(vorne).unwrap();
+        assert!(!manager.fenster[index].minimiert);
+        assert_eq!(manager.fokus(), Some(vorne));
     }
 
     /// Resize an der rechten Kante vergrößert die Breite.
