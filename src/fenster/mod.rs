@@ -21,29 +21,20 @@
 use crate::framebuffer::{self, Farbe};
 use crate::grafik::{Rechteck, Rgba, Zeichenflaeche, Zeichner};
 use crate::maus::{self, MausEvent, MausTaste};
+use crate::theme::{self, METRIK};
 use crate::zeit;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use noto_sans_mono_bitmap::{FontWeight, RasterHeight};
+use noto_sans_mono_bitmap::FontWeight;
 use pc_keyboard::DecodedKey;
 use spin::Mutex;
 
-/// Höhe der Titel-/Griffzeile in Pixeln.
-pub const TITEL_HOEHE: i32 = 30;
-/// Dicke der Resize-Randzone.
-const RAND: i32 = 6;
-/// Kleinste Fenster-Inhaltsgröße.
-const MIN_BREITE: usize = 220;
-const MIN_HOEHE: usize = 100;
-/// Unten reservierter Streifen (künftige Taskleiste) beim Maximieren.
-const TASKLEISTE_RESERVE: i32 = 40;
-/// Wie nah an den Bildschirmrand fürs Snap-Layout.
-const SNAP_RAND: i32 = 8;
-/// Breite eines Titelleisten-Knopfes.
-const KNOPF_BREITE: i32 = 30;
+// ALLE Farben kommen aus theme::aktuell(), ALLE Abstände und
+// Schriftgrößen aus theme::METRIK — hier gibt es keine hartcodierten
+// Werte mehr (Projektregel seit dem Theme-System).
 
 // ---------------------------------------------------------------------------
 // Fenster und Fenster-Puffer
@@ -156,17 +147,17 @@ impl Fenster {
 
     /// Gesamtfläche inkl. Titelzeile.
     fn gesamt_rechteck(&self) -> Rechteck {
-        Rechteck::neu(self.x, self.y, self.breite(), TITEL_HOEHE + self.hoehe())
+        Rechteck::neu(self.x, self.y, self.breite(), METRIK.titel_hoehe + self.hoehe())
     }
 
     fn in_titelzeile(&self, px: i32, py: i32) -> bool {
-        px >= self.x && px < self.x + self.breite() && py >= self.y && py < self.y + TITEL_HOEHE
+        px >= self.x && px < self.x + self.breite() && py >= self.y && py < self.y + METRIK.titel_hoehe
     }
 
     /// Bildschirm- -> Fensterinhalts-Koordinaten (None = außerhalb).
     fn lokal(&self, px: i32, py: i32) -> Option<(i32, i32)> {
         let lx = px - self.x;
-        let ly = py - self.y - TITEL_HOEHE;
+        let ly = py - self.y - METRIK.titel_hoehe;
         if lx >= 0 && ly >= 0 && lx < self.breite() && ly < self.hoehe() {
             Some((lx, ly))
         } else {
@@ -179,11 +170,11 @@ impl Fenster {
     fn knoepfe(&self) -> [(Knopf, Rechteck); 3] {
         let rechts = self.x + self.breite();
         let y = self.y + 3;
-        let h = TITEL_HOEHE - 6;
+        let h = METRIK.titel_hoehe - 6;
         [
-            (Knopf::Schliessen, Rechteck::neu(rechts - KNOPF_BREITE, y, KNOPF_BREITE - 4, h)),
-            (Knopf::Maximieren, Rechteck::neu(rechts - 2 * KNOPF_BREITE, y, KNOPF_BREITE - 4, h)),
-            (Knopf::Minimieren, Rechteck::neu(rechts - 3 * KNOPF_BREITE, y, KNOPF_BREITE - 4, h)),
+            (Knopf::Schliessen, Rechteck::neu(rechts - METRIK.knopf_breite, y, METRIK.knopf_breite - 4, h)),
+            (Knopf::Maximieren, Rechteck::neu(rechts - 2 * METRIK.knopf_breite, y, METRIK.knopf_breite - 4, h)),
+            (Knopf::Minimieren, Rechteck::neu(rechts - 3 * METRIK.knopf_breite, y, METRIK.knopf_breite - 4, h)),
         ]
     }
 
@@ -196,10 +187,10 @@ impl Fenster {
 
     /// Setzt die Inhaltsgröße neu (realloziert den Puffer).
     fn groesse_setzen(&mut self, breite: usize, hoehe: usize) {
-        let breite = breite.max(MIN_BREITE);
-        let hoehe = hoehe.max(MIN_HOEHE);
+        let breite = breite.max(METRIK.min_fenster_breite);
+        let hoehe = hoehe.max(METRIK.min_fenster_hoehe);
         if breite != self.puffer.breite || hoehe != self.puffer.hoehe {
-            self.puffer = FensterPuffer::neu(breite, hoehe, INHALT_HINTERGRUND);
+            self.puffer = FensterPuffer::neu(breite, hoehe, theme::aktuell().inhalt_hintergrund);
         }
     }
 }
@@ -272,7 +263,7 @@ impl FensterManager {
             titel: String::from(titel),
             x,
             y,
-            puffer: FensterPuffer::neu(breite, hoehe, INHALT_HINTERGRUND),
+            puffer: FensterPuffer::neu(breite, hoehe, theme::aktuell().inhalt_hintergrund),
             inhalt,
             dirty: true,
             minimiert: false,
@@ -320,9 +311,9 @@ impl FensterManager {
     /// Resize-Kante am Punkt (nur unterhalb der Titelzeile relevant).
     fn kante_bei(fenster: &Fenster, px: i32, py: i32) -> Option<Kante> {
         let r = fenster.gesamt_rechteck();
-        let links = px >= r.x && px < r.x + RAND;
-        let rechts = px < r.x + r.breite && px >= r.x + r.breite - RAND;
-        let unten = py < r.y + r.hoehe && py >= r.y + r.hoehe - RAND;
+        let links = px >= r.x && px < r.x + METRIK.rand;
+        let rechts = px < r.x + r.breite && px >= r.x + r.breite - METRIK.rand;
+        let unten = py < r.y + r.hoehe && py >= r.y + r.hoehe - METRIK.rand;
         match (links, rechts, unten) {
             (true, _, true) => Some(Kante::UntenLinks),
             (_, true, true) => Some(Kante::UntenRechts),
@@ -430,11 +421,11 @@ impl FensterManager {
                     let (bb, bh) = (self.bildschirm_breite, self.bildschirm_hoehe);
                     let f = &mut self.fenster[index];
                     f.x = (x - dx).clamp(-(f.breite()) + 80, bb - 80);
-                    f.y = (y - dy).clamp(0, bh - TITEL_HOEHE);
+                    f.y = (y - dy).clamp(0, bh - METRIK.titel_hoehe);
                     // Snap-Vorschau:
-                    self.snap_hinweis = if x <= SNAP_RAND {
+                    self.snap_hinweis = if x <= METRIK.snap_rand {
                         -1
-                    } else if x >= bb - SNAP_RAND {
+                    } else if x >= bb - METRIK.snap_rand {
                         1
                     } else {
                         0
@@ -468,13 +459,13 @@ impl FensterManager {
                     }
                 }
                 // Mindestgröße einhalten (und beim Links-Ziehen x korrigieren):
-                if nb < MIN_BREITE as i32 {
+                if nb < METRIK.min_fenster_breite as i32 {
                     if matches!(kante, Kante::Links | Kante::UntenLinks) {
-                        nx = start_x + (start_breite - MIN_BREITE as i32);
+                        nx = start_x + (start_breite - METRIK.min_fenster_breite as i32);
                     }
-                    nb = MIN_BREITE as i32;
+                    nb = METRIK.min_fenster_breite as i32;
                 }
-                nh = nh.max(MIN_HOEHE as i32);
+                nh = nh.max(METRIK.min_fenster_hoehe as i32);
 
                 if let Some(index) = self.index_von(id) {
                     let f = &mut self.fenster[index];
@@ -531,8 +522,8 @@ impl FensterManager {
             f.vorher = Some((f.x, f.y, f.puffer.breite, f.puffer.hoehe));
             f.x = 0;
             f.y = 0;
-            let breite = bb.max(MIN_BREITE as i32) as usize;
-            let hoehe = (bh - TITEL_HOEHE - TASKLEISTE_RESERVE).max(MIN_HOEHE as i32) as usize;
+            let breite = bb.max(METRIK.min_fenster_breite as i32) as usize;
+            let hoehe = (bh - METRIK.titel_hoehe - METRIK.taskleiste_hoehe).max(METRIK.min_fenster_hoehe as i32) as usize;
             f.groesse_setzen(breite, hoehe);
             inhalt_zeichnen(f);
         }
@@ -549,7 +540,7 @@ impl FensterManager {
                 match unter_cursor {
                     Some((px, py)) => {
                         f.x = px - f.breite() / 2;
-                        f.y = (py - TITEL_HOEHE / 2).max(0);
+                        f.y = (py - METRIK.titel_hoehe / 2).max(0);
                     }
                     None => {
                         f.x = vx;
@@ -571,8 +562,8 @@ impl FensterManager {
             if f.vorher.is_none() {
                 f.vorher = Some((f.x, f.y, f.puffer.breite, f.puffer.hoehe));
             }
-            let breite = (bb / 2).max(MIN_BREITE as i32) as usize;
-            let hoehe = (bh - TITEL_HOEHE - TASKLEISTE_RESERVE).max(MIN_HOEHE as i32) as usize;
+            let breite = (bb / 2).max(METRIK.min_fenster_breite as i32) as usize;
+            let hoehe = (bh - METRIK.titel_hoehe - METRIK.taskleiste_hoehe).max(METRIK.min_fenster_hoehe as i32) as usize;
             f.x = if seite < 0 { 0 } else { bb / 2 };
             f.y = 0;
             f.groesse_setzen(breite, hoehe);
@@ -678,32 +669,24 @@ impl FensterManager {
 
     fn komponieren(&self, fb: &mut framebuffer::DoppelPuffer) {
         let hoehe = fb.info().height;
+        let thema = theme::aktuell();
 
-        // 1. Desktop-Hintergrund: Obsidian-Aurora-Verlauf (schnell).
-        let oben = Farbe::neu(0x17, 0x12, 0x33);
-        let unten = Farbe::neu(0x0b, 0x0e, 0x14);
+        // 1. Desktop-Hintergrund: Aurora-Verlauf des Themes (schnell).
         for y in 0..hoehe {
             let t = (y * 255 / hoehe.max(1)) as u8;
-            fb.zeile_fuellen(y, oben.mischen(unten, t));
+            fb.zeile_fuellen(y, thema.desktop_oben.mischen(thema.desktop_unten, t));
         }
 
         let mut z = Zeichner::neu(fb);
-        z.text(
-            24,
-            (hoehe as i32) - 30,
-            "SpeedOS Desktop   |   Titelleiste ziehen/Knoepfe   |   Rand = Groesse   |   Alt+Tab   |   ESC = Konsole",
-            RasterHeight::Size16,
-            FontWeight::Regular,
-            Rgba::mit_alpha(0xc4, 0xca, 0xd6, 180),
-        );
 
         // 2. Snap-Vorschau (halbtransparente Hälfte):
         if self.snap_hinweis != 0 {
             let halb = self.bildschirm_breite / 2;
             let x = if self.snap_hinweis < 0 { 0 } else { halb };
+            let akzent = thema.akzent;
             z.rechteck_fuellen(
-                Rechteck::neu(x, 0, halb, self.bildschirm_hoehe - TASKLEISTE_RESERVE),
-                Rgba::mit_alpha(0x7c, 0x3a, 0xed, 60),
+                Rechteck::neu(x, 0, halb, self.bildschirm_hoehe - METRIK.taskleiste_hoehe),
+                Rgba::mit_alpha(akzent.r, akzent.g, akzent.b, 60),
             );
         }
 
@@ -723,6 +706,7 @@ impl FensterManager {
     }
 
     fn switcher_zeichnen<F: Zeichenflaeche>(&self, z: &mut Zeichner<'_, F>, sw: &Switcher) {
+        let thema = theme::aktuell();
         let n = sw.reihenfolge.len() as i32;
         let zeilen_h = 30;
         let box_b = 420;
@@ -730,73 +714,79 @@ impl FensterManager {
         let bx = (self.bildschirm_breite - box_b) / 2;
         let by = (self.bildschirm_hoehe - box_h) / 2;
 
-        z.rechteck_abgerundet(Rechteck::neu(bx + 8, by + 8, box_b, box_h), 14, Rgba::mit_alpha(0, 0, 0, 120));
-        z.rechteck_abgerundet(Rechteck::neu(bx, by, box_b, box_h), 14, Rgba::neu(0x1a, 0x1f, 0x2e));
-        z.rechteck_rahmen(Rechteck::neu(bx, by, box_b, box_h), Rgba::neu(0x7c, 0x3a, 0xed));
-        z.text(bx + 18, by + 14, "Fenster wechseln", RasterHeight::Size16, FontWeight::Bold, Rgba::neu(0xc4, 0xca, 0xd6));
+        z.rechteck_abgerundet(
+            Rechteck::neu(bx + METRIK.abstand, by + METRIK.abstand, box_b, box_h),
+            METRIK.radius_gross,
+            thema.schatten,
+        );
+        z.rechteck_abgerundet(Rechteck::neu(bx, by, box_b, box_h), METRIK.radius_gross, thema.flaeche);
+        z.rechteck_rahmen(Rechteck::neu(bx, by, box_b, box_h), thema.akzent);
+        z.text(bx + 18, by + 14, "Fenster wechseln", METRIK.schrift_ui, FontWeight::Bold, thema.text_normal);
 
         for (i, id) in sw.reihenfolge.iter().enumerate() {
             let zy = by + 46 + i as i32 * zeilen_h;
             if i == sw.auswahl {
                 z.rechteck_abgerundet(
                     Rechteck::neu(bx + 10, zy - 4, box_b - 20, zeilen_h - 2),
-                    6,
-                    Rgba::neu(0x3b, 0x2e, 0x7a),
+                    METRIK.radius_klein,
+                    thema.auswahl,
                 );
             }
-            let (titel, minimiert) = self
+            let (titel, icon, minimiert) = self
                 .index_von(*id)
-                .map(|idx| (self.fenster[idx].titel.as_str(), self.fenster[idx].minimiert))
-                .unwrap_or(("?", false));
+                .map(|idx| {
+                    let f = &self.fenster[idx];
+                    (f.titel.as_str(), inhalt_icon(&f.inhalt), f.minimiert)
+                })
+                .unwrap_or(("?", &crate::grafik::ICON_LOGO, false));
             let farbe = if i == sw.auswahl {
-                Rgba::neu(0xf8, 0xfa, 0xfc)
+                thema.text_stark
             } else {
-                Rgba::neu(0x8a, 0x91, 0xa3)
+                thema.text_sekundaer
             };
-            z.icon(bx + 16, zy, &crate::grafik::ICON_LOGO, 1);
-            z.text(bx + 40, zy, titel, RasterHeight::Size16, FontWeight::Regular, farbe);
+            z.icon(bx + 16, zy, icon, 1);
+            z.text(bx + 40, zy, titel, METRIK.schrift_ui, FontWeight::Regular, farbe);
             if minimiert {
-                z.text(bx + box_b - 110, zy, "(minimiert)", RasterHeight::Size16, FontWeight::Regular, Rgba::neu(0x56, 0x5f, 0x73));
+                z.text(bx + box_b - 110, zy, "(minimiert)", METRIK.schrift_ui, FontWeight::Regular, thema.text_gedimmt);
             }
         }
     }
 }
 
-const INHALT_HINTERGRUND: Farbe = Farbe::neu(0x12, 0x16, 0x20);
-
 /// Zeichnet EIN Fenster (Schatten, Titelleiste + Knöpfe, Rahmen, Inhalt).
 fn fenster_komponieren<F: Zeichenflaeche>(z: &mut Zeichner<'_, F>, fenster: &Fenster, fokussiert: bool) {
+    let thema = theme::aktuell();
     let rect = fenster.gesamt_rechteck();
 
     // Schatten (Alpha) rechts und unten:
-    z.rechteck_fuellen(Rechteck::neu(rect.x + rect.breite, rect.y + 10, 10, rect.hoehe), Rgba::mit_alpha(0, 0, 0, 90));
-    z.rechteck_fuellen(Rechteck::neu(rect.x + 10, rect.y + rect.hoehe, rect.breite, 10), Rgba::mit_alpha(0, 0, 0, 90));
+    z.rechteck_fuellen(Rechteck::neu(rect.x + rect.breite, rect.y + 10, 10, rect.hoehe), thema.schatten);
+    z.rechteck_fuellen(Rechteck::neu(rect.x + 10, rect.y + rect.hoehe, rect.breite, 10), thema.schatten);
 
     // Titelleiste: fokussiert = Aurora-Verlauf, sonst gedimmt.
-    let titel_rect = Rechteck::neu(rect.x, rect.y, rect.breite, TITEL_HOEHE);
+    let titel_rect = Rechteck::neu(rect.x, rect.y, rect.breite, METRIK.titel_hoehe);
     if fokussiert {
-        z.verlauf_vertikal(titel_rect, Farbe::neu(0x5b, 0x2e, 0xc7), Farbe::neu(0x2a, 0x4a, 0x9e));
+        z.verlauf_vertikal(titel_rect, thema.titel_aktiv_oben, thema.titel_aktiv_unten);
     } else {
-        z.rechteck_fuellen(titel_rect, Rgba::neu(0x23, 0x28, 0x34));
+        z.rechteck_fuellen(titel_rect, thema.titel_passiv);
     }
 
-    // Fenster-Icon links:
-    z.icon(rect.x + 7, rect.y + 7, &crate::grafik::ICON_LOGO, 1);
+    // Fenster-Icon links (passend zum Inhalt):
+    z.icon(rect.x + 7, rect.y + 7, inhalt_icon(&fenster.inhalt), 1);
     // Titel-Text:
     z.text(
         rect.x + 30,
         rect.y + 7,
         &fenster.titel,
-        RasterHeight::Size16,
+        METRIK.schrift_ui,
         FontWeight::Bold,
-        if fokussiert { Rgba::neu(0xf8, 0xfa, 0xfc) } else { Rgba::neu(0x8a, 0x91, 0xa3) },
+        if fokussiert { thema.text_titel_aktiv } else { thema.text_titel_passiv },
     );
 
     // Die drei Knöpfe:
     for (knopf, r) in fenster.knoepfe() {
         let symbol = match knopf {
-            Knopf::Schliessen => Rgba::neu(0xef, 0x44, 0x44),
-            _ => if fokussiert { Rgba::neu(0xc4, 0xca, 0xd6) } else { Rgba::neu(0x6a, 0x72, 0x84) },
+            Knopf::Schliessen => thema.knopf_schliessen,
+            _ => if fokussiert { thema.knopf_symbol_aktiv } else { thema.knopf_symbol_passiv },
         };
         let cx = r.x + r.breite / 2;
         let cy = r.y + r.hoehe / 2;
@@ -821,7 +811,7 @@ fn fenster_komponieren<F: Zeichenflaeche>(z: &mut Zeichner<'_, F>, fenster: &Fen
     // Rahmen:
     z.rechteck_rahmen(
         rect,
-        if fokussiert { Rgba::neu(0x7c, 0x3a, 0xed) } else { Rgba::neu(0x33, 0x3a, 0x4a) },
+        if fokussiert { thema.rahmen_aktiv } else { thema.rahmen_passiv },
     );
 
     // Inhalt (privater Puffer, 1:1):
@@ -831,45 +821,64 @@ fn fenster_komponieren<F: Zeichenflaeche>(z: &mut Zeichner<'_, F>, fenster: &Fen
             let farbe = fenster.puffer.pixel[basis + spalte];
             z.pixel(
                 rect.x + spalte as i32,
-                rect.y + TITEL_HOEHE + zeile as i32,
+                rect.y + METRIK.titel_hoehe + zeile as i32,
                 Rgba::neu(farbe.r, farbe.g, farbe.b),
             );
         }
     }
 }
 
+/// Das Icon, das zu einem Fenster-Inhalt gehört (Titelleiste,
+/// Taskleiste und Alt+Tab zeigen dasselbe).
+fn inhalt_icon(inhalt: &Inhalt) -> &'static crate::grafik::Icon {
+    match inhalt {
+        Inhalt::Uhr => &crate::grafik::ICON_UHR,
+        Inhalt::TastaturEcho { .. } => &crate::grafik::ICON_TASTATUR,
+        Inhalt::Malflaeche { .. } => &crate::grafik::ICON_PINSEL,
+    }
+}
+
 /// Zeichnet den Demo-Inhalt eines Fensters in SEINEN Puffer.
 fn inhalt_zeichnen(fenster: &mut Fenster) {
+    let thema = theme::aktuell();
     let breite = fenster.puffer.breite as i32;
     let hoehe = fenster.puffer.hoehe as i32;
     let mut z = Zeichner::neu(&mut fenster.puffer);
-    z.rechteck_fuellen(Rechteck::neu(0, 0, breite, hoehe), Rgba::neu(0x12, 0x16, 0x20));
+    z.rechteck_fuellen(
+        Rechteck::neu(0, 0, breite, hoehe),
+        Rgba::neu(thema.inhalt_hintergrund.r, thema.inhalt_hintergrund.g, thema.inhalt_hintergrund.b),
+    );
 
     match &fenster.inhalt {
         Inhalt::Uhr => {
             let ticks = zeit::ticks();
             let ms = zeit::ms_seit_boot();
-            z.text(20, 16, &format!("{} Ticks", ticks), RasterHeight::Size32, FontWeight::Bold, Rgba::neu(0x22, 0xd3, 0xee));
-            z.text(20, 60, &format!("Uptime: {},{:03} s", ms / 1000, ms % 1000), RasterHeight::Size16, FontWeight::Regular, Rgba::neu(0xc4, 0xca, 0xd6));
-            z.text(20, 90, "(aktualisiert sich live)", RasterHeight::Size16, FontWeight::Regular, Rgba::neu(0x56, 0x5f, 0x73));
+            z.text(20, 16, &format!("{} Ticks", ticks), METRIK.schrift_gross, FontWeight::Bold, thema.akzent_cyan);
+            z.text(20, 60, &format!("Uptime: {},{:03} s", ms / 1000, ms % 1000), METRIK.schrift_ui, FontWeight::Regular, thema.text_normal);
+            z.text(20, 90, "(aktualisiert sich live)", METRIK.schrift_ui, FontWeight::Regular, thema.text_gedimmt);
         }
         Inhalt::TastaturEcho { text } => {
-            z.text(20, 12, "Tippe (bei Fokus!):", RasterHeight::Size16, FontWeight::Regular, Rgba::neu(0x8a, 0x91, 0xa3));
-            z.rechteck_abgerundet(Rechteck::neu(16, 40, breite - 32, 40), 8, Rgba::neu(0x1c, 0x22, 0x30));
-            z.text(26, 50, text, RasterHeight::Size16, FontWeight::Regular, Rgba::neu(0xf8, 0xfa, 0xfc));
-            z.text(20, 96, "Enter leert, Backspace loescht", RasterHeight::Size16, FontWeight::Regular, Rgba::neu(0x56, 0x5f, 0x73));
+            z.text(20, 12, "Tippe (bei Fokus!):", METRIK.schrift_ui, FontWeight::Regular, thema.text_sekundaer);
+            z.rechteck_abgerundet(Rechteck::neu(16, 40, breite - 32, 40), METRIK.radius_klein, thema.eingabefeld);
+            z.text(26, 50, text, METRIK.schrift_ui, FontWeight::Regular, thema.text_stark);
+            z.text(20, 96, "Enter leert, Backspace loescht", METRIK.schrift_ui, FontWeight::Regular, thema.text_gedimmt);
         }
         Inhalt::Malflaeche { klicks } => {
-            z.verlauf_vertikal(Rechteck::neu(0, 0, breite, 60), Farbe::neu(0x2a, 0x1e, 0x52), Farbe::neu(0x12, 0x16, 0x20));
-            z.text(16, 8, "Statische Grafik + Klicks", RasterHeight::Size16, FontWeight::Bold, Rgba::neu(0xf8, 0xfa, 0xfc));
-            z.kreis_fuellen(50, 110, 28, Rgba::mit_alpha(0x7c, 0x3a, 0xed, 180));
-            z.kreis_fuellen(90, 110, 28, Rgba::mit_alpha(0x22, 0xd3, 0xee, 180));
-            z.rechteck_abgerundet(Rechteck::neu(140, 84, 90, 52), 10, Rgba::neu(0x22, 0xc5, 0x5e));
+            z.verlauf_vertikal(
+                Rechteck::neu(0, 0, breite, 60),
+                thema.titel_aktiv_oben.mischen(thema.inhalt_hintergrund, 128),
+                thema.inhalt_hintergrund,
+            );
+            z.text(16, 8, "Statische Grafik + Klicks", METRIK.schrift_ui, FontWeight::Bold, thema.text_stark);
+            let (akzent, cyan) = (thema.akzent, thema.akzent_cyan);
+            z.kreis_fuellen(50, 110, 28, Rgba::mit_alpha(akzent.r, akzent.g, akzent.b, 180));
+            z.kreis_fuellen(90, 110, 28, Rgba::mit_alpha(cyan.r, cyan.g, cyan.b, 180));
+            z.rechteck_abgerundet(Rechteck::neu(140, 84, 90, 52), 10, thema.akzent_gruen);
             z.icon(breite - 50, 76, &crate::grafik::ICON_LOGO, 2);
             for (kx, ky) in klicks.iter() {
-                z.linie(kx - 6, *ky, kx + 6, *ky, Rgba::neu(0xfb, 0xbf, 0x24));
-                z.linie(*kx, ky - 6, *kx, ky + 6, Rgba::neu(0xfb, 0xbf, 0x24));
-                z.kreis_rahmen(*kx, *ky, 6, Rgba::neu(0xfb, 0xbf, 0x24));
+                z.linie(kx - 6, *ky, kx + 6, *ky, thema.akzent_gelb);
+                z.linie(*kx, ky - 6, *kx, ky + 6, thema.akzent_gelb);
+                z.kreis_rahmen(*kx, *ky, 6, thema.akzent_gelb);
             }
         }
     }
@@ -1095,7 +1104,7 @@ mod tests {
         assert_eq!(manager.fenster[index].x, 0);
         assert_eq!(manager.fenster[index].breite(), 500);
         // Höhe = Bildschirm - Titelzeile - Taskleisten-Reserve.
-        assert_eq!(manager.fenster[index].hoehe(), 800 - TITEL_HOEHE - TASKLEISTE_RESERVE);
+        assert_eq!(manager.fenster[index].hoehe(), 800 - METRIK.titel_hoehe - METRIK.taskleiste_hoehe);
     }
 
     /// Resize an der rechten Kante vergrößert die Breite.

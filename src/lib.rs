@@ -41,6 +41,7 @@ pub mod memory;
 pub mod serial;
 pub mod shell;
 pub mod task;
+pub mod theme;
 pub mod zeit;
 
 /// Die gemeinsame Bootloader-Konfiguration für den Kernel und alle

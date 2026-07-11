@@ -501,6 +501,138 @@ pub static ICON_LOGO: Icon = Icon {
     ],
 };
 
+/// Terminal (dunkle Kachel mit Eingabe-Prompt ">_").
+pub static ICON_TERMINAL: Icon = Icon {
+    zeilen: [
+        "................",
+        ".ddddddddddddd..",
+        ".dDDDDDDDDDDDd..",
+        ".dDcDDDDDDDDDd..",
+        ".dDDcDDDDDDDDd..",
+        ".dDDDcDDDDDDDd..",
+        ".dDDDDcDDDDDDd..",
+        ".dDDDcDDDDDDDd..",
+        ".dDDcDDDDDDDDd..",
+        ".dDcDDDDDDDDDd..",
+        ".dDDDDDDDDDDDd..",
+        ".dDDDDDwwwwDDd..",
+        ".dDDDDDDDDDDDd..",
+        ".ddddddddddddd..",
+        "................",
+        "................",
+    ],
+};
+
+/// Uhr (helles Zifferblatt mit Zeigern).
+pub static ICON_UHR: Icon = Icon {
+    zeilen: [
+        "................",
+        ".....ddddd......",
+        "...ddhhhhhdd....",
+        "..dhhhhhhhhhd...",
+        ".dhhhhhDhhhhhd..",
+        "dhhhhhhDhhhhhhd.",
+        "dhhhhhhDhhhhhhd.",
+        "dhhhhhhDDDhhhhd.",
+        "dhhhhhhhhhhhhhd.",
+        ".dhhhhhhhhhhhd..",
+        ".dhhhhhhhhhhhd..",
+        "..dhhhhhhhhhd...",
+        "...ddhhhhhdd....",
+        ".....ddddd......",
+        "................",
+        "................",
+    ],
+};
+
+/// Tastatur (dunkle Platte mit hellen Tasten).
+pub static ICON_TASTATUR: Icon = Icon {
+    zeilen: [
+        "................",
+        "................",
+        "................",
+        "................",
+        ".ddddddddddddd..",
+        ".dDwDwDwDwDwDd..",
+        ".dDDDDDDDDDDDd..",
+        ".dDwDwDwDwDwDd..",
+        ".dDDDDDDDDDDDd..",
+        ".dDwwwwwwwwwDd..",
+        ".dDDDDDDDDDDDd..",
+        ".ddddddddddddd..",
+        "................",
+        "................",
+        "................",
+        "................",
+    ],
+};
+
+/// Pinsel (goldener Stiel, cyanfarbene Spitze).
+pub static ICON_PINSEL: Icon = Icon {
+    zeilen: [
+        "................",
+        "...........gg...",
+        "..........gGg...",
+        ".........gGg....",
+        "........gGg.....",
+        ".......gGg......",
+        "......gGg.......",
+        ".....gGg........",
+        "....wgg.........",
+        "...www..........",
+        "..cww...........",
+        ".ccw............",
+        ".cc.............",
+        "................",
+        "................",
+        "................",
+    ],
+};
+
+/// Neustart (Power-Symbol: offener Kreis mit senkrechtem Strich).
+pub static ICON_NEUSTART: Icon = Icon {
+    zeilen: [
+        "................",
+        "................",
+        ".......cc.......",
+        ".......cc.......",
+        "....cc.cc.cc....",
+        "...c...cc...c...",
+        "..c....cc....c..",
+        "..c..........c..",
+        "..c..........c..",
+        "..c..........c..",
+        "...c........c...",
+        "....cc....cc....",
+        "......cccc......",
+        "................",
+        "................",
+        "................",
+    ],
+};
+
+/// Farbpalette / Theme (zweigeteilter Kreis: dunkel + hell).
+pub static ICON_THEME: Icon = Icon {
+    zeilen: [
+        "................",
+        ".....ddddd......",
+        "...ddDDDwwdd....",
+        "..dDDDDDwwwwd...",
+        ".dDDDDDDwwwwwd..",
+        "dDDDDDDDwwwwwwd.",
+        "dDDDDDDDwwwwwwd.",
+        "dDDDDDDDwwwwwwd.",
+        "dDDDDDDDwwwwwwd.",
+        ".dDDDDDDwwwwwd..",
+        ".dDDDDDDwwwwwd..",
+        "..dDDDDDwwwwd...",
+        "...ddDDDwwdd....",
+        ".....ddddd......",
+        "................",
+        "................",
+    ],
+};
+
 // ---------------------------------------------------------------------------
 // Der grafiktest-Demo-Modus
 // ---------------------------------------------------------------------------
@@ -768,7 +900,11 @@ mod tests {
     /// bekannte Palette-Zeichen benutzen (Magenta = Tippfehler).
     #[test_case]
     fn test_icons_wohlgeformt() {
-        for icon in [&ICON_ORDNER, &ICON_DATEI, &ICON_ZAHNRAD, &ICON_LOGO] {
+        for icon in [
+            &ICON_ORDNER, &ICON_DATEI, &ICON_ZAHNRAD, &ICON_LOGO,
+            &ICON_TERMINAL, &ICON_UHR, &ICON_TASTATUR, &ICON_PINSEL,
+            &ICON_NEUSTART, &ICON_THEME,
+        ] {
             assert_eq!(icon.zeilen.len(), 16);
             for zeile in icon.zeilen.iter() {
                 assert_eq!(zeile.chars().count(), 16, "Icon-Zeile hat falsche Breite");
