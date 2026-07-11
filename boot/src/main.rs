@@ -117,6 +117,10 @@ fn main() {
     qemu.arg("-accel").arg("tcg");
     // Arbeitsspeicher passend zur Auflösung (siehe Rechnung oben):
     qemu.arg("-m").arg(format!("{ram_mb}M"));
+    // Die emulierte RTC läuft auf der LOKALEN Host-Uhr — die
+    // Taskleisten-Uhr von SpeedOS zeigt damit dieselbe Zeit wie die
+    // Windows-Uhr daneben (Standard wäre UTC).
+    qemu.arg("-rtc").arg("base=localtime");
     // Grafikkarte: Das VRAM (vgamem_mb) ist der eigentliche
     // Auflösungs-Wähler — der EDID-Wunsch allein wird von OVMF
     // ignoriert (es nähme sonst immer den größten Modus überhaupt).

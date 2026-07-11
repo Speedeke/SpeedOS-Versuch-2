@@ -5,6 +5,28 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### Hinzugefügt (Echte Zeit: TSC-Zeitquelle + RTC-Uhrzeit)
+- TSC als monotone Zeitquelle: zeit::init() kalibriert den TSC beim
+  Boot gegen den PIT (2 Messungen à ~100 ms, loggt Frequenz,
+  Abweichung in Promille, Dauer und den CPUID-Invariant-Status);
+  us_seit_boot()/ms_seit_boot() laufen seitdem über den TSC —
+  mikrosekundengenau und unabhängig von Interrupts (kein Uhr-
+  Stillstand mehr unter without_interrupts). Der PIT ist nur noch
+  Weckgeber für warte_ms/Executor und Fallback vor der Kalibrierung
+- Neues Modul rtc.rs: liest die CMOS-Echtzeituhr einmal beim Boot
+  (Update-in-Progress-Flag, BCD- und 12h-Modus, Doppel-Lesen bis
+  stabil, Timeout bei fehlender RTC); zeit::jetzt() liefert daraus
+  plus TSC echte Uhrzeit und echtes Datum — die Taskleiste zeigt
+  jetzt die WIRKLICHE Zeit (QEMU-RTC via -rtc base=localtime auf
+  der Host-Uhr). Datums-Arithmetik auf "Sekunden seit 1.1.2000"
+  umgestellt (reine, roundtrip-getestete Funktionen)
+- Die Mess-Falle aus dem Qualitäts-Pass ist damit tot: Zeit darf
+  überall genommen werden, der Frame-Zeit-Berichts-Test misst in µs
+- 6 neue Tests: TSC-Kalibrierung plausibel (100-ms-Messung ±20 %),
+  Uhr läuft unter without_interrupts weiter, BCD-Konvertierung,
+  RTC-Konvertierung (BCD/24h und binär/12h inkl. Mitternacht),
+  Datums-Roundtrip inkl. Schalttag
+
 ### Geändert (Qualitäts-Pass Grafik-Schicht)
 - Zeilen-Schnellpfade in der Zeichenflaeche: flaeche_zeile_fuellen /
   flaeche_zeile_kopieren (Default korrekt pro Pixel; DoppelPuffer
@@ -15,7 +37,8 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
   Pro-Pixel-Prüfungen; der Compositor blittet Fenster-Inhalte damit
 - Gemessen (1360x768, 3 Fenster + Drag, WHPX): 2,30 -> 1,20 ms/Frame
   im Erstlauf, eingeschwungen 0,40 ms/Frame; isolierter Fenster-Blit
-  (560x140, 100x): 12 ms -> unter der 4-ms-Tick-Auflösung
+  (560x140, 100x): 25,8 -> 4,4 ms (Faktor ~6; präzise nachgemessen
+  mit der späteren TSC-µs-Uhr)
 - 8 neue Unit-Tests: Koordinaten-Grenzen, Resize-Zonen, Z-Ordnung,
   Dirty-Flag-Logik, Theme-Umschaltung färbt Puffer, Schnellpfad-
   Clipping, Speicherleck-Schleife (Fenster+Terminal öffnen/schließen),

@@ -42,6 +42,11 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     speed_os::init();
     serial_println!("[BOOT] SpeedOS startet (bootloader_api 0.11) ...");
 
+    // 1b. Die Zeit aufsetzen (braucht den tickenden PIT aus init):
+    //     TSC gegen den PIT kalibrieren (~200 ms, loggt Frequenz und
+    //     Genauigkeit) und die echte Uhrzeit einmal aus der RTC lesen.
+    speed_os::zeit::init();
+
     // 2. Den Framebuffer aus der BootInfo HERAUSNEHMEN (take), bevor
     //    wir die BootInfo zu &'static abwerten — sonst Borrow-Konflikt.
     let framebuffer = boot_info.framebuffer.take();

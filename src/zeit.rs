@@ -1,34 +1,36 @@
 // zeit.rs — Die Zeit-API von SpeedOS
 //
-// Alle Stellen im Kernel, die Zeit brauchen (der künftige blinkende
-// Software-Cursor, Timeouts, Uptime-Anzeigen), fragen NUR dieses
-// Modul — niemals direkt den Tick-Zähler des Interrupt-Handlers.
-// Diese API-Naht ist der Punkt: Wenn wir später vom groben PIT auf
-// den präzisen APIC-Timer (oder TSC) umsteigen, ändert sich nur die
-// Implementierung hier drin, kein einziger Aufrufer.
+// Alle Stellen im Kernel, die Zeit brauchen, fragen NUR dieses Modul —
+// niemals direkt den Tick-Zähler des Interrupt-Handlers. Diese
+// API-Naht hat sich gerade ausgezahlt: Die Zeitquelle wurde vom PIT
+// auf den TSC umgestellt, ohne dass sich ein Aufrufer ändern musste.
 //
-// Aktuelle Zeitquelle: der PIT (Programmable Interval Timer), den WIR
-// in interrupts::pit_initialisieren selbst programmieren. Er läuft
-// mit 1.193.182 Hz und teilt durch PIT_TEILER (4773) -> ~250
-// Interrupts pro Sekunde, also ~4 ms pro Tick. Fein genug für einen
-// flüssigen Compositor (~33 FPS), grob genug, um die CPU nicht mit
-// Interrupts zu fluten. Für Präziseres kommt später der APIC-Timer.
+// ZWEI Uhren, zwei Aufgaben:
+//   * TSC (Time Stamp Counter): zählt CPU-Takte, wird beim Boot gegen
+//     den PIT kalibriert (zeit::init) und ist danach DIE Zeitquelle
+//     für ms_seit_boot/us_seit_boot — mikrosekundengenau und
+//     UNABHÄNGIG von Interrupts (kein Stillstand mehr unter
+//     without_interrupts, die alte Mess-Falle ist tot).
+//   * PIT (~250 Hz, Teiler 4773): nur noch der WECKGEBER — seine
+//     Interrupts wecken warte_ms-Schläfer und den Executor aus hlt.
+//     Vor der Kalibrierung (und falls sie je scheitert) dient er als
+//     grobe Fallback-Uhr.
+//
+// Dazu die ECHTE Uhrzeit: rtc.rs liest beim Boot einmal die
+// CMOS-Uhr; zeit::jetzt() = RTC-Anker + verstrichene TSC-Zeit.
+
+use core::sync::atomic::AtomicU64;
 
 /// Die Basisfrequenz des PIT-Chips in Hz (Quarz seit dem Ur-PC 1981).
-const PIT_BASIS_HZ: u64 = 1_193_182;
+pub(crate) const PIT_BASIS_HZ: u64 = 1_193_182;
 /// UNSER PIT-Teiler (~250 Hz). Lebt hier, damit die Timer-
 /// Programmierung (interrupts.rs) und die ms-Umrechnung (unten)
 /// garantiert denselben Wert benutzen.
 pub(crate) const PIT_TEILER: u64 = 4_773;
 
-/// Timer-Ticks seit dem Boot (~250 pro Sekunde).
+/// Timer-Ticks seit dem Boot (~250 pro Sekunde) — der Weckgeber.
 pub fn ticks() -> u64 {
     crate::interrupts::timer_ticks()
-}
-
-/// Millisekunden seit dem Boot — in ~4-ms-Schritten (PIT-Auflösung).
-pub fn ms_seit_boot() -> u64 {
-    ms_von_ticks(ticks())
 }
 
 /// Rechnet Ticks in Millisekunden um (reine Funktion, gut testbar):
@@ -38,20 +40,150 @@ pub fn ms_von_ticks(ticks: u64) -> u64 {
 }
 
 // ---------------------------------------------------------------------------
-// Datum und Uhrzeit — abgeleitet aus den Ticks
-//
-// BEKANNTES TODO (Kalibrierung): SpeedOS liest noch keine echte Uhr
-// (die CMOS/RTC-Hardware kommt später). Bis dahin tun wir so, als
-// wäre die Maschine zu einem festen Zeitpunkt gestartet, und zählen
-// die Uptime dazu — Datum und Uhrzeit LAUFEN damit korrekt (inklusive
-// Tages-, Monats- und Jahreswechsel), nur der Startpunkt ist erfunden.
+// TSC — die kalibrierte, monotone Zeitquelle
 // ---------------------------------------------------------------------------
 
-/// Der angenommene Boot-Zeitpunkt (siehe TODO oben).
-const BOOT_JAHR: u64 = 2026;
-const BOOT_MONAT: u64 = 7;
-const BOOT_TAG: u64 = 11;
-const BOOT_SEKUNDEN_AM_TAG: u64 = 9 * 3600; // 09:00:00
+/// TSC-Takte pro Millisekunde (0 = noch nicht kalibriert -> Fallback
+/// auf die PIT-Ticks). Nach zeit::init() konstant.
+static TSC_PRO_MS: AtomicU64 = AtomicU64::new(0);
+/// TSC-Stand am Ende der Kalibrierung (der "Anker").
+static TSC_ANKER: AtomicU64 = AtomicU64::new(0);
+/// Mikrosekunden seit Boot (aus PIT-Ticks) zum Anker-Zeitpunkt —
+/// so läuft die Uhr nahtlos weiter, statt bei 0 neu anzufangen.
+static ANKER_US: AtomicU64 = AtomicU64::new(0);
+
+/// Liest den Time Stamp Counter der CPU.
+fn tsc_lesen() -> u64 {
+    // unsafe (Intrinsic): RDTSC liest nur ein CPU-Register, hat
+    // keinerlei Speicher-Nebenwirkungen und ist im Ring 0 immer
+    // erlaubt. (Die Out-of-Order-Unschärfe von ein paar Takten ist
+    // für eine Uhr mit µs-Anspruch bedeutungslos.)
+    unsafe { core::arch::x86_64::_rdtsc() }
+}
+
+/// Ist der TSC laut CPUID "invariant" (tickt konstant, unabhängig
+/// von Stromsparmodi)? Blatt 0x8000_0007, EDX Bit 8. (__cpuid ist
+/// auf aktuellem Rust eine SICHERE Funktion — sie liest nur
+/// CPU-Infos; die Blattnummer wird gegen das Maximum geprüft.)
+fn tsc_invariant() -> bool {
+    let max = core::arch::x86_64::__cpuid(0x8000_0000).eax;
+    if max < 0x8000_0007 {
+        return false;
+    }
+    core::arch::x86_64::__cpuid(0x8000_0007).edx & (1 << 8) != 0
+}
+
+/// Die kalibrierte TSC-Frequenz in Hz (0 = nicht kalibriert).
+pub fn tsc_frequenz_hz() -> u64 {
+    TSC_PRO_MS.load(core::sync::atomic::Ordering::Relaxed) * 1000
+}
+
+/// Misst den TSC über `mess_ticks` PIT-Ticks (an Tick-Flanken
+/// ausgerichtet) und liefert die daraus errechnete Frequenz in Hz.
+fn tsc_frequenz_messen(mess_ticks: u64) -> u64 {
+    // An eine frische Tick-Flanke ausrichten, sonst ist der erste
+    // "Tick" der Messung nur ein Bruchteil eines echten:
+    let t = ticks();
+    while ticks() == t {
+        core::hint::spin_loop();
+    }
+    let tsc_start = tsc_lesen();
+    let tick_start = ticks();
+    while ticks() < tick_start + mess_ticks {
+        core::hint::spin_loop();
+    }
+    let tsc_delta = tsc_lesen() - tsc_start;
+    // Frequenz = Takte / Dauer;  Dauer = mess_ticks * Teiler / Basis.
+    tsc_delta * PIT_BASIS_HZ / (mess_ticks * PIT_TEILER)
+}
+
+/// Kalibriert den TSC gegen den PIT und liest die RTC — beim Boot
+/// aufrufen, NACHDEM Interrupts laufen (der PIT muss ticken!).
+/// Loggt Dauer, Frequenz, Genauigkeit und den Invariant-Status.
+pub fn init() {
+    use core::sync::atomic::Ordering;
+
+    let start_ticks = ticks();
+
+    // Zwei Messungen: die erste kalibriert, die zweite verrät die
+    // Wiederholgenauigkeit (Abweichung in Promille).
+    const MESS_TICKS: u64 = 25; // ~100 ms pro Messung
+    let hz_1 = tsc_frequenz_messen(MESS_TICKS);
+    let hz_2 = tsc_frequenz_messen(MESS_TICKS);
+    let abweichung_promille = hz_1.abs_diff(hz_2) * 1000 / hz_1.max(1);
+
+    // Anker setzen: Ab HIER übernimmt der TSC die Uhr, nahtlos an
+    // der bisherigen PIT-Zeit ausgerichtet.
+    TSC_ANKER.store(tsc_lesen(), Ordering::Relaxed);
+    ANKER_US.store(ms_von_ticks(ticks()) * 1000, Ordering::Relaxed);
+    TSC_PRO_MS.store((hz_1 / 1000).max(1), Ordering::Relaxed);
+
+    let dauer_ms = ms_von_ticks(ticks() - start_ticks);
+    crate::serial_println!(
+        "[ZEIT] TSC kalibriert: {},{:03} MHz (Kontrollmessung weicht {} Promille ab, \
+         Dauer {} ms, invariant laut CPUID: {})",
+        hz_1 / 1_000_000,
+        (hz_1 / 1000) % 1000,
+        abweichung_promille,
+        dauer_ms,
+        if tsc_invariant() { "ja" } else { "NEIN" }
+    );
+
+    // Echte Uhrzeit: RTC einmal lesen und als Anker merken.
+    match crate::rtc::lesen() {
+        Some(datum) => {
+            EPOCH_ANKER_S.store(sekunden_seit_2000(&datum), Ordering::Relaxed);
+            EPOCH_ANKER_US.store(us_seit_boot(), Ordering::Relaxed);
+            crate::serial_println!(
+                "[ZEIT] RTC gelesen: {:02}.{:02}.{} {:02}:{:02}:{:02}",
+                datum.tag, datum.monat, datum.jahr,
+                datum.stunde, datum.minute, datum.sekunde
+            );
+        }
+        None => crate::serial_println!(
+            "[ZEIT] WARNUNG: RTC nicht lesbar — Uhrzeit startet am Platzhalter-Datum."
+        ),
+    }
+}
+
+/// Mikrosekunden seit dem Boot — über den kalibrierten TSC, läuft
+/// auch unter without_interrupts weiter. Vor der Kalibrierung:
+/// PIT-Ticks (4-ms-Auflösung).
+pub fn us_seit_boot() -> u64 {
+    use core::sync::atomic::Ordering;
+
+    let pro_ms = TSC_PRO_MS.load(Ordering::Relaxed);
+    if pro_ms == 0 {
+        return ms_von_ticks(ticks()) * 1000;
+    }
+    let delta = tsc_lesen().saturating_sub(TSC_ANKER.load(Ordering::Relaxed));
+    ANKER_US.load(Ordering::Relaxed) + delta * 1000 / pro_ms
+}
+
+/// Millisekunden seit dem Boot (siehe us_seit_boot).
+pub fn ms_seit_boot() -> u64 {
+    us_seit_boot() / 1000
+}
+
+// ---------------------------------------------------------------------------
+// Datum und Uhrzeit — echte Zeit aus RTC-Anker + TSC
+//
+// Beim Boot liest zeit::init() einmal die CMOS-Uhr (rtc.rs) und
+// merkt sich den Zeitpunkt als "Sekunden seit dem 1.1.2000" plus den
+// damaligen us_seit_boot-Stand. jetzt() addiert einfach die seither
+// verstrichene TSC-Zeit — die RTC wird nie wieder angefasst.
+// ---------------------------------------------------------------------------
+
+/// RTC-Anker: Sekunden seit dem 1.1.2000 00:00:00 zum Lese-Zeitpunkt
+/// (0 = keine RTC gelesen -> Platzhalter-Datum).
+static EPOCH_ANKER_S: AtomicU64 = AtomicU64::new(0);
+/// us_seit_boot zum RTC-Lese-Zeitpunkt.
+static EPOCH_ANKER_US: AtomicU64 = AtomicU64::new(0);
+
+/// Platzhalter, falls die RTC nicht lesbar ist (11.07.2026 09:00) —
+/// dann läuft die Uhr wenigstens korrekt WEITER, nur der Startpunkt
+/// ist erfunden (der alte Zustand vor der RTC-Anbindung).
+const FALLBACK_EPOCH_S: u64 = ((9_688) * 24 * 60 * 60) + 9 * 3600;
 
 /// Ein aufgeschlüsselter Zeitpunkt (für Taskleiste, Uhr-Fenster, ...).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,9 +196,17 @@ pub struct DatumUhrzeit {
     pub sekunde: u64,
 }
 
-/// Das aktuelle Datum samt Uhrzeit (Boot-Zeitpunkt + Uptime).
-pub fn datum_uhrzeit() -> DatumUhrzeit {
-    datum_nach(ms_seit_boot() / 1000)
+/// Das ECHTE aktuelle Datum samt Uhrzeit (RTC-Anker + TSC-Zeit).
+pub fn jetzt() -> DatumUhrzeit {
+    use core::sync::atomic::Ordering;
+
+    let anker_s = EPOCH_ANKER_S.load(Ordering::Relaxed);
+    let vergangen_s =
+        us_seit_boot().saturating_sub(EPOCH_ANKER_US.load(Ordering::Relaxed)) / 1_000_000;
+    if anker_s == 0 {
+        return datum_von_sekunden_seit_2000(FALLBACK_EPOCH_S + ms_seit_boot() / 1000);
+    }
+    datum_von_sekunden_seit_2000(anker_s + vergangen_s)
 }
 
 fn schaltjahr(jahr: u64) -> bool {
@@ -87,36 +227,55 @@ fn tage_im_monat(jahr: u64, monat: u64) -> u64 {
     }
 }
 
-/// Boot-Zeitpunkt + `sekunden_seit_boot` als Kalenderdatum — reine,
-/// unit-getestete Funktion. Der Tages-Übertrag läuft schlicht Tag für
-/// Tag (die Uptime ist klein, das ist völlig ausreichend).
-pub fn datum_nach(sekunden_seit_boot: u64) -> DatumUhrzeit {
-    let gesamt = BOOT_SEKUNDEN_AM_TAG + sekunden_seit_boot;
-    let mut uebrige_tage = gesamt / 86_400;
+/// Sekunden seit dem 1.1.2000 00:00:00 -> Kalenderdatum. Reine,
+/// unit-getestete Funktion; läuft Jahr- und Monatsweise (schnell
+/// genug — die Taskleiste ruft das einmal pro Sekunde).
+pub fn datum_von_sekunden_seit_2000(gesamt: u64) -> DatumUhrzeit {
+    let mut tage = gesamt / 86_400;
     let tages_sekunden = gesamt % 86_400;
 
-    let (mut jahr, mut monat, mut tag) = (BOOT_JAHR, BOOT_MONAT, BOOT_TAG);
-    while uebrige_tage > 0 {
-        tag += 1;
-        if tag > tage_im_monat(jahr, monat) {
-            tag = 1;
-            monat += 1;
-            if monat > 12 {
-                monat = 1;
-                jahr += 1;
-            }
+    let mut jahr = 2000;
+    loop {
+        let jahres_tage = if schaltjahr(jahr) { 366 } else { 365 };
+        if tage < jahres_tage {
+            break;
         }
-        uebrige_tage -= 1;
+        tage -= jahres_tage;
+        jahr += 1;
+    }
+    let mut monat = 1;
+    loop {
+        let monats_tage = tage_im_monat(jahr, monat);
+        if tage < monats_tage {
+            break;
+        }
+        tage -= monats_tage;
+        monat += 1;
     }
 
     DatumUhrzeit {
         jahr,
         monat,
-        tag,
+        tag: tage + 1,
         stunde: tages_sekunden / 3600,
         minute: (tages_sekunden / 60) % 60,
         sekunde: tages_sekunden % 60,
     }
+}
+
+/// Die Umkehrung: Kalenderdatum -> Sekunden seit dem 1.1.2000
+/// (braucht der RTC-Anker; Roundtrip mit datum_von_sekunden_seit_2000
+/// ist unit-getestet).
+pub fn sekunden_seit_2000(datum: &DatumUhrzeit) -> u64 {
+    let mut tage = 0;
+    for jahr in 2000..datum.jahr {
+        tage += if schaltjahr(jahr) { 366 } else { 365 };
+    }
+    for monat in 1..datum.monat {
+        tage += tage_im_monat(datum.jahr, monat);
+    }
+    tage += datum.tag - 1;
+    tage * 86_400 + datum.stunde * 3600 + datum.minute * 60 + datum.sekunde
 }
 
 // ---------------------------------------------------------------------------
@@ -263,30 +422,85 @@ mod tests {
         assert_eq!(ms_von_ticks(250), 1000);
     }
 
-    /// Die Datums-Arithmetik: Sekunden-, Tages-, Monatsübertrag.
+    /// Datums-Arithmetik: bekannte Fixpunkte, Schaltjahre und der
+    /// Roundtrip datum <-> Sekunden-seit-2000.
     #[test_case]
-    fn test_datum_nach() {
-        // Boot-Zeitpunkt selbst: 11.07.2026, 09:00:00.
-        let start = datum_nach(0);
-        assert_eq!((start.jahr, start.monat, start.tag), (2026, 7, 11));
-        assert_eq!((start.stunde, start.minute, start.sekunde), (9, 0, 0));
+    fn test_datum_arithmetik() {
+        // Der Nullpunkt der Epoche:
+        let null = datum_von_sekunden_seit_2000(0);
+        assert_eq!((null.jahr, null.monat, null.tag), (2000, 1, 1));
+        assert_eq!((null.stunde, null.minute, null.sekunde), (0, 0, 0));
 
-        // 90 Sekunden später: 09:01:30.
-        let bald = datum_nach(90);
-        assert_eq!((bald.stunde, bald.minute, bald.sekunde), (9, 1, 30));
-
-        // 15 Stunden später: Mitternacht -> naechster Tag.
-        let morgen = datum_nach(15 * 3600);
-        assert_eq!((morgen.tag, morgen.stunde), (12, 0));
-
-        // 25 Tage später: Monatswechsel Juli (31 Tage) -> August.
-        let august = datum_nach(25 * 86_400);
-        assert_eq!((august.monat, august.tag), (8, 5));
+        // Tag 59 des Jahres 2000 ist der 29. Februar (Schaltjahr!):
+        let schalt = datum_von_sekunden_seit_2000(59 * 86_400);
+        assert_eq!((schalt.jahr, schalt.monat, schalt.tag), (2000, 2, 29));
 
         // 2028 ist ein Schaltjahr, 2100 keins, 2000 doch:
         assert!(schaltjahr(2028));
         assert!(!schaltjahr(2100));
         assert!(schaltjahr(2000));
+
+        // Roundtrip über markante Daten (inkl. Schalttag und
+        // Jahresende):
+        for datum in [
+            DatumUhrzeit { jahr: 2026, monat: 7, tag: 11, stunde: 9, minute: 30, sekunde: 59 },
+            DatumUhrzeit { jahr: 2024, monat: 2, tag: 29, stunde: 23, minute: 59, sekunde: 59 },
+            DatumUhrzeit { jahr: 2031, monat: 12, tag: 31, stunde: 0, minute: 0, sekunde: 1 },
+        ] {
+            let sekunden = sekunden_seit_2000(&datum);
+            assert_eq!(datum_von_sekunden_seit_2000(sekunden), datum);
+        }
+
+        // Die Fallback-Konstante zeigt wirklich auf 11.07.2026 09:00:
+        let fallback = datum_von_sekunden_seit_2000(FALLBACK_EPOCH_S);
+        assert_eq!((fallback.jahr, fallback.monat, fallback.tag), (2026, 7, 11));
+        assert_eq!(fallback.stunde, 9);
+    }
+
+    /// TSC-Kalibrierung: plausible Frequenz, und die TSC-Uhr misst
+    /// eine PIT-Wartezeit (25 Ticks ~ 100 ms — dieselbe Dauer, die
+    /// zwei warte_ms(50)-Aufrufe schlafen würden) auf +-20 % genau.
+    #[test_case]
+    fn test_tsc_kalibrierung_plausibel() {
+        // test_kernel_main hat zeit::init() gerufen:
+        assert!(tsc_frequenz_hz() > 100_000_000, "TSC-Frequenz unplausibel");
+
+        // An eine Tick-Flanke ausrichten, dann 25 Ticks warten und
+        // die Dauer mit der TSC-Uhr messen:
+        let t = ticks();
+        while ticks() == t {
+            core::hint::spin_loop();
+        }
+        let start_us = us_seit_boot();
+        let basis = ticks();
+        while ticks() < basis + 25 {
+            x86_64::instructions::hlt();
+        }
+        let dauer_us = us_seit_boot() - start_us;
+        let erwartet_us = 25 * PIT_TEILER * 1_000_000 / PIT_BASIS_HZ; // ~100.017
+        assert!(
+            dauer_us > erwartet_us * 8 / 10 && dauer_us < erwartet_us * 12 / 10,
+            "TSC-Messung {} us weicht zu weit von {} us ab",
+            dauer_us,
+            erwartet_us
+        );
+    }
+
+    /// Die TSC-Uhr läuft auch unter without_interrupts weiter —
+    /// die alte Mess-Falle ist tot.
+    #[test_case]
+    fn test_zeit_laeuft_unter_cli() {
+        let vorher = us_seit_boot();
+        x86_64::instructions::interrupts::without_interrupts(|| {
+            // ~2M spin-Runden vergehen lassen:
+            for _ in 0..2_000_000 {
+                core::hint::spin_loop();
+            }
+            assert!(
+                us_seit_boot() > vorher,
+                "Zeit steht unter without_interrupts still"
+            );
+        });
     }
 
     /// Die Uhr läuft vorwärts: Nach ein paar hlt-Schlafrunden ist

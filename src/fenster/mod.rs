@@ -1212,7 +1212,7 @@ impl FensterManager {
         z.icon(systray_x, y + 12, &crate::grafik::ICON_ZAHNRAD, 1);
         z.icon(systray_x + 22, y + 12, &crate::grafik::ICON_ORDNER, 1);
 
-        let jetzt = zeit::datum_uhrzeit();
+        let jetzt = zeit::jetzt();
         let uhr = format!("{:02}:{:02}:{:02}", jetzt.stunde, jetzt.minute, jetzt.sekunde);
         let datum = format!("{:02}.{:02}.{}", jetzt.tag, jetzt.monat, jetzt.jahr);
         let uhr_x = breite - METRIK.abstand - uhr.chars().count() as i32 * zeichen_breite;
@@ -1980,10 +1980,13 @@ mod tests {
         );
 
         // Fenster an der Titelzeile greifen (700..,200..) und pro
-        // Frame ein Stück ziehen — wie eine echte Mausbewegung:
+        // Frame ein Stück ziehen — wie eine echte Mausbewegung.
+        // Gemessen wird mit der TSC-Mikrosekunden-Uhr: Die läuft auch
+        // unter without_interrupts weiter — die alte Mess-Falle
+        // ("ticks() steht in mit_framebuffer still") ist Geschichte.
         manager.maus_event(&MausEvent::Gedrueckt(MausTaste::Links), 720, 210);
         const FRAMES: u64 = 40;
-        let start = zeit::ticks();
+        let start = zeit::us_seit_boot();
         for i in 0..FRAMES {
             let x = 720 - (i as i32 % 20) * 4;
             manager.maus_event(&MausEvent::Bewegt { x, y: 210 }, x, 210);
@@ -1993,26 +1996,25 @@ mod tests {
             });
             manager.dirty_zuruecksetzen();
         }
-        let dauer_ms = zeit::ms_von_ticks(zeit::ticks() - start);
+        let dauer_us = zeit::us_seit_boot() - start;
         serial_println!(
-            "[MESSUNG] Compositor: {} Frames in {} ms  ->  {},{:02} ms/Frame",
+            "[MESSUNG] Compositor: {} Frames in {} us  ->  {} us/Frame",
             FRAMES,
-            dauer_ms,
-            dauer_ms / FRAMES,
-            (dauer_ms * 100 / FRAMES) % 100
+            dauer_us,
+            dauer_us / FRAMES
         );
         manager.maus_event(&MausEvent::Losgelassen(MausTaste::Links), 640, 210);
 
         // A/B-Vergleich der Kern-Optimierung: EIN Fenster-Inhalt
         // (560x140) 100x auf den Bildschirm — alter Weg (Pro-Pixel
         // durch Zeichner::pixel) gegen neuen Blit-Schnellpfad.
-        // WICHTIG: ticks() MUSS außerhalb von mit_framebuffer gelesen
-        // werden — darin sind Interrupts aus, der Zähler steht still!
+        // Dank TSC darf die Zeit jetzt IM mit_framebuffer-Block
+        // genommen werden.
         let puffer = FensterPuffer::neu(560, 140, Farbe::neu(30, 40, 50));
-        let start = zeit::ticks();
-        for _ in 0..100 {
-            framebuffer::mit_framebuffer(|fb| {
-                let mut z = Zeichner::neu(fb);
+        framebuffer::mit_framebuffer(|fb| {
+            let mut z = Zeichner::neu(fb);
+            let start = zeit::us_seit_boot();
+            for _ in 0..100 {
                 for zeile in 0..puffer.hoehe {
                     let basis = zeile * puffer.breite;
                     for spalte in 0..puffer.breite {
@@ -2024,22 +2026,19 @@ mod tests {
                         );
                     }
                 }
-            });
-        }
-        let alt_ms = zeit::ms_von_ticks(zeit::ticks() - start);
-        let start = zeit::ticks();
-        for _ in 0..100 {
-            framebuffer::mit_framebuffer(|fb| {
-                let mut z = Zeichner::neu(fb);
+            }
+            let alt_us = zeit::us_seit_boot() - start;
+            let start = zeit::us_seit_boot();
+            for _ in 0..100 {
                 z.puffer_blit(100, 100, puffer.breite, &puffer.pixel);
-            });
-        }
-        let neu_ms = zeit::ms_von_ticks(zeit::ticks() - start);
-        serial_println!(
-            "[MESSUNG] Fenster-Blit 560x140, 100 Durchlaeufe: Pro-Pixel {} ms, Zeilenkopie {} ms",
-            alt_ms,
-            neu_ms
-        );
+            }
+            let neu_us = zeit::us_seit_boot() - start;
+            serial_println!(
+                "[MESSUNG] Fenster-Blit 560x140, 100 Durchlaeufe: Pro-Pixel {} us, Zeilenkopie {} us",
+                alt_us,
+                neu_us
+            );
+        });
     }
 
     /// Terminal: einmal öffnen, danach nur noch fokussieren; Schreiben

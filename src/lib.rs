@@ -39,6 +39,7 @@ pub mod interrupts;
 pub mod konsole;
 pub mod maus;
 pub mod memory;
+pub mod rtc;
 pub mod serial;
 pub mod shell;
 pub mod task;
@@ -238,6 +239,9 @@ fn test_kernel_main(boot_info: &'static mut bootloader_api::BootInfo) -> ! {
     use x86_64::VirtAddr;
 
     init(); // GDT + IDT laden, damit Exception-Tests funktionieren
+    // TSC kalibrieren + RTC lesen — die Zeit-Tests und die
+    // Frame-Zeit-Messung brauchen die Mikrosekunden-Uhr.
+    zeit::init();
 
     // Framebuffer HERAUSNEHMEN, bevor die BootInfo zu &'static wird.
     let fb = boot_info.framebuffer.take();

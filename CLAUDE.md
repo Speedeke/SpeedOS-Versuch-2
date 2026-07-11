@@ -137,11 +137,10 @@
   Compositor-Blit für Fensterinhalte) laufen also OHNE Prüfungen pro
   Pixel. Alpha bleibt auf dem Pixel-Pfad (muss den Untergrund lesen).
   Frame-Zeit-Messung: fenster::tests::messung_compositor_frame_zeit
-  (Berichts-Test, Zahlen im CHANGELOG). ACHTUNG Mess-Falle: ticks()
-  steht in mit_framebuffer/without_interrupts STILL (PIT-IRQ maskiert,
-  nur 1 Tick wird nachgeliefert) — Zeit immer AUSSERHALB nehmen; bei
-  Frames > 4 ms geht dadurch sogar die Systemuhr nach (bekannte
-  Schwachstelle, langfristig TSC/HPET als Zeitquelle).
+  (Berichts-Test, Zahlen im CHANGELOG). Die frühere Mess-Falle
+  ("ticks() steht unter without_interrupts still") ist seit der
+  TSC-Zeitquelle TOT — zeit::us_seit_boot()/ms_seit_boot() dürfen
+  ÜBERALL genommen werden, auch in mit_framebuffer-Blöcken.
 - **Zeichen-Werkzeuge (Juli 2026):** `grafik.rs` = Zeichner auf dem
   Back-Buffer mit optionalem Clip-Rechteck und Alpha-Blending (alle
   Pixel laufen durch EINEN Pfad: Zeichner::pixel). Clipping-Schnitt
@@ -253,11 +252,19 @@
   (Shell: VFS, Tests: Mock) — dadurch ist die Eingabelogik als reiner
   Unit-Test prüfbar. shell::run() ist nur noch Übersetzer:
   Taste rein, Reaktion zeichnen, fertige Zeilen an die Registry.
-- **Zeit nur über `src/zeit.rs`:** ticks(), ms_seit_boot(). Niemals
-  direkt den Tick-Zähler benutzen — die API-Naht erlaubt später den
-  Wechsel PIT (~4 ms Auflösung, 250 Hz — Teiler zeit::PIT_TEILER,
-  denselben Wert nutzt interrupts::pit_initialisieren) -> APIC-Timer
-  ohne Aufrufer-Änderung.
+- **Zeit nur über `src/zeit.rs` (seit Juli 2026 TSC-basiert):**
+  us_seit_boot()/ms_seit_boot() laufen über den beim Boot gegen den
+  PIT kalibrierten TSC (zeit::init, ~200 ms, loggt Frequenz/
+  Genauigkeit/CPUID-Invariant) — mikrosekundengenau und UNABHÄNGIG
+  von Interrupts (kein Stillstand unter without_interrupts; Zeit darf
+  überall genommen werden). Der PIT (250 Hz, Teiler zeit::PIT_TEILER,
+  denselben Wert nutzt interrupts::pit_initialisieren) ist nur noch
+  WECKGEBER für warte_ms/Executor und Fallback vor der Kalibrierung.
+  Echte Uhrzeit: rtc.rs liest die CMOS-Uhr EINMAL beim Boot (Update-
+  in-Progress-Flag, BCD/12h-Modus, Doppel-Lesen bis stabil, Timeout);
+  zeit::jetzt() = RTC-Anker + TSC-Zeit. QEMU-RTC läuft per Runner auf
+  der Host-LOKALZEIT (-rtc base=localtime). zeit::init() MUSS nach
+  speed_os::init() laufen (PIT muss ticken) — auch im Test-Kernel.
 - **Heap-Allocator austauschbar:** Standard linked_list_allocator; eigene
   Lern-Allocatoren (Bump, Fixed-Size-Block) über Cargo-Features
   `bump-allocator` / `fixed-block-allocator` — gleiche init-Schnittstelle.
