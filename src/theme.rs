@@ -114,6 +114,15 @@ pub struct Metrik {
     pub menue_breite: i32,
     pub menue_eintrag_hoehe: i32,
     pub menue_suchfeld_hoehe: i32,
+    // UI-Widgets (ui-Modul)
+    /// Innenrand eines UI-Fensters (Abstand Wurzel-Widget zum Rand).
+    pub ui_rand: i32,
+    /// Höhe von Buttons, Textfeldern und Checkbox-Zeilen.
+    pub ui_element_hoehe: i32,
+    /// Höhe eines Eintrags in der ScrollListe.
+    pub listen_eintrag_hoehe: i32,
+    /// Breite des Scrollbalkens.
+    pub scrollbalken_breite: i32,
     // Allgemein
     /// Standard-Innenabstand von Panels und Knöpfen.
     pub abstand: i32,
@@ -142,6 +151,10 @@ pub const METRIK: Metrik = Metrik {
     menue_breite: 340,
     menue_eintrag_hoehe: 40,
     menue_suchfeld_hoehe: 46,
+    ui_rand: 10,
+    ui_element_hoehe: 30,
+    listen_eintrag_hoehe: 26,
+    scrollbalken_breite: 8,
     abstand: 8,
     radius_gross: 14,
     radius_klein: 6,

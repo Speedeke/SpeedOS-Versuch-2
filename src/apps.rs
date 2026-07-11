@@ -30,8 +30,9 @@ pub fn alle_apps() -> &'static [App] {
     &APPS
 }
 
-static APPS: [App; 6] = [
+static APPS: [App; 7] = [
     App { name: "Terminal", icon: &grafik::ICON_TERMINAL, start: terminal_starten },
+    App { name: "Widget-Galerie", icon: &grafik::ICON_ZAHNRAD, start: galerie_starten },
     App { name: "Uhr", icon: &grafik::ICON_UHR, start: uhr_starten },
     App { name: "Tastatur-Echo", icon: &grafik::ICON_TASTATUR, start: tastatur_starten },
     App { name: "Malkasten", icon: &grafik::ICON_PINSEL, start: malkasten_starten },
@@ -50,6 +51,66 @@ fn terminal_starten() {
 
 fn uhr_starten() {
     fenster::app_fenster_oeffnen("Uhr", 420, 150, Inhalt::Uhr);
+}
+
+// ---------------------------------------------------------------------------
+// Widget-Galerie: die Demo-App des ui-Moduls — zeigt alle Bausteine
+// und loggt jede Interaktion seriell (Nachricht-IDs siehe unten).
+// ---------------------------------------------------------------------------
+
+fn galerie_starten() {
+    fenster::app_fenster_oeffnen("Widget-Galerie", 480, 460, Inhalt::Ui(galerie_bauen()));
+}
+
+/// Baut den Widget-Baum der Galerie. Die u32-IDs sind frei wählbar —
+/// sie landen im Nachricht-Handler (galerie_nachricht).
+fn galerie_bauen() -> crate::ui::UiFenster {
+    use crate::ui::widgets::{Button, Checkbox, Label, ListenEintrag, ScrollListe, Textfeld, Trennlinie};
+    use crate::ui::{hbox, vbox, Fueller, UiFenster, Widget};
+    use alloc::boxed::Box;
+    use alloc::format;
+    use alloc::vec;
+
+    let eintraege = (1..=25)
+        .map(|i| ListenEintrag { icon: Some(&grafik::ICON_DATEI), text: format!("Listeneintrag {i}") })
+        .collect();
+
+    UiFenster::neu(
+        Box::new(vbox(vec![
+            Box::new(Label::neu("Widget-Galerie")) as Box<dyn Widget>,
+            // Nur Latin-1-Zeichen — der vorgerasterte Font hat
+            // keinen Gedankenstrich (wuerde als '?' erscheinen).
+            Box::new(Label::sekundaer(
+                "Hover, Klick, Tab-Fokus, Tippen, Scrollrad -\njede Interaktion landet im seriellen Log.",
+            )),
+            Box::new(hbox(vec![
+                Box::new(Button::mit_icon("Start", &grafik::ICON_LOGO, 1)) as Box<dyn Widget>,
+                Box::new(Button::neu("Zweiter", 2)),
+                Box::new(Fueller),
+                Box::new(Checkbox::neu("Haken", true, 3)),
+            ])),
+            Box::new(Textfeld::neu(4)),
+            Box::new(Trennlinie),
+            Box::new(ScrollListe::neu(eintraege, 5, 6)),
+        ])),
+        galerie_nachricht,
+        &grafik::ICON_ZAHNRAD,
+    )
+}
+
+/// Der Nachricht-Handler der Galerie — läuft NIE unter dem
+/// MANAGER-Lock (NachLock-Regel), darf also bedenkenlos loggen.
+fn galerie_nachricht(id: u32) {
+    let quelle = match id {
+        1 => "Button 'Start'",
+        2 => "Button 'Zweiter'",
+        3 => "Checkbox umgeschaltet",
+        4 => "Textfeld: Enter",
+        5 => "Liste: Auswahl",
+        6 => "Liste: DOPPELKLICK",
+        _ => "unbekannt",
+    };
+    crate::serial_println!("[GALERIE] Nachricht {}: {}", id, quelle);
 }
 
 fn tastatur_starten() {
@@ -115,7 +176,7 @@ mod tests {
     #[test_case]
     fn test_fenster_apps_starten_ohne_panic() {
         for app in alle_apps() {
-            if matches!(app.name, "Uhr" | "Tastatur-Echo" | "Malkasten") {
+            if matches!(app.name, "Uhr" | "Tastatur-Echo" | "Malkasten" | "Widget-Galerie") {
                 (app.start)();
             }
         }

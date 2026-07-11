@@ -60,7 +60,7 @@ pub struct FensterPuffer {
 }
 
 impl FensterPuffer {
-    fn neu(breite: usize, hoehe: usize, fuellung: Farbe) -> Self {
+    pub(crate) fn neu(breite: usize, hoehe: usize, fuellung: Farbe) -> Self {
         FensterPuffer {
             breite,
             hoehe,
@@ -113,9 +113,31 @@ impl Zeichenflaeche for FensterPuffer {
 pub enum Inhalt {
     /// Die SpeedShell als Fenster (konsole::_print leitet hierher um).
     Terminal(terminal::Terminal),
+    /// Ein Widget-Baum aus dem ui-Modul — der Standard für alle
+    /// künftigen Apps (Galerie, Explorer, Einstellungen, ...).
+    Ui(crate::ui::UiFenster),
     Uhr,
     TastaturEcho { text: String },
     Malflaeche { klicks: Vec<(i32, i32)> },
+}
+
+/// Arbeit, die der Aufrufer erst NACH dem Loslassen des MANAGER-Locks
+/// erledigen darf (Deadlock-Regel: App-Starts nehmen den Lock selbst,
+/// Nachricht-Handler drucken womöglich — print! braucht die
+/// KONSOLE-vor-MANAGER-Lock-Ordnung).
+pub enum NachLock {
+    Keine,
+    AppStarten(fn()),
+    Nachricht(crate::ui::NachrichtHandler, u32),
+}
+
+/// Führt NachLock-Arbeit aus — NIEMALS unter dem MANAGER-Lock rufen!
+fn nach_lock_ausfuehren(nach: NachLock) {
+    match nach {
+        NachLock::Keine => {}
+        NachLock::AppStarten(start) => start(),
+        NachLock::Nachricht(handler, id) => handler(id),
+    }
 }
 
 /// Die drei Knöpfe rechts in der Titelleiste.
@@ -272,6 +294,8 @@ pub struct FensterManager {
     /// Zuletzt in der Taskleiste angezeigte Sekunde — nur bei einem
     /// Wechsel wird neu komponiert (nicht bei jedem Uhr-Task-Lauf).
     letzte_uhr_sekunde: u64,
+    /// Über welchem Ui-Fenster schwebt der Cursor? (für MausRaus)
+    ui_hover_fenster: Option<FensterId>,
 }
 
 impl FensterManager {
@@ -287,6 +311,7 @@ impl FensterManager {
             bildschirm_breite,
             bildschirm_hoehe,
             letzte_uhr_sekunde: 0,
+            ui_hover_fenster: None,
         }
     }
 
@@ -686,31 +711,72 @@ impl FensterManager {
         maus::cursor_form_setzen(form);
     }
 
-    /// Liefert ggf. eine App-Start-Funktion (aus dem Startmenü) —
-    /// der Aufrufer MUSS sie erst nach dem Loslassen des MANAGER-Locks
-    /// ausführen (Deadlock-Regel: Start-Funktionen nehmen den Lock).
-    pub fn maus_event(&mut self, event: &MausEvent, px: i32, py: i32) -> Option<fn()> {
+    /// Liefert NachLock-Arbeit (App-Start aus dem Startmenü, Ui-
+    /// Nachricht) — der Aufrufer MUSS sie erst nach dem Loslassen des
+    /// MANAGER-Locks ausführen (Deadlock-Regel).
+    pub fn maus_event(&mut self, event: &MausEvent, px: i32, py: i32) -> NachLock {
         match event {
-            MausEvent::Gedrueckt(MausTaste::Links) => return self.maus_gedrueckt(px, py),
+            MausEvent::Gedrueckt(MausTaste::Links) => self.maus_gedrueckt(px, py),
             MausEvent::Losgelassen(MausTaste::Links) => self.maus_losgelassen(px, py),
-            MausEvent::Bewegt { x, y } => self.maus_bewegt(*x, *y),
-            _ => {}
+            MausEvent::Bewegt { x, y } => {
+                self.maus_bewegt(*x, *y);
+                // Bewegt erzeugt per Design keine App-Nachrichten
+                // (nur Hover-Neuzeichnen) — nichts nachzuarbeiten.
+                NachLock::Keine
+            }
+            MausEvent::Gescrollt(delta) => self.maus_scroll(px, py, *delta),
+            _ => NachLock::Keine,
         }
-        None
     }
 
-    fn maus_gedrueckt(&mut self, px: i32, py: i32) -> Option<fn()> {
+    /// Reicht ein Maus-Ereignis an einen Ui-Fensterinhalt weiter und
+    /// übersetzt die Widget-Reaktion in dirty-Flags + NachLock.
+    fn ui_maus(&mut self, index: usize, ereignis: crate::ui::UiEreignis) -> NachLock {
+        let Fenster { inhalt, puffer, dirty, inhalt_neu, .. } = &mut self.fenster[index];
+        if let Inhalt::Ui(ui) = inhalt {
+            let reaktion = ui.maus(ereignis, puffer);
+            if reaktion.neu_zeichnen {
+                *inhalt_neu = true;
+                *dirty = true;
+            }
+            if let Some(id) = reaktion.nachricht {
+                return NachLock::Nachricht(ui.handler(), id);
+            }
+        }
+        NachLock::Keine
+    }
+
+    /// Scrollrad: geht an den Ui-Inhalt unter dem Cursor.
+    fn maus_scroll(&mut self, px: i32, py: i32, delta: i8) -> NachLock {
+        if let Some(index) = self
+            .fenster_unter(px, py)
+            .and_then(|id| self.index_von(id))
+        {
+            if let Some((lx, ly)) = self.fenster[index].lokal(px, py) {
+                return self.ui_maus(index, crate::ui::UiEreignis::Scroll { delta, x: lx, y: ly });
+            }
+        }
+        NachLock::Keine
+    }
+
+    fn maus_gedrueckt(&mut self, px: i32, py: i32) -> NachLock {
         // Ein offenes Startmenü fängt ALLE Klicks ab (liegt zuoberst).
         if self.start_menue.is_some() {
-            return self.startmenue_klick(px, py);
+            return match self.startmenue_klick(px, py) {
+                Some(start) => NachLock::AppStarten(start),
+                None => NachLock::Keine,
+            };
         }
         // Die Taskleiste liegt IMMER obenauf — sie fängt Klicks vor
         // allen Fenstern ab.
         if py >= self.taskleiste_y() {
             self.taskleiste_klick(px, py);
-            return None;
+            return NachLock::Keine;
         }
-        let id = self.fenster_unter(px, py)?;
+        let id = match self.fenster_unter(px, py) {
+            Some(id) => id,
+            None => return NachLock::Keine,
+        };
         self.fokussieren_und_heben(id);
         // "fenster" ist jetzt garantiert das letzte Element.
         let index = self.fenster.len() - 1;
@@ -718,7 +784,7 @@ impl FensterManager {
         if self.fenster[index].in_titelzeile(px, py) {
             if let Some(knopf) = self.fenster[index].knopf_bei(px, py) {
                 self.knopf_aktion(id, knopf);
-                return None;
+                return NachLock::Keine;
             }
             // Maximiertes Fenster beim Ziehen wiederherstellen:
             if self.fenster[index].vorher.is_some() {
@@ -750,11 +816,12 @@ impl FensterManager {
                 inhalt_zeichnen(f);
                 f.dirty = true;
             }
+            return self.ui_maus(index, crate::ui::UiEreignis::Klick { x: lx, y: ly });
         }
-        None
+        NachLock::Keine
     }
 
-    fn maus_losgelassen(&mut self, _px: i32, _py: i32) {
+    fn maus_losgelassen(&mut self, px: i32, py: i32) -> NachLock {
         // Snap anwenden, wenn während des Ziehens die Vorschau lief —
         // so ist das Ergebnis konsistent mit dem, was der Nutzer sah
         // (unabhängig von der exakten Cursor-Position beim Loslassen).
@@ -763,9 +830,21 @@ impl FensterManager {
                 self.snappen(id, self.snap_hinweis);
             }
         }
+        let hatte_interaktion = !matches!(self.interaktion, Interaktion::Keine);
         self.interaktion = Interaktion::Keine;
         self.snap_hinweis = 0;
         self.alles_dirty = true;
+
+        // Loslassen an den Ui-Inhalt unter dem Cursor (Buttons feuern
+        // beim LOSLASSEN) — aber nicht nach einem Fenster-Drag/Resize.
+        if !hatte_interaktion {
+            if let Some(index) = self.fenster_unter(px, py).and_then(|id| self.index_von(id)) {
+                if let Some((lx, ly)) = self.fenster[index].lokal(px, py) {
+                    return self.ui_maus(index, crate::ui::UiEreignis::Losgelassen { x: lx, y: ly });
+                }
+            }
+        }
+        NachLock::Keine
     }
 
     fn maus_bewegt(&mut self, x: i32, y: i32) {
@@ -839,6 +918,34 @@ impl FensterManager {
                     self.startmenue_hover(x, y);
                 }
                 self.cursor_aktualisieren(x, y);
+                self.ui_hover(x, y);
+            }
+        }
+    }
+
+    /// Hover-Routing für Ui-Fenster: Bewegt geht (in Inhalts-
+    /// Koordinaten) an das oberste Fenster unter dem Cursor; beim
+    /// Fensterwechsel oder Verlassen des Inhalts bekommt das alte
+    /// Fenster ein MausRaus — sonst bliebe z. B. ein Button für
+    /// immer gehovert.
+    fn ui_hover(&mut self, x: i32, y: i32) {
+        let ziel = self.fenster_unter(x, y).and_then(|id| {
+            let index = self.index_von(id)?;
+            self.fenster[index].lokal(x, y).map(|lokal| (id, index, lokal))
+        });
+
+        if let Some(alt_id) = self.ui_hover_fenster {
+            if ziel.map(|(id, _, _)| id) != Some(alt_id) {
+                self.ui_hover_fenster = None;
+                if let Some(alt_index) = self.index_von(alt_id) {
+                    let _ = self.ui_maus(alt_index, crate::ui::UiEreignis::MausRaus);
+                }
+            }
+        }
+        if let Some((id, index, (lx, ly))) = ziel {
+            if matches!(self.fenster[index].inhalt, Inhalt::Ui(_)) {
+                self.ui_hover_fenster = Some(id);
+                let _ = self.ui_maus(index, crate::ui::UiEreignis::Bewegt { x: lx, y: ly });
             }
         }
     }
@@ -933,30 +1040,46 @@ impl FensterManager {
         self.alles_dirty = true;
     }
 
-    pub fn taste_event(&mut self, taste: DecodedKey) {
+    pub fn taste_event(&mut self, taste: DecodedKey) -> NachLock {
         let fokus = match self.fokus {
             Some(id) => id,
-            None => return,
+            None => return NachLock::Keine,
         };
         if let Some(index) = self.index_von(fokus) {
-            let fenster = &mut self.fenster[index];
-            if let Inhalt::TastaturEcho { text } = &mut fenster.inhalt {
-                match taste {
-                    DecodedKey::Unicode('\u{8}') | DecodedKey::Unicode('\u{7f}') => {
-                        text.pop();
+            let Fenster { inhalt, puffer, dirty, inhalt_neu, .. } = &mut self.fenster[index];
+            match inhalt {
+                // Widget-Fenster: Tab-Fokuskette + Tasten ans
+                // fokussierte Widget (macht das UiFenster).
+                Inhalt::Ui(ui) => {
+                    let reaktion = ui.taste(taste, puffer);
+                    if reaktion.neu_zeichnen {
+                        *inhalt_neu = true;
+                        *dirty = true;
                     }
-                    DecodedKey::Unicode('\n') | DecodedKey::Unicode('\r') => text.clear(),
-                    DecodedKey::Unicode(c) if c >= ' ' => {
-                        if text.chars().count() < 40 {
-                            text.push(c);
-                        }
+                    if let Some(id) = reaktion.nachricht {
+                        return NachLock::Nachricht(ui.handler(), id);
                     }
-                    _ => return,
                 }
-                inhalt_zeichnen(fenster);
-                fenster.dirty = true;
+                Inhalt::TastaturEcho { text } => {
+                    match taste {
+                        DecodedKey::Unicode('\u{8}') | DecodedKey::Unicode('\u{7f}') => {
+                            text.pop();
+                        }
+                        DecodedKey::Unicode('\n') | DecodedKey::Unicode('\r') => text.clear(),
+                        DecodedKey::Unicode(c) if c >= ' ' => {
+                            if text.chars().count() < 40 {
+                                text.push(c);
+                            }
+                        }
+                        _ => return NachLock::Keine,
+                    }
+                    *inhalt_neu = true;
+                    *dirty = true;
+                }
+                _ => {}
             }
         }
+        NachLock::Keine
     }
 
     // ----- Alt+Tab-Fensterwechsler -----
@@ -999,6 +1122,14 @@ impl FensterManager {
             if !fenster.minimiert && matches!(fenster.inhalt, Inhalt::Uhr) {
                 inhalt_zeichnen(fenster);
                 fenster.dirty = true;
+            }
+            // Ui-Fenster mit fokussiertem Textfeld: regelmäßig neu
+            // zeichnen, damit der Cursor blinkt (zeit-API im Widget).
+            if let Inhalt::Ui(ui) = &fenster.inhalt {
+                if !fenster.minimiert && ui.blinkt() {
+                    fenster.inhalt_neu = true;
+                    fenster.dirty = true;
+                }
             }
         }
         // Taskleisten-Uhr: nur neu komponieren, wenn die angezeigte
@@ -1345,6 +1476,7 @@ fn fenster_komponieren<F: Zeichenflaeche>(z: &mut Zeichner<'_, F>, fenster: &Fen
 fn inhalt_icon(inhalt: &Inhalt) -> &'static crate::grafik::Icon {
     match inhalt {
         Inhalt::Terminal(_) => &crate::grafik::ICON_TERMINAL,
+        Inhalt::Ui(ui) => ui.icon,
         Inhalt::Uhr => &crate::grafik::ICON_UHR,
         Inhalt::TastaturEcho { .. } => &crate::grafik::ICON_TASTATUR,
         Inhalt::Malflaeche { .. } => &crate::grafik::ICON_PINSEL,
@@ -1406,6 +1538,11 @@ fn terminal_rendern(term: &terminal::Terminal, puffer: &mut FensterPuffer) {
 
 /// Zeichnet den Inhalt eines Fensters in SEINEN Puffer.
 fn inhalt_zeichnen(fenster: &mut Fenster) {
+    // Widget-Fenster: Der Baum zeichnet sich selbst (ui-Modul).
+    if let Inhalt::Ui(ui) = &fenster.inhalt {
+        ui.zeichnen(&mut fenster.puffer);
+        return;
+    }
     // Terminal: Rastergröße an die Fenstergröße anpassen, dann rendern.
     // (&mut fenster.inhalt und &mut fenster.puffer sind verschiedene
     // Felder — der Borrow-Checker erlaubt beides gleichzeitig.)
@@ -1428,8 +1565,8 @@ fn inhalt_zeichnen(fenster: &mut Fenster) {
     );
 
     match &fenster.inhalt {
-        // Oben schon behandelt (früher return):
-        Inhalt::Terminal(_) => {}
+        // Oben schon behandelt (frühe returns):
+        Inhalt::Terminal(_) | Inhalt::Ui(_) => {}
         Inhalt::Uhr => {
             let ticks = zeit::ticks();
             let ms = zeit::ms_seit_boot();
@@ -1522,17 +1659,16 @@ pub fn maus_event(event: &MausEvent) {
         return;
     }
     let (px, py) = maus::position();
-    // Eine vom Startmenü gewählte App wird ERST HIER gestartet —
-    // nach dem Loslassen des MANAGER-Locks (die Start-Funktion nimmt
-    // ihn selbst wieder, sonst gäbe es einen Deadlock).
-    let aktion = mit_manager(|m| m.maus_event(event, px, py)).flatten();
-    if let Some(start) = aktion {
-        start();
-    }
+    // App-Starts und Ui-Nachrichten werden ERST HIER ausgeführt —
+    // nach dem Loslassen des MANAGER-Locks (Deadlock-Regel: Starts
+    // nehmen den Lock selbst, Handler drucken womöglich).
+    let nach = mit_manager(|m| m.maus_event(event, px, py)).unwrap_or(NachLock::Keine);
+    nach_lock_ausfuehren(nach);
 }
 
 pub fn taste_event(taste: DecodedKey) {
-    let _ = mit_manager(|m| m.taste_event(taste));
+    let nach = mit_manager(|m| m.taste_event(taste)).unwrap_or(NachLock::Keine);
+    nach_lock_ausfuehren(nach);
 }
 
 // ----- Startmenü (Startknopf in der Taskleiste oder Super-Taste) -----

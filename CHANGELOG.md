@@ -5,6 +5,36 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### Hinzugefügt (UI-Widget-Toolkit: das Fundament aller Apps)
+- Neues Modul src/ui/: retained Widget-Baum mit `trait Widget`
+  (wunschgroesse/zeichnen/ereignis), UiEreignis (Klick, Doppelklick,
+  Losgelassen, Bewegt, Scroll, Taste, MausRein/Raus, FokusRein/Raus)
+  und UiReaktion (verbraucht + neu_zeichnen + Nachricht kombinierbar);
+  App-Nachrichten als u32-ID an fn(u32)-Handler (Begründung im
+  Kopfkommentar: keine Closures/Generics im no_std-Kernel)
+- Hover-Konzept: das Container-Routing erzeugt MausRein/MausRaus
+  (Fenster-Ebene: ui_hover_fenster im Manager, MausRaus beim
+  Fensterwechsel); Fokus-Kette pro Fenster mit Tab (Wrap-Around),
+  Tasten laufen zum fokussierten Widget
+- Layout bewusst primitiv: laengen_verteilen (pure) + VBox/HBox mit
+  METRIK-Abständen und Fueller (flex) — kein Constraint-Solver
+- Widgets im Aurora-Stil: Label (mehrzeilig), Trennlinie, Button
+  (Hover/Pressed, Icon optional, feuert beim Loslassen im Bereich),
+  Checkbox, Textfeld (Innenleben = ZeilenEditor der Shell, Cursor
+  blinkt über die zeit-API), ScrollListe (Scrollrad, ziehbarer
+  Scrollbalken, Auswahl-Highlight, Doppelklick-Nachricht)
+- Fenster-Integration: Inhalt::Ui, Maus-Routing inkl. Scroll und
+  Losgelassen ins Fenster, NachLock-Enum (Ui-Nachrichten laufen wie
+  App-Starts nie unter dem MANAGER-Lock); Panic-Handler meldet
+  zuerst roh seriell (Deadlock-Fix bei Panik unter dem Lock)
+- Widget-Galerie als Demo-App im Startmenü: zeigt alle Widgets,
+  loggt jede Interaktion seriell — in QEMU end-to-end bedient
+  (Tab-Fokus, Tippen, Button-Klick per Maus, Scroll, Doppelklick)
+- 10 neue Unit-Tests: Layout-Verteilung, Klick-Routing,
+  Hover-Enter/Leave, Fokus-Kette mit Tab, Doppelklick-Erkennung,
+  Scroll-Klemmen, ScrollListe-Sichtbereich/Auswahl, Button-Zustände,
+  Textfeld+Checkbox
+
 ### Hinzugefügt (Echte Zeit: TSC-Zeitquelle + RTC-Uhrzeit)
 - TSC als monotone Zeitquelle: zeit::init() kalibriert den TSC beim
   Boot gegen den PIT (2 Messungen à ~100 ms, loggt Frequenz,

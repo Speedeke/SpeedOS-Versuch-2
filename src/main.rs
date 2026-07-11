@@ -110,13 +110,16 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     executor.run();
 }
 
-/// Panic-Handler für den normalen Betrieb: Meldung in Rot (ANSI) über
-/// die serielle Konsole, dann anhalten.
+/// Panic-Handler für den normalen Betrieb: ZUERST roh seriell melden
+/// (nimmt nur den SERIAL-Lock — funktioniert selbst dann, wenn die
+/// Panik unter dem MANAGER-Lock passierte, wo die Terminal-Umleitung
+/// von println! deadlocken würde), dann Versuch auf den Bildschirm.
 #[cfg(not(test))]
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     use speed_os::konsole::{self, Color};
 
+    speed_os::serial_println!("\x1b[91mKERNEL PANIC: {}\x1b[0m", info);
     konsole::set_color(Color::LightRed, Color::Black);
     speed_os::println!("KERNEL PANIC: {}", info);
     speed_os::hlt_loop();

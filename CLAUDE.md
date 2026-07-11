@@ -184,6 +184,37 @@
   Rückgabewert nach draußen, die Wrapper in fenster/mod.rs führen sie
   nach dem Loslassen aus. Neue App = Start-Funktion + ein Eintrag in
   APPS, fertig.
+- **UI-Widget-Toolkit (Juli 2026):** `src/ui/` = das UI-Fundament
+  aller Apps. Retained Widget-Baum: `trait Widget` (wunschgroesse,
+  zeichnen in den FensterPuffer, ereignis mit Rechteck-Routing wie
+  kante_bei — alle Koordinaten in Fensterinhalt-Koordinaten, kein
+  Umrechnen). `UiEreignis` (Klick/Doppelklick/Losgelassen/Bewegt/
+  Scroll/Taste/MausRein/MausRaus/FokusRein/FokusRaus); MausRein/Raus
+  erzeugt das ROUTING in den Box-Containern (hover_kind) — Widgets
+  pflegen damit ihren Hover-Zustand. `UiReaktion` ist bewusst ein
+  STRUCT (verbraucht + neu_zeichnen + nachricht sind kombinierbar).
+  App-Nachrichten als u32-ID an einen fn(u32)-Handler (KEINE
+  Closures: Borrow-Hölle; KEIN generischer Typ: macht das Trait
+  un-objektsicher) — zustandsbehaftete Apps bekommen später ein
+  App-Trait. Fokus-Kette: fokus_weiter (Blätter nehmen/geben,
+  Container iterieren ab Fokus-Kind, UiFenster wrappt bei Tab);
+  Tasten laufen den Baum entlang, bis das fokussierte Widget sie
+  verbraucht. Layout primitiv: laengen_verteilen (pure, getestet)
+  + VBox/HBox/Fueller mit METRIK.abstand, quer wird IMMER auf volle
+  Breite gestreckt — kein Constraint-Solver. Widgets: Label,
+  Trennlinie, Button (Nachricht beim LOSLASSEN im Bereich),
+  Checkbox, Textfeld (Innenleben = shell::editor::ZeilenEditor,
+  Cursor blinkt über zeit-API + Uhr-Task-Anstoß via UiFenster::
+  blinkt), ScrollListe (Rad + ziehbarer Balken + Doppelklick).
+  Doppelklick erkennt das UiFenster (500 ms, 6 px, us_seit_boot);
+  seine Nachricht hat Vorrang vor der zweiten Klick-Nachricht.
+  Fenster-Anbindung: `Inhalt::Ui(UiFenster)`; der Manager reicht
+  Klick/Losgelassen/Scroll/Bewegt (Hover! ui_hover_fenster erzeugt
+  MausRaus beim Fensterwechsel) und Tasten weiter. Ui-NACHRICHTEN
+  laufen wie App-Starts NIE unter dem MANAGER-Lock (`NachLock`-Enum
+  wird nach draußen gereicht). Der PANIC-HANDLER druckt ZUERST roh
+  seriell (println! würde im Desktop-Modus via Terminal-Umleitung
+  den MANAGER-Lock brauchen -> Deadlock bei Panik unterm Lock).
 - **Terminal-Fenster / Konsole-in-Fenster (Juli 2026):** SpeedOS bootet
   in den Desktop (main.rs ruft desktop_starten VOR dem Executor; die
   Shell druckt ihr Banner dann ins Terminal). Im Desktop-Modus leitet
