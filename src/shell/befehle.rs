@@ -141,7 +141,7 @@ impl Befehl for Ticks {
         "ticks"
     }
     fn beschreibung(&self) -> &'static str {
-        "Zeigt Timer-Ticks und Uptime (~18,2 Ticks/Sekunde)"
+        "Zeigt Timer-Ticks und Uptime (~250 Ticks/Sekunde)"
     }
     fn ausfuehren(&self, _argumente: &str, _kontext: &mut ShellKontext, _registry: &[Box<dyn Befehl>]) {
         // Alles über die zentrale Zeit-API (zeit.rs) — wenn die

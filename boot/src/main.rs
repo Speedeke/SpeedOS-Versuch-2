@@ -67,12 +67,24 @@ fn main() {
         .arg(format!("if=pflash,format=raw,file={}", vars_pfad.display()));
     qemu.arg("-drive")
         .arg(format!("format=raw,file={}", image_pfad.display()));
-    // Grafikkarte mit Wunsch-Auflösung 1280x720 (per EDID): Die
-    // UEFI-Firmware wählt dann diesen Modus, statt des riesigen
-    // Standard-Maximums — weniger Pixel = flotteres Zeichnen.
+    // Hardware-Virtualisierung: WHPX (Windows Hypervisor Platform)
+    // lässt den Kernel-Code DIREKT auf der CPU laufen statt ihn
+    // Befehl für Befehl zu übersetzen (TCG) — der Unterschied ist
+    // eine Größenordnung. Mehrere -accel werden der Reihe nach
+    // probiert: Ist WHPX nicht verfügbar (Windows-Feature aus),
+    // fällt QEMU sauber auf TCG zurück. kernel-irqchip=off, weil
+    // unser PIC/PIT von QEMU emuliert werden soll (WHPX-Eigenheit).
+    qemu.arg("-accel").arg("whpx,kernel-irqchip=off");
+    qemu.arg("-accel").arg("tcg");
+    // Grafikkarte mit Wunsch-Auflösung 1280x720 (per EDID). Der
+    // EDID-Wunsch allein reicht nicht — OVMF wählt sonst trotzdem
+    // den größten Modus (2560x1600 = 4x so viele Pixel pro Frame!).
+    // Deshalb zusätzlich vgamem_mb=4: Mit 4 MiB VRAM passen nur
+    // Modi bis 1280x720 (3,5 MiB) — die Firmware MUSS klein wählen.
     // (Der Kernel kommt trotzdem mit jeder Auflösung klar.)
     qemu.arg("-vga").arg("none");
-    qemu.arg("-device").arg("VGA,edid=on,xres=1280,yres=720");
+    qemu.arg("-device")
+        .arg("VGA,edid=on,xres=1280,yres=720,vgamem_mb=4");
     // Die serielle Schnittstelle ist unser Debug-Lebensnerv:
     // immer ins Terminal spiegeln.
     qemu.arg("-serial").arg("stdio");

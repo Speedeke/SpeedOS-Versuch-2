@@ -46,7 +46,7 @@ pub static PICS: spin::Mutex<ChainedPics> =
 #[derive(Debug, Clone, Copy)]
 #[repr(u8)]
 pub enum InterruptIndex {
-    Timer = PIC_1_OFFSET,      // 32: der PIT-Timer (tickt ~18,2x pro Sekunde)
+    Timer = PIC_1_OFFSET,      // 32: der PIT-Timer (tickt ~250x pro Sekunde)
     Keyboard,                  // 33: die PS/2-Tastatur
     Maus = PIC_2_OFFSET + 4,   // 44: die PS/2-Maus (IRQ 12, am zweiten PIC)
 }
@@ -85,16 +85,26 @@ pub fn lapic_deaktivieren() {
 }
 
 /// Programmiert den PIT (Programmable Interval Timer, Kanal 0) auf
-/// ~18,2 Interrupts pro Sekunde (Teiler 65536, Rate-Generator-Modus).
+/// ~250 Interrupts pro Sekunde (Teiler zeit::PIT_TEILER = 4773,
+/// Rate-Generator-Modus).
+///
+/// Warum 250 Hz statt der klassischen ~18,2 Hz (Teiler 65536)?
+/// zeit::warte_ms kann nur so fein warten, wie der Timer tickt —
+/// mit 55-ms-Ticks lief der Compositor effektiv mit ~18 FPS, und
+/// Fenster-Ziehen ruckelte spürbar. 4-ms-Ticks geben flüssige
+/// ~33 FPS, ohne die CPU mit Interrupts zu fluten. Der Teiler lebt
+/// in zeit.rs, damit Timer-Programmierung und ms-Umrechnung
+/// GARANTIERT denselben Wert benutzen.
 ///
 /// Lektion aus der bootloader-0.11-Migration: Unter klassischem BIOS
-/// hatte die Firmware den PIT immer schon so eingestellt — unter UEFI
+/// hatte die Firmware den PIT immer schon eingestellt — unter UEFI
 /// tut das NIEMAND für uns. Ohne diese Initialisierung feuert IRQ 0
 /// nie, und alles, was auf Timer-Ticks wartet (zeit.rs, hlt-Aufwachen,
 /// Executor-Notfallpfad), steht still. Ein OS stellt seine Uhr selbst!
 pub fn pit_initialisieren() {
     use x86_64::instructions::port::Port;
 
+    let teiler = crate::zeit::PIT_TEILER as u16;
     let mut kommando: Port<u8> = Port::new(0x43);
     let mut kanal_0: Port<u8> = Port::new(0x40);
     // unsafe (Port-I/O): Standard-PIT-Ports; die Werte sind die seit
@@ -102,8 +112,8 @@ pub fn pit_initialisieren() {
     // Modus 2 = Rate-Generator, binär).
     unsafe {
         kommando.write(0b0011_0100);
-        kanal_0.write(0x00); // Teiler Low-Byte  (0x0000 = 65536)
-        kanal_0.write(0x00); // Teiler High-Byte
+        kanal_0.write((teiler & 0xff) as u8); // Teiler Low-Byte
+        kanal_0.write((teiler >> 8) as u8); // Teiler High-Byte
     }
 }
 
@@ -208,7 +218,7 @@ extern "x86-interrupt" fn double_fault_handler(
 /// Zugriff aus dem Interrupt-Kontext niemals blockieren darf.
 static TICKS: AtomicU64 = AtomicU64::new(0);
 
-/// Wie oft der Timer seit dem Boot getickt hat (~18,2 Ticks/Sekunde).
+/// Wie oft der Timer seit dem Boot getickt hat (~250 Ticks/Sekunde).
 pub fn timer_ticks() -> u64 {
     TICKS.load(Ordering::Relaxed)
 }

@@ -7,29 +7,32 @@
 // den präzisen APIC-Timer (oder TSC) umsteigen, ändert sich nur die
 // Implementierung hier drin, kein einziger Aufrufer.
 //
-// Aktuelle Zeitquelle: der PIT (Programmable Interval Timer), wie ihn
-// das BIOS konfiguriert. Er läuft mit 1.193.182 Hz und teilt durch
-// 65.536 -> ~18,2065 Interrupts pro Sekunde, also ~54,93 ms pro Tick.
-// Das ist grob (Auflösung ~55 ms!), aber ehrlich dokumentiert und
-// für Uptime/Cursor-Blinken völlig ausreichend.
+// Aktuelle Zeitquelle: der PIT (Programmable Interval Timer), den WIR
+// in interrupts::pit_initialisieren selbst programmieren. Er läuft
+// mit 1.193.182 Hz und teilt durch PIT_TEILER (4773) -> ~250
+// Interrupts pro Sekunde, also ~4 ms pro Tick. Fein genug für einen
+// flüssigen Compositor (~33 FPS), grob genug, um die CPU nicht mit
+// Interrupts zu fluten. Für Präziseres kommt später der APIC-Timer.
 
 /// Die Basisfrequenz des PIT-Chips in Hz (Quarz seit dem Ur-PC 1981).
 const PIT_BASIS_HZ: u64 = 1_193_182;
-/// Der Teiler, mit dem das BIOS den PIT konfiguriert (Maximum).
-const PIT_TEILER: u64 = 65_536;
+/// UNSER PIT-Teiler (~250 Hz). Lebt hier, damit die Timer-
+/// Programmierung (interrupts.rs) und die ms-Umrechnung (unten)
+/// garantiert denselben Wert benutzen.
+pub(crate) const PIT_TEILER: u64 = 4_773;
 
-/// Timer-Ticks seit dem Boot (~18,2 pro Sekunde).
+/// Timer-Ticks seit dem Boot (~250 pro Sekunde).
 pub fn ticks() -> u64 {
     crate::interrupts::timer_ticks()
 }
 
-/// Millisekunden seit dem Boot — in ~55-ms-Schritten (PIT-Auflösung).
+/// Millisekunden seit dem Boot — in ~4-ms-Schritten (PIT-Auflösung).
 pub fn ms_seit_boot() -> u64 {
     ms_von_ticks(ticks())
 }
 
 /// Rechnet Ticks in Millisekunden um (reine Funktion, gut testbar):
-/// ms = ticks * Teiler * 1000 / Basisfrequenz  (~54,93 ms pro Tick).
+/// ms = ticks * Teiler * 1000 / Basisfrequenz  (~4,0 ms pro Tick).
 pub fn ms_von_ticks(ticks: u64) -> u64 {
     ticks * (PIT_TEILER * 1000) / PIT_BASIS_HZ
 }
@@ -228,7 +231,7 @@ impl Drop for NaechsterTick {
     }
 }
 
-/// Wartet asynchron ungefähr `ms` Millisekunden (Auflösung: ~55 ms,
+/// Wartet asynchron ungefähr `ms` Millisekunden (Auflösung: ~4 ms,
 /// die PIT-Tick-Länge — für Cursor-Blinken völlig ausreichend).
 pub async fn warte_ms(ms: u64) {
     let ziel = ms_seit_boot() + ms;
@@ -250,15 +253,14 @@ mod tests {
     use super::*;
 
     /// Die Umrechnung stimmt (Werte von Hand nachgerechnet:
-    /// 65.536.000 / 1.193.182 = 54,93 ms pro Tick).
+    /// 4.773.000 / 1.193.182 = 4,0002 ms pro Tick).
     #[test_case]
     fn test_ms_von_ticks() {
         assert_eq!(ms_von_ticks(0), 0);
-        assert_eq!(ms_von_ticks(1), 54);
-        assert_eq!(ms_von_ticks(100), 5492);
-        // ~18,2 Ticks sollten fast genau 1 Sekunde sein:
-        assert_eq!(ms_von_ticks(18), 988);
-        assert_eq!(ms_von_ticks(19), 1043);
+        assert_eq!(ms_von_ticks(1), 4);
+        assert_eq!(ms_von_ticks(100), 400);
+        // ~250 Ticks sollten fast genau 1 Sekunde sein:
+        assert_eq!(ms_von_ticks(250), 1000);
     }
 
     /// Die Datums-Arithmetik: Sekunden-, Tages-, Monatsübertrag.

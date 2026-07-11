@@ -103,3 +103,15 @@ harness = false
 [[test]]
 name = "async_task"
 harness = false
+
+# Der Kernel läuft auch im dev-Profil OPTIMIERT (opt-level 2): Der
+# Compositor schiebt pro Frame Millionen Pixel durch Zeichner::pixel —
+# unoptimiert dauert ein Frame hunderte Millisekunden (Maus-Lag!).
+# Debug-Infos, Overflow-Checks und debug_assert! bleiben aktiv, nur
+# der Codegen wird scharf gestellt.
+[profile.dev]
+opt-level = 2
+
+# Abhängigkeiten (Font-Rasterizer!) ebenfalls optimiert bauen:
+[profile.dev.package."*"]
+opt-level = 2

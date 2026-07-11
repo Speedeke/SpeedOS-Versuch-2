@@ -21,7 +21,7 @@
 // geht das Wecken NICHT verloren — es wird nur ungenau: Ein Notfall-
 // Flag wird gesetzt, und der Executor pollt daraufhin einmal ALLE
 // Tasks. Das kostet kurz Leistung, aber kein Task bleibt je hängen.
-// (Der Timer-Interrupt weckt die CPU spätestens nach ~55 ms aus dem
+// (Der Timer-Interrupt weckt die CPU spätestens nach ~4 ms aus dem
 // hlt, selbst wenn das Flag mitten im Einschlafen gesetzt wurde.)
 
 use super::{Task, TaskId};

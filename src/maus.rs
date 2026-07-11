@@ -248,7 +248,12 @@ pub fn initialisieren() -> bool {
         }
     }
 
-    // 5. Daten-Meldungen einschalten — ab jetzt feuert IRQ 12.
+    // 5. Abtastrate auf 200 Meldungen/s: Die Magie-Sequenz oben hat
+    //    sie auf 80 stehen lassen — für flüssige Cursor-Bewegung
+    //    wollen wir das Maximum (mehr, kleinere Deltas pro Paket).
+    let _ = maus_kommando(0xF3) && maus_kommando(200);
+
+    // 6. Daten-Meldungen einschalten — ab jetzt feuert IRQ 12.
     maus_kommando(0xF4)
 }
 

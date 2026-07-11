@@ -10,6 +10,14 @@
 ## Build & Test-Umgebung
 - Kernel-Target: das EINGEBAUTE `x86_64-unknown-none` (kein eigenes Target-JSON,
   kein build-std — rust-toolchain.toml installiert das Target automatisch).
+- **Performance-Setup (Juli 2026, gegen Maus-/Desktop-Lag):** (1) Der
+  Kernel baut auch im dev-Profil mit `opt-level = 2` (Cargo.toml) —
+  unoptimiert braucht ein Compositor-Frame hunderte ms. (2) QEMU läuft
+  mit `-accel whpx,kernel-irqchip=off -accel tcg` (Hardware-
+  Virtualisierung, TCG nur als Fallback). (3) `vgamem_mb=4` am
+  VGA-Device deckelt die Auflösung auf ~1360x768 — der EDID-Wunsch
+  allein wird von OVMF ignoriert (nimmt sonst 2560x1600). (4) PIT auf
+  250 Hz, (5) Maus-Abtastrate nach der IntelliMouse-Sequenz auf 200/s.
 - `cargo run`/`cargo test` rufen als Runner das Host-Programm **boot/** auf:
   Es baut per `bootloader::UefiBoot` das GPT-Disk-Image und startet
   **QEMU** (`qemu-system-x86_64`) mit der edk2/OVMF-Firmware aus dem
@@ -223,7 +231,9 @@
   Taste rein, Reaktion zeichnen, fertige Zeilen an die Registry.
 - **Zeit nur über `src/zeit.rs`:** ticks(), ms_seit_boot(). Niemals
   direkt den Tick-Zähler benutzen — die API-Naht erlaubt später den
-  Wechsel PIT (~55 ms Auflösung) -> APIC-Timer ohne Aufrufer-Änderung.
+  Wechsel PIT (~4 ms Auflösung, 250 Hz — Teiler zeit::PIT_TEILER,
+  denselben Wert nutzt interrupts::pit_initialisieren) -> APIC-Timer
+  ohne Aufrufer-Änderung.
 - **Heap-Allocator austauschbar:** Standard linked_list_allocator; eigene
   Lern-Allocatoren (Bump, Fixed-Size-Block) über Cargo-Features
   `bump-allocator` / `fixed-block-allocator` — gleiche init-Schnittstelle.
