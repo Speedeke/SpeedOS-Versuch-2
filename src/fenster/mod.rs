@@ -88,6 +88,25 @@ impl Zeichenflaeche for FensterPuffer {
             None
         }
     }
+    // Zeilen-Schnellpfade: Der Puffer ist ein flaches Farb-Array —
+    // Füllen und Blitten sind schlicht fill/copy auf einem Slice.
+    // (Der Zeichner hat die Bereiche vorab geclippt, trotzdem noch
+    // defensiv kappen — ein Panic im Compositor wäre fatal.)
+    fn flaeche_zeile_fuellen(&mut self, x: usize, y: usize, breite: usize, farbe: Farbe) {
+        if y >= self.hoehe || x >= self.breite {
+            return;
+        }
+        let bis = (x + breite).min(self.breite);
+        self.pixel[y * self.breite + x..y * self.breite + bis].fill(farbe);
+    }
+    fn flaeche_zeile_kopieren(&mut self, x: usize, y: usize, pixel: &[Farbe]) {
+        if y >= self.hoehe || x >= self.breite {
+            return;
+        }
+        let anzahl = pixel.len().min(self.breite - x);
+        let von = y * self.breite + x;
+        self.pixel[von..von + anzahl].copy_from_slice(&pixel[..anzahl]);
+    }
 }
 
 /// Die Inhalte, die ein Fenster darstellen kann.
@@ -1311,18 +1330,14 @@ fn fenster_komponieren<F: Zeichenflaeche>(z: &mut Zeichner<'_, F>, fenster: &Fen
         if fokussiert { thema.rahmen_aktiv } else { thema.rahmen_passiv },
     );
 
-    // Inhalt (privater Puffer, 1:1):
-    for zeile in 0..fenster.puffer.hoehe {
-        let basis = zeile * fenster.puffer.breite;
-        for spalte in 0..fenster.puffer.breite {
-            let farbe = fenster.puffer.pixel[basis + spalte];
-            z.pixel(
-                rect.x + spalte as i32,
-                rect.y + METRIK.titel_hoehe + zeile as i32,
-                Rgba::neu(farbe.r, farbe.g, farbe.b),
-            );
-        }
-    }
+    // Inhalt (privater Puffer, 1:1) — über den Blit-Schnellpfad,
+    // nicht Pixel für Pixel (Performance-Pass: ~2x schnellere Frames):
+    z.puffer_blit(
+        rect.x,
+        rect.y + METRIK.titel_hoehe,
+        fenster.puffer.breite,
+        &fenster.puffer.pixel,
+    );
 }
 
 /// Das Icon, das zu einem Fenster-Inhalt gehört (Titelleiste,
@@ -1758,6 +1773,273 @@ mod tests {
         assert_eq!(manager.fenster[index].breite(), 500);
         // Höhe = Bildschirm - Titelzeile - Taskleisten-Reserve.
         assert_eq!(manager.fenster[index].hoehe(), 800 - METRIK.titel_hoehe - METRIK.taskleiste_hoehe);
+    }
+
+    /// Koordinaten-Umrechnung Bildschirm -> Fensterinhalt: Grenzen,
+    /// Titelzeile (zählt NICHT zum Inhalt) und alle vier Ecken.
+    #[test_case]
+    fn test_koordinaten_umrechnung_grenzen() {
+        let (manager, _, vorne) = test_manager();
+        // "vorne": x=150, y=140, Inhalt 220x100, Titel 30 hoch.
+        // Inhalt beginnt bei (150, 170):
+        assert_eq!(manager.fenster_lokal(vorne, 150, 170), Some((0, 0)));
+        // Letzter Inhalts-Pixel (369, 269):
+        assert_eq!(manager.fenster_lokal(vorne, 369, 269), Some((219, 99)));
+        // Direkt dahinter: draußen.
+        assert_eq!(manager.fenster_lokal(vorne, 370, 269), None);
+        assert_eq!(manager.fenster_lokal(vorne, 369, 270), None);
+        // Titelzeile (y 140..169): KEIN Inhalt.
+        assert_eq!(manager.fenster_lokal(vorne, 200, 169), None);
+        // Links neben dem Fenster: draußen.
+        assert_eq!(manager.fenster_lokal(vorne, 149, 170), None);
+    }
+
+    /// Resize-Zonen (kante_bei): Kanten, Ecken, Innenfläche.
+    #[test_case]
+    fn test_resize_kanten_zonen() {
+        let (manager, _, vorne) = test_manager();
+        let f = &manager.fenster[manager.index_von(vorne).unwrap()];
+        // Gesamt: x 150..370, y 140..270, Randzone 6 Pixel.
+        assert_eq!(FensterManager::kante_bei(f, 152, 200), Some(Kante::Links));
+        assert_eq!(FensterManager::kante_bei(f, 368, 200), Some(Kante::Rechts));
+        assert_eq!(FensterManager::kante_bei(f, 250, 268), Some(Kante::Unten));
+        assert_eq!(FensterManager::kante_bei(f, 152, 268), Some(Kante::UntenLinks));
+        assert_eq!(FensterManager::kante_bei(f, 368, 268), Some(Kante::UntenRechts));
+        // Mitte: keine Kante.
+        assert_eq!(FensterManager::kante_bei(f, 250, 200), None);
+    }
+
+    /// Z-Ordnung: fokussieren_und_heben bringt das Fenster ans
+    /// Vec-Ende (= ganz vorne), die anderen rutschen nach.
+    #[test_case]
+    fn test_z_ordnung_heben() {
+        let (mut manager, hinten, vorne) = test_manager();
+        assert_eq!(manager.fenster.last().unwrap().id, vorne);
+        manager.fokussieren_und_heben(hinten);
+        assert_eq!(manager.fenster.last().unwrap().id, hinten);
+        assert_eq!(manager.fenster[0].id, vorne);
+        // Ein drittes Fenster kommt IMMER ganz nach vorne:
+        let neu = manager.fenster_erstellen("Neu", 500, 500, 220, 100, Inhalt::Uhr);
+        assert_eq!(manager.fenster.last().unwrap().id, neu);
+        assert_eq!(manager.fokus(), Some(neu));
+    }
+
+    /// Dirty-Flag-Logik: Nur echte Änderungen stoßen ein neues
+    /// Komponieren an — und dirty_zuruecksetzen räumt vollständig auf.
+    #[test_case]
+    fn test_dirty_flags() {
+        let (mut manager, _, _) = test_manager();
+        assert!(manager.ist_dirty()); // frisch erstellt
+        manager.dirty_zuruecksetzen();
+        assert!(!manager.ist_dirty());
+
+        // Mausbewegung OHNE Drag ändert nichts:
+        manager.maus_event(&MausEvent::Bewegt { x: 500, y: 500 }, 500, 500);
+        assert!(!manager.ist_dirty());
+
+        // Tastatur ins fokussierte TastaturEcho-Fenster: nur DAS
+        // Fenster wird dirty (kein alles_dirty):
+        manager.taste_event(DecodedKey::Unicode('x'));
+        assert!(manager.ist_dirty());
+        assert!(!manager.alles_dirty);
+        manager.dirty_zuruecksetzen();
+
+        // Fenster-Drag setzt alles_dirty (Hintergrund wird frei):
+        manager.maus_event(&MausEvent::Gedrueckt(MausTaste::Links), 200, 150);
+        manager.maus_event(&MausEvent::Bewegt { x: 220, y: 160 }, 220, 160);
+        assert!(manager.alles_dirty);
+        manager.maus_event(&MausEvent::Losgelassen(MausTaste::Links), 220, 160);
+        manager.dirty_zuruecksetzen();
+
+        // Uhr-Update: erst beim SEKUNDENWECHSEL wird neu komponiert
+        // (die Test-Fenster enthalten ein Uhr-Fenster, das immer
+        // dirty wird — deshalb nur alles_dirty prüfen):
+        manager.letzte_uhr_sekunde = zeit::ms_seit_boot() / 1000;
+        manager.uhr_aktualisieren();
+        assert!(!manager.alles_dirty);
+        manager.letzte_uhr_sekunde = u64::MAX; // erzwungener "Wechsel"
+        manager.uhr_aktualisieren();
+        assert!(manager.alles_dirty);
+    }
+
+    /// Theme-Umschaltung: inhalt_zeichnen übernimmt die neuen Farben
+    /// wirklich in den Fenster-Puffer (und zurück).
+    #[test_case]
+    fn test_theme_umschaltung_faerbt_inhalte() {
+        let mut manager = FensterManager::neu(1000, 800);
+        let id = manager.fenster_erstellen("Farbe", 10, 10, 220, 100, Inhalt::Uhr);
+        let index = manager.index_von(id).unwrap();
+
+        let vorher = theme::aktuell().inhalt_hintergrund;
+        assert_eq!(manager.fenster[index].puffer.pixel[0], vorher);
+
+        let nachher = theme::umschalten().inhalt_hintergrund;
+        assert_ne!(vorher, nachher, "Themes muessen sich unterscheiden");
+        inhalt_zeichnen(&mut manager.fenster[index]);
+        assert_eq!(manager.fenster[index].puffer.pixel[0], nachher);
+
+        // Zurückschalten (globalen Zustand nicht verändert hinterlassen!):
+        theme::umschalten();
+        inhalt_zeichnen(&mut manager.fenster[index]);
+        assert_eq!(manager.fenster[index].puffer.pixel[0], vorher);
+    }
+
+    /// Die Zeilen-Schnellpfade respektieren Clipping und Ränder
+    /// exakt wie der Pro-Pixel-Weg.
+    #[test_case]
+    fn test_schnellpfade_clipping() {
+        use crate::grafik::{Rechteck, Rgba, Zeichner};
+
+        let mut puffer = FensterPuffer::neu(20, 10, Farbe::neu(0, 0, 0));
+        let rot = Farbe::neu(255, 0, 0);
+        let mut z = Zeichner::neu(&mut puffer);
+
+        // Voll deckendes Rechteck mit Clip: nur der Schnitt wird rot.
+        z.clip_setzen(Some(Rechteck::neu(5, 2, 6, 4)));
+        z.rechteck_fuellen(Rechteck::neu(0, 0, 20, 10), Rgba::neu(255, 0, 0));
+        z.clip_setzen(None);
+        assert_eq!(puffer.pixel[0], Farbe::neu(0, 0, 0)); // (0,0) außerhalb
+        assert_eq!(puffer.pixel[2 * 20 + 5], rot); // (5,2) im Clip
+        assert_eq!(puffer.pixel[5 * 20 + 10], rot); // (10,5) im Clip
+        assert_eq!(puffer.pixel[6 * 20 + 5], Farbe::neu(0, 0, 0)); // (5,6) darunter
+
+        // Blit teils außerhalb der Fläche: wird sauber abgeschnitten.
+        let gruen = Farbe::neu(0, 255, 0);
+        let quelle = vec![gruen; 8 * 4]; // 8x4-Puffer
+        let mut z = Zeichner::neu(&mut puffer);
+        z.puffer_blit(16, 8, 8, &quelle); // ragt rechts+unten hinaus
+        assert_eq!(puffer.pixel[8 * 20 + 16], gruen); // (16,8) sichtbar
+        assert_eq!(puffer.pixel[9 * 20 + 19], gruen); // (19,9) letzte Ecke
+        assert_eq!(puffer.pixel[7 * 20 + 16], Farbe::neu(0, 0, 0)); // darüber unberührt
+    }
+
+    /// SPEICHER-PASS: Fenster (auch Terminal) in Schleife öffnen und
+    /// schließen darf den Heap nicht wachsen lassen — jedes Schließen
+    /// muss Puffer UND Terminal-Raster vollständig freigeben.
+    #[test_case]
+    fn test_fenster_schleife_leckt_nicht() {
+        let mut manager = FensterManager::neu(1000, 800);
+
+        let runde = |manager: &mut FensterManager| {
+            let id = manager.fenster_erstellen("Leck-Test", 50, 50, 300, 200, Inhalt::Uhr);
+            manager.knopf_aktion(id, Knopf::Schliessen);
+            manager.terminal_oeffnen();
+            let terminal_id = manager.fenster[manager.terminal_index().unwrap()].id;
+            manager.terminal_schreiben(format_args!("ein paar Zeichen\n"), Farbe::neu(1, 1, 1), Farbe::neu(0, 0, 0));
+            manager.knopf_aktion(terminal_id, Knopf::Schliessen);
+        };
+
+        // Aufwärmen: Vec-Kapazitäten, Allocator-Blocklisten usw.
+        // dürfen sich EINMAL einpendeln.
+        for _ in 0..3 {
+            runde(&mut manager);
+        }
+        let vorher = crate::allocator::heap_statistik().map(|(belegt, _)| belegt);
+
+        for _ in 0..30 {
+            runde(&mut manager);
+        }
+        let nachher = crate::allocator::heap_statistik().map(|(belegt, _)| belegt);
+
+        // (Lern-Allocatoren ohne Statistik überspringen den Vergleich.)
+        if let (Some(vorher), Some(nachher)) = (vorher, nachher) {
+            assert!(
+                nachher <= vorher,
+                "Heap waechst beim Fenster-Zyklus: {} -> {} Bytes",
+                vorher,
+                nachher
+            );
+        }
+    }
+
+    /// MESSUNG (kein Pass/Fail): Frame-Zeit des Compositors bei
+    /// 3 offenen Fenstern + Mausbewegung (Drag setzt alles_dirty wie
+    /// im echten Betrieb). Ausgabe in ms/Frame über die serielle
+    /// Konsole — die Vergleichszahlen stehen im CHANGELOG.
+    #[test_case]
+    fn messung_compositor_frame_zeit() {
+        use crate::serial_println;
+
+        if !framebuffer::ist_initialisiert() {
+            serial_println!("[MESSUNG] uebersprungen (kein Framebuffer)");
+            return;
+        }
+        let (breite, hoehe) = framebuffer::mit_framebuffer(|fb| {
+            (fb.info().width as i32, fb.info().height as i32)
+        })
+        .unwrap();
+        let mut manager = FensterManager::neu(breite, hoehe);
+        manager.fenster_erstellen("Uhr", 140, 120, 420, 150, Inhalt::Uhr);
+        manager.fenster_erstellen(
+            "Tastatur", 420, 320, 560, 140,
+            Inhalt::TastaturEcho { text: String::new() },
+        );
+        manager.fenster_erstellen(
+            "Grafik", 700, 200, 380, 220,
+            Inhalt::Malflaeche { klicks: Vec::new() },
+        );
+
+        // Fenster an der Titelzeile greifen (700..,200..) und pro
+        // Frame ein Stück ziehen — wie eine echte Mausbewegung:
+        manager.maus_event(&MausEvent::Gedrueckt(MausTaste::Links), 720, 210);
+        const FRAMES: u64 = 40;
+        let start = zeit::ticks();
+        for i in 0..FRAMES {
+            let x = 720 - (i as i32 % 20) * 4;
+            manager.maus_event(&MausEvent::Bewegt { x, y: 210 }, x, 210);
+            framebuffer::mit_framebuffer(|fb| {
+                manager.komponieren(fb);
+                fb.present();
+            });
+            manager.dirty_zuruecksetzen();
+        }
+        let dauer_ms = zeit::ms_von_ticks(zeit::ticks() - start);
+        serial_println!(
+            "[MESSUNG] Compositor: {} Frames in {} ms  ->  {},{:02} ms/Frame",
+            FRAMES,
+            dauer_ms,
+            dauer_ms / FRAMES,
+            (dauer_ms * 100 / FRAMES) % 100
+        );
+        manager.maus_event(&MausEvent::Losgelassen(MausTaste::Links), 640, 210);
+
+        // A/B-Vergleich der Kern-Optimierung: EIN Fenster-Inhalt
+        // (560x140) 100x auf den Bildschirm — alter Weg (Pro-Pixel
+        // durch Zeichner::pixel) gegen neuen Blit-Schnellpfad.
+        // WICHTIG: ticks() MUSS außerhalb von mit_framebuffer gelesen
+        // werden — darin sind Interrupts aus, der Zähler steht still!
+        let puffer = FensterPuffer::neu(560, 140, Farbe::neu(30, 40, 50));
+        let start = zeit::ticks();
+        for _ in 0..100 {
+            framebuffer::mit_framebuffer(|fb| {
+                let mut z = Zeichner::neu(fb);
+                for zeile in 0..puffer.hoehe {
+                    let basis = zeile * puffer.breite;
+                    for spalte in 0..puffer.breite {
+                        let farbe = puffer.pixel[basis + spalte];
+                        z.pixel(
+                            100 + spalte as i32,
+                            100 + zeile as i32,
+                            Rgba::neu(farbe.r, farbe.g, farbe.b),
+                        );
+                    }
+                }
+            });
+        }
+        let alt_ms = zeit::ms_von_ticks(zeit::ticks() - start);
+        let start = zeit::ticks();
+        for _ in 0..100 {
+            framebuffer::mit_framebuffer(|fb| {
+                let mut z = Zeichner::neu(fb);
+                z.puffer_blit(100, 100, puffer.breite, &puffer.pixel);
+            });
+        }
+        let neu_ms = zeit::ms_von_ticks(zeit::ticks() - start);
+        serial_println!(
+            "[MESSUNG] Fenster-Blit 560x140, 100 Durchlaeufe: Pro-Pixel {} ms, Zeilenkopie {} ms",
+            alt_ms,
+            neu_ms
+        );
     }
 
     /// Terminal: einmal öffnen, danach nur noch fokussieren; Schreiben

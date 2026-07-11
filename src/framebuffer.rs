@@ -122,6 +122,65 @@ impl DoppelPuffer {
         }
     }
 
+    /// Füllt einen TEIL einer Pixelzeile schnell (Muster verdoppelnd
+    /// kopieren statt Pixel für Pixel) — der Zeilen-Schnellpfad des
+    /// Zeichners. Koordinaten außerhalb werden abgeschnitten.
+    pub fn zeile_teil_fuellen(&mut self, x: usize, y: usize, breite: usize, farbe: Farbe) {
+        if y >= self.info.height || x >= self.info.width {
+            return;
+        }
+        let breite = breite.min(self.info.width - x);
+        if breite == 0 {
+            return;
+        }
+        let bpp = self.info.bytes_per_pixel;
+        // Erstes Pixel setzen (übernimmt die Formatwandlung) ...
+        self.pixel_setzen(x, y, farbe);
+        // ... dann verdoppelnd über den Zeilenausschnitt kopieren:
+        let von = (y * self.info.stride + x) * bpp;
+        let ausschnitt = &mut self.hinten[von..von + breite * bpp];
+        let mut gefuellt = bpp;
+        while gefuellt < ausschnitt.len() {
+            let kopieren = gefuellt.min(ausschnitt.len() - gefuellt);
+            ausschnitt.copy_within(0..kopieren, gefuellt);
+            gefuellt += kopieren;
+        }
+    }
+
+    /// Kopiert eine fertige Farbzeile in den Back-Buffer — Format-
+    /// wandlung EINMAL pro Zeile entscheiden, dann eng schleifen
+    /// (der Blit-Schnellpfad für Fenster-Inhalte im Compositor).
+    pub fn zeile_kopieren(&mut self, x: usize, y: usize, pixel: &[Farbe]) {
+        if y >= self.info.height || x >= self.info.width {
+            return;
+        }
+        let anzahl = pixel.len().min(self.info.width - x);
+        let bpp = self.info.bytes_per_pixel;
+        let von = (y * self.info.stride + x) * bpp;
+        let ziel = &mut self.hinten[von..von + anzahl * bpp];
+        match self.info.pixel_format {
+            PixelFormat::Rgb => {
+                for (ziel, farbe) in ziel.chunks_exact_mut(bpp).zip(pixel) {
+                    ziel[0] = farbe.r;
+                    ziel[1] = farbe.g;
+                    ziel[2] = farbe.b;
+                }
+            }
+            PixelFormat::Bgr => {
+                for (ziel, farbe) in ziel.chunks_exact_mut(bpp).zip(pixel) {
+                    ziel[0] = farbe.b;
+                    ziel[1] = farbe.g;
+                    ziel[2] = farbe.r;
+                }
+            }
+            _ => {
+                for (ziel, farbe) in ziel.chunks_exact_mut(bpp).zip(pixel) {
+                    ziel.fill(((farbe.r as u16 + farbe.g as u16 + farbe.b as u16) / 3) as u8);
+                }
+            }
+        }
+    }
+
     /// Füllt den ganzen Back-Buffer mit einer Farbe.
     pub fn fuellen(&mut self, farbe: Farbe) {
         for y in 0..self.info.height {

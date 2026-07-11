@@ -59,8 +59,9 @@ kommen aus dem zentralen Theme-Modul, nur das Terminal bleibt bewusst dunkel.*
   App-Registry und Live-Suche (Super-Taste), PS/2-Maus, Snap, Alt+Tab
 - **Dateisystem:** RAM-Dateisystem hinter einer VFS-Abstraktion
   (Trait `FileSystem`) — vorbereitet für FAT32/Disk-Dateisysteme
-- **Tests:** 30 Integrationstests, die als eigene Mini-Kernel in QEMU
-  booten und QEMU mit Erfolgs-/Fehlercode beenden
+- **Tests:** 60+ Unit-/Integrationstests, die als eigene Mini-Kernel
+  in QEMU booten (inkl. Frame-Zeit-Messung, Speicherleck-Test und
+  Clipping-Prüfung der Grafik-Schnellpfade)
 
 ## Bauen & Starten
 
@@ -100,6 +101,9 @@ automatisch passend:
 $env:SPEEDOS_AUFLOESUNG="4k"; cargo run        # PowerShell
 SPEEDOS_AUFLOESUNG=1080p cargo run             # bash
 ```
+
+![4K-Desktop](docs/screenshots/desktop-4k.png)
+*Derselbe Desktop in 4096x2160 — der Kernel ist auflösungsunabhängig.*
 
 Presets: `720p`, `1080p`, `1200p`, `2k`/`1440p`, `1600p`, `4k`,
 `5k`, `8k` — oder frei als `BREITExHOEHE` (z. B. `1600x900`).

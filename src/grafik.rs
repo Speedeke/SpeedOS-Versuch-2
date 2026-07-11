@@ -114,6 +114,28 @@ pub trait Zeichenflaeche {
     fn flaeche_hoehe(&self) -> usize;
     fn flaeche_setzen(&mut self, x: usize, y: usize, farbe: Farbe);
     fn flaeche_lesen(&self, x: usize, y: usize) -> Option<Farbe>;
+
+    // Die zwei ZEILEN-Schnellpfade (Performance-Pass): Der Zeichner
+    // clippt Rechtecke VORAB und ruft dann diese Methoden — ohne
+    // Bounds-/Clip-/Alpha-Prüfung pro Pixel. Die Default-
+    // Implementierungen bleiben korrekt (einzeln setzen); Flächen mit
+    // schnellerem Speicherlayout überschreiben sie (memcpy/fill).
+    // VORAUSSETZUNG (stellt der Zeichner sicher): [x, x+breite) und y
+    // liegen komplett innerhalb der Fläche.
+
+    /// Füllt `breite` Pixel einer Zeile mit einer Farbe.
+    fn flaeche_zeile_fuellen(&mut self, x: usize, y: usize, breite: usize, farbe: Farbe) {
+        for dx in 0..breite {
+            self.flaeche_setzen(x + dx, y, farbe);
+        }
+    }
+
+    /// Kopiert eine fertige Farbzeile (Blit) an Position (x, y).
+    fn flaeche_zeile_kopieren(&mut self, x: usize, y: usize, pixel: &[Farbe]) {
+        for (dx, &farbe) in pixel.iter().enumerate() {
+            self.flaeche_setzen(x + dx, y, farbe);
+        }
+    }
 }
 
 impl Zeichenflaeche for DoppelPuffer {
@@ -128,6 +150,12 @@ impl Zeichenflaeche for DoppelPuffer {
     }
     fn flaeche_lesen(&self, x: usize, y: usize) -> Option<Farbe> {
         self.pixel_lesen(x, y)
+    }
+    fn flaeche_zeile_fuellen(&mut self, x: usize, y: usize, breite: usize, farbe: Farbe) {
+        self.zeile_teil_fuellen(x, y, breite, farbe);
+    }
+    fn flaeche_zeile_kopieren(&mut self, x: usize, y: usize, pixel: &[Farbe]) {
+        self.zeile_kopieren(x, y, pixel);
     }
 }
 
@@ -202,12 +230,67 @@ impl<'a, F: Zeichenflaeche> Zeichner<'a, F> {
         }
     }
 
-    /// Gefülltes Rechteck.
+    /// Rechteck ∩ Clip ∩ Fläche — das Vorab-Clipping der zeilenweisen
+    /// Schnellpfade: Danach ist GARANTIERT jede Zeile komplett gültig
+    /// und die Zeilen-Methoden brauchen keine Pro-Pixel-Prüfung mehr.
+    fn sichtbar(&self, rect: Rechteck) -> Option<Rechteck> {
+        let flaeche = Rechteck::neu(
+            0,
+            0,
+            self.fb.flaeche_breite() as i32,
+            self.fb.flaeche_hoehe() as i32,
+        );
+        let geschnitten = rect.schneiden(&flaeche)?;
+        match &self.clip {
+            Some(clip) => geschnitten.schneiden(clip),
+            None => Some(geschnitten),
+        }
+    }
+
+    /// Gefülltes Rechteck. Voll deckende Farben laufen über den
+    /// Zeilen-Schnellpfad (Clipping vorab, kein Pro-Pixel-Branch);
+    /// nur Alpha braucht den Pixel-für-Pixel-Weg (Untergrund lesen).
     pub fn rechteck_fuellen(&mut self, rect: Rechteck, farbe: Rgba) {
+        if farbe.a == 255 {
+            if let Some(ziel) = self.sichtbar(rect) {
+                for y in ziel.y..ziel.y + ziel.hoehe {
+                    self.fb.flaeche_zeile_fuellen(
+                        ziel.x as usize,
+                        y as usize,
+                        ziel.breite as usize,
+                        farbe.rgb(),
+                    );
+                }
+            }
+            return;
+        }
         for y in rect.y..rect.y + rect.hoehe {
             for x in rect.x..rect.x + rect.breite {
                 self.pixel(x, y, farbe);
             }
+        }
+    }
+
+    /// Blittet einen kompletten Farb-Puffer (zeilenweise, breite*hoehe
+    /// Einträge) — DER schnelle Weg, mit dem der Compositor die
+    /// privaten Fenster-Puffer auf den Bildschirm bringt: Clipping
+    /// vorab, dann eine Zeilen-Kopie pro Zeile.
+    pub fn puffer_blit(&mut self, x: i32, y: i32, breite: usize, pixel: &[Farbe]) {
+        if breite == 0 {
+            return;
+        }
+        let hoehe = (pixel.len() / breite) as i32;
+        let ziel = match self.sichtbar(Rechteck::neu(x, y, breite as i32, hoehe)) {
+            Some(ziel) => ziel,
+            None => return,
+        };
+        for zeile in ziel.y..ziel.y + ziel.hoehe {
+            let quelle_von = (zeile - y) as usize * breite + (ziel.x - x) as usize;
+            self.fb.flaeche_zeile_kopieren(
+                ziel.x as usize,
+                zeile as usize,
+                &pixel[quelle_von..quelle_von + ziel.breite as usize],
+            );
         }
     }
 
@@ -285,19 +368,28 @@ impl<'a, F: Zeichenflaeche> Zeichner<'a, F> {
     }
 
     /// Vertikaler Farbverlauf über ein Rechteck (oben -> unten) —
-    /// für Titelleisten und den Desktop-Hintergrund.
+    /// für Titelleisten und den Desktop-Hintergrund. Läuft zeilenweise
+    /// über den Schnellpfad (jede Zeile hat ja EINE Farbe).
     pub fn verlauf_vertikal(&mut self, rect: Rechteck, oben: Farbe, unten: Farbe) {
-        for zeile in 0..rect.hoehe {
+        let ziel = match self.sichtbar(rect) {
+            Some(ziel) => ziel,
+            None => return,
+        };
+        for y in ziel.y..ziel.y + ziel.hoehe {
+            // t bezieht sich aufs UNGESCHNITTENE Rechteck, damit der
+            // Verlauf beim Clipping nicht "springt":
+            let zeile = y - rect.y;
             let t = if rect.hoehe > 1 {
                 (zeile * 255 / (rect.hoehe - 1)) as u8
             } else {
                 0
             };
-            let farbe = oben.mischen(unten, t);
-            let rgba = Rgba::neu(farbe.r, farbe.g, farbe.b);
-            for x in rect.x..rect.x + rect.breite {
-                self.pixel(x, rect.y + zeile, rgba);
-            }
+            self.fb.flaeche_zeile_fuellen(
+                ziel.x as usize,
+                y as usize,
+                ziel.breite as usize,
+                oben.mischen(unten, t),
+            );
         }
     }
 

@@ -128,6 +128,20 @@
   -> async maus_task (Tastatur-Muster). Cursor = Overlay NUR im
   Front-Buffer: Der Back-Buffer bleibt die "Wahrheit ohne Cursor",
   Wiederherstellen = present_bereich der alten Position.
+- **Grafik-Schnellpfade (Juli 2026, Qualitäts-Pass):** Das
+  Zeichenflaeche-Trait hat zwei ZEILEN-Methoden (flaeche_zeile_fuellen,
+  flaeche_zeile_kopieren) mit korrekten Pro-Pixel-Defaults; DoppelPuffer
+  und FensterPuffer überschreiben sie speicher-nah. Der Zeichner clippt
+  dafür VORAB rechteckig (sichtbar() = Rechteck ∩ Clip ∩ Fläche) —
+  deckendes rechteck_fuellen, verlauf_vertikal und puffer_blit (der
+  Compositor-Blit für Fensterinhalte) laufen also OHNE Prüfungen pro
+  Pixel. Alpha bleibt auf dem Pixel-Pfad (muss den Untergrund lesen).
+  Frame-Zeit-Messung: fenster::tests::messung_compositor_frame_zeit
+  (Berichts-Test, Zahlen im CHANGELOG). ACHTUNG Mess-Falle: ticks()
+  steht in mit_framebuffer/without_interrupts STILL (PIT-IRQ maskiert,
+  nur 1 Tick wird nachgeliefert) — Zeit immer AUSSERHALB nehmen; bei
+  Frames > 4 ms geht dadurch sogar die Systemuhr nach (bekannte
+  Schwachstelle, langfristig TSC/HPET als Zeitquelle).
 - **Zeichen-Werkzeuge (Juli 2026):** `grafik.rs` = Zeichner auf dem
   Back-Buffer mit optionalem Clip-Rechteck und Alpha-Blending (alle
   Pixel laufen durch EINEN Pfad: Zeichner::pixel). Clipping-Schnitt

@@ -5,6 +5,26 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### Geändert (Qualitäts-Pass Grafik-Schicht)
+- Zeilen-Schnellpfade in der Zeichenflaeche: flaeche_zeile_fuellen /
+  flaeche_zeile_kopieren (Default korrekt pro Pixel; DoppelPuffer
+  per Muster-Verdopplung/Formatwandlung einmal pro Zeile,
+  FensterPuffer per slice fill/copy). Der Zeichner clippt Rechtecke
+  VORAB (sichtbar = Rechteck ∩ Clip ∩ Fläche) — rechteck_fuellen
+  (deckend), verlauf_vertikal und der neue puffer_blit laufen ohne
+  Pro-Pixel-Prüfungen; der Compositor blittet Fenster-Inhalte damit
+- Gemessen (1360x768, 3 Fenster + Drag, WHPX): 2,30 -> 1,20 ms/Frame
+  im Erstlauf, eingeschwungen 0,40 ms/Frame; isolierter Fenster-Blit
+  (560x140, 100x): 12 ms -> unter der 4-ms-Tick-Auflösung
+- 8 neue Unit-Tests: Koordinaten-Grenzen, Resize-Zonen, Z-Ordnung,
+  Dirty-Flag-Logik, Theme-Umschaltung färbt Puffer, Schnellpfad-
+  Clipping, Speicherleck-Schleife (Fenster+Terminal öffnen/schließen),
+  Frame-Zeit-Messung (Berichts-Test)
+- Speicher-Pass: kein Leck gefunden (Heap-Belegung nach 30 Zyklen
+  Fenster+Terminal öffnen/schließen unverändert)
+- unsafe-Audit: Serie 2 (Theme, Taskleiste, Startmenü, Terminal,
+  Schnellpfade) kommt komplett OHNE neue unsafe-Blöcke aus
+
 ### Hinzugefügt (Auflösungswahl 720p bis 4K)
 - SPEEDOS_AUFLOESUNG wählt den Grafikmodus (720p Standard, 1080p,
   1200p, 2k, 1600p, 4k, 5k, 8k oder frei BREITExHOEHE) — der Runner
