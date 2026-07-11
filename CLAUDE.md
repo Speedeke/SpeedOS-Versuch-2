@@ -126,11 +126,56 @@
   ersten iretq (gdt.rs). (2) Den PIT selbst programmieren — UEFI tut es
   nicht (interrupts.rs). (3) PIC-Masken explizit setzen — OVMF übergibt
   alles maskiert; LAPIC deaktivieren für die Pre-APIC-Verdrahtung (lib.rs).
+- **Theme-System (Juli 2026):** `src/theme.rs` = `Theme` (ALLE UI-Farben;
+  zwei Instanzen: AURORA_DUNKEL Standard, AURORA_HELL) + `METRIK` (alle
+  Abstände/Schriftgrößen, in beiden Themes gleich). Aktives Theme über
+  AtomicBool, `theme::aktuell()` ist lockfrei (wird unter gehaltenen
+  Locks im Compositor gerufen). SEITDEM GILT: KEINE hartcodierten Farben
+  oder Abstände in UI-Code — alles über theme::aktuell()/METRIK.
+  Wechsel via `fenster::theme_wechseln()` (schaltet um UND rendert alle
+  Fenster-Inhalte neu). Das Terminal bleibt bewusst in beiden Themes
+  dunkel (Shell-Farben sind auf dunklen Grund abgestimmt, Zellen-
+  Hintergrund == Color::Black == theme.terminal_hintergrund).
+- **Taskleiste & Startmenü (Juli 2026):** Der Compositor zeichnet die
+  Taskleiste NACH den Fenstern (immer im Vordergrund), das Startmenü
+  darüber; Klicks prüfen dieselbe Reihenfolge (Menü -> Leiste ->
+  Fenster). Fenster-Knöpfe sind nach FensterId (= Erstellungsreihen-
+  folge) sortiert, damit sie beim Fokuswechsel nicht springen; Klick =
+  Fokus/Minimieren-Toggle. Uhr+Datum leitet `zeit::datum_nach` aus den
+  Ticks ab (fester Boot-Zeitpunkt als Platzhalter — RTC/CMOS-Kalibrierung
+  ist bekanntes TODO); neu komponiert wird nur beim Sekundenwechsel.
+- **App-Registry (Juli 2026):** `src/apps.rs` — jede App = Name + Icon +
+  `start: fn()`. Das Startmenü filtert die Liste live (Suchfeld, Basis
+  der späteren Schnellsuche); Bedienung per Maus UND Tastatur (Tippen,
+  Pfeile, Enter; Super-Taste öffnet — Abgriff im KeyStream wie Alt+Tab).
+  WICHTIG (Deadlock-Regel): Start-Funktionen werden NIE unter dem
+  MANAGER-Lock gerufen — Manager-Methoden geben die fn() als
+  Rückgabewert nach draußen, die Wrapper in fenster/mod.rs führen sie
+  nach dem Loslassen aus. Neue App = Start-Funktion + ein Eintrag in
+  APPS, fertig.
+- **Terminal-Fenster / Konsole-in-Fenster (Juli 2026):** SpeedOS bootet
+  in den Desktop (main.rs ruft desktop_starten VOR dem Executor; die
+  Shell druckt ihr Banner dann ins Terminal). Im Desktop-Modus leitet
+  `konsole::_print` JEDE print!-Ausgabe ins Terminal-Fenster um
+  (`fenster/terminal.rs` = reines, unit-getestetes Text-Raster mit
+  Zellen/Cursor/Scrolling; Resize behält die UNTEREN Zeilen). Die
+  serielle Doppel-Ausgabe bleibt unberührt. Gerendert wird GEBÜNDELT:
+  terminal_schreiben setzt nur `inhalt_neu`, der Compositor ruft einmal
+  pro Frame `inhalte_rendern()`. Tastatur-Routing: Ist das Terminal
+  fokussiert, verarbeitet die Shell die Taste SELBST (ZeilenEditor),
+  sonst geht sie ans Fenster; Startmenü-Tasten davor. clear leert das
+  Raster, der Konsolen-Cursor bleibt im Desktop-Modus aus (Terminal
+  zeichnet seinen eigenen). `shell::prompt_nachholen()` (cwd-Spiegel)
+  druckt den Prompt, wenn die Terminal-App ein frisches Fenster öffnet.
 - **Deadlock-Regeln:** (1) Ausgabe-Locks (WRITER, SERIAL1) werden nur mit
   deaktivierten Interrupts gehalten (`without_interrupts` in den _print-
   Funktionen). (2) Interrupt-Handler sind minimal: nie blockieren, nie
   allokieren, nie printen — Daten in lock-freie Queues, Verarbeitung in
   async Tasks (siehe Tastatur). (3) `fs::mit_fs()` nie verschachteln.
+  (4) Lock-Ordnung KONSOLE -> FRAMEBUFFER -> MANAGER (die Terminal-
+  Umleitung nimmt KONSOLE dann MANAGER, der Compositor FRAMEBUFFER dann
+  MANAGER — nie andersherum). (5) App-Start-Funktionen nie unter dem
+  MANAGER-Lock ausführen (siehe App-Registry).
 - **Globale Speicher-API (Juli 2026):** Mapper und Frame-Allocator leben als
   globale `Mutex<Option<...>>` in `src/memory.rs` (Muster wie das VFS) —
   NICHT als Locals in kernel_main. Zugriff NUR über die API (map_page,

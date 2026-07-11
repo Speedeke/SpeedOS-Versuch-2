@@ -18,6 +18,8 @@
 //     Tastatur -> fokussiertes Fenster. Alt+Tab -> Fensterwechsler.
 //     Ziehen an den Bildschirmrand -> halbe Fläche (Snap).
 
+pub mod terminal;
+
 use crate::framebuffer::{self, Farbe};
 use crate::grafik::{Rechteck, Rgba, Zeichenflaeche, Zeichner};
 use crate::maus::{self, MausEvent, MausTaste};
@@ -88,8 +90,10 @@ impl Zeichenflaeche for FensterPuffer {
     }
 }
 
-/// Die Demo-Inhalte der Test-Fenster.
+/// Die Inhalte, die ein Fenster darstellen kann.
 pub enum Inhalt {
+    /// Die SpeedShell als Fenster (konsole::_print leitet hierher um).
+    Terminal(terminal::Terminal),
     Uhr,
     TastaturEcho { text: String },
     Malflaeche { klicks: Vec<(i32, i32)> },
@@ -132,6 +136,10 @@ pub struct Fenster {
     puffer: FensterPuffer,
     inhalt: Inhalt,
     dirty: bool,
+    /// Der Inhalt hat sich geändert und muss VOR dem nächsten
+    /// Komponieren neu in den Puffer gerendert werden (gebündelt pro
+    /// Frame — ein Terminal rendert nicht bei jedem print! neu).
+    inhalt_neu: bool,
     minimiert: bool,
     /// Vor dem Maximieren/Snappen gespeicherte Geometrie (Rückkehr).
     vorher: Option<(i32, i32, usize, usize)>,
@@ -281,6 +289,7 @@ impl FensterManager {
             puffer: FensterPuffer::neu(breite, hoehe, theme::aktuell().inhalt_hintergrund),
             inhalt,
             dirty: true,
+            inhalt_neu: false,
             minimiert: false,
             vorher: None,
         };
@@ -394,6 +403,97 @@ impl FensterManager {
             self.fokussieren_und_heben(id);
         }
         self.alles_dirty = true;
+    }
+
+    // ----- Terminal (die SpeedShell als Fenster) -----
+
+    /// Index des (einzigen) Terminal-Fensters.
+    fn terminal_index(&self) -> Option<usize> {
+        self.fenster
+            .iter()
+            .position(|f| matches!(f.inhalt, Inhalt::Terminal(_)))
+    }
+
+    /// Öffnet das Terminal-Fenster oder holt ein vorhandenes nach
+    /// vorn. Liefert true, wenn es NEU erstellt wurde.
+    fn terminal_oeffnen(&mut self) -> bool {
+        if let Some(index) = self.terminal_index() {
+            let id = self.fenster[index].id;
+            self.fenster[index].minimiert = false;
+            self.fokussieren_und_heben(id);
+            return false;
+        }
+        // Wunschgröße: 80x24 Zellen — auf kleinen Schirmen weniger.
+        let zeichen_breite = get_raster_width(FontWeight::Regular, METRIK.schrift_ui);
+        let breite = (80 * zeichen_breite)
+            .min((self.bildschirm_breite as usize).saturating_sub(80))
+            .max(METRIK.min_fenster_breite);
+        let hoehe = (24 * METRIK.zeilen_hoehe as usize)
+            .min((self.bildschirm_hoehe as usize).saturating_sub(160))
+            .max(METRIK.min_fenster_hoehe);
+        let x = (self.bildschirm_breite - breite as i32) / 2;
+        let y = ((self.taskleiste_y() - METRIK.titel_hoehe - hoehe as i32) / 2).max(20);
+        let term = terminal::Terminal::neu(
+            breite / zeichen_breite,
+            hoehe / METRIK.zeilen_hoehe as usize,
+            theme::aktuell().terminal_hintergrund,
+        );
+        self.fenster_erstellen("Terminal", x, y, breite, hoehe, Inhalt::Terminal(term));
+        true
+    }
+
+    /// Schreibt formatierten Text ins Terminal-Fenster (Umleitung von
+    /// konsole::_print im Desktop-Modus). false = kein Terminal offen.
+    /// Rendert NICHT sofort — nur inhalt_neu setzen, der Compositor
+    /// bündelt das Rendern pro Frame.
+    fn terminal_schreiben(&mut self, args: core::fmt::Arguments, vg: Farbe, hg: Farbe) -> bool {
+        let index = match self.terminal_index() {
+            Some(index) => index,
+            None => return false,
+        };
+        if let Inhalt::Terminal(term) = &mut self.fenster[index].inhalt {
+            struct TerminalZeichner<'a> {
+                term: &'a mut terminal::Terminal,
+                vg: Farbe,
+                hg: Farbe,
+            }
+            impl core::fmt::Write for TerminalZeichner<'_> {
+                fn write_str(&mut self, s: &str) -> core::fmt::Result {
+                    for zeichen in s.chars() {
+                        self.term.schreiben(zeichen, self.vg, self.hg);
+                    }
+                    Ok(())
+                }
+            }
+            use core::fmt::Write;
+            TerminalZeichner { term, vg, hg }.write_fmt(args).ok();
+        }
+        self.fenster[index].inhalt_neu = true;
+        self.fenster[index].dirty = true;
+        true
+    }
+
+    /// Leert das Terminal-Raster (clear-Befehl im Desktop-Modus).
+    fn terminal_leeren(&mut self) {
+        if let Some(index) = self.terminal_index() {
+            if let Inhalt::Terminal(term) = &mut self.fenster[index].inhalt {
+                term.leeren();
+            }
+            self.fenster[index].inhalt_neu = true;
+            self.fenster[index].dirty = true;
+        }
+    }
+
+    /// Rendert alle geänderten Inhalte (inhalt_neu) in ihre Puffer —
+    /// ruft der Compositor EINMAL pro Frame, vor dem Komponieren.
+    fn inhalte_rendern(&mut self) {
+        for index in 0..self.fenster.len() {
+            if self.fenster[index].inhalt_neu {
+                self.fenster[index].inhalt_neu = false;
+                inhalt_zeichnen(&mut self.fenster[index]);
+                self.fenster[index].dirty = true;
+            }
+        }
     }
 
     // ----- Startmenü -----
@@ -1229,14 +1329,80 @@ fn fenster_komponieren<F: Zeichenflaeche>(z: &mut Zeichner<'_, F>, fenster: &Fen
 /// Taskleiste und Alt+Tab zeigen dasselbe).
 fn inhalt_icon(inhalt: &Inhalt) -> &'static crate::grafik::Icon {
     match inhalt {
+        Inhalt::Terminal(_) => &crate::grafik::ICON_TERMINAL,
         Inhalt::Uhr => &crate::grafik::ICON_UHR,
         Inhalt::TastaturEcho { .. } => &crate::grafik::ICON_TASTATUR,
         Inhalt::Malflaeche { .. } => &crate::grafik::ICON_PINSEL,
     }
 }
 
-/// Zeichnet den Demo-Inhalt eines Fensters in SEINEN Puffer.
+/// Zeichnet das Terminal-Raster in den Fenster-Puffer: Zellen-
+/// Hintergründe, Zeichen (Antialiasing via Alpha) und der Cursor-
+/// Unterstrich in Akzentfarbe.
+fn terminal_rendern(term: &terminal::Terminal, puffer: &mut FensterPuffer) {
+    let thema = theme::aktuell();
+    let hintergrund = thema.terminal_hintergrund;
+    let zeichen_breite = get_raster_width(FontWeight::Regular, METRIK.schrift_ui) as i32;
+    let zeilen_hoehe = METRIK.zeilen_hoehe;
+    let (breite, hoehe) = (puffer.breite as i32, puffer.hoehe as i32);
+
+    let mut z = Zeichner::neu(puffer);
+    z.rechteck_fuellen(
+        Rechteck::neu(0, 0, breite, hoehe),
+        Rgba::neu(hintergrund.r, hintergrund.g, hintergrund.b),
+    );
+    let mut puffer_utf8 = [0u8; 4];
+    for zeile in 0..term.zeilen() {
+        for spalte in 0..term.spalten() {
+            let zelle = term.zelle(spalte, zeile);
+            let x = spalte as i32 * zeichen_breite;
+            let y = zeile as i32 * zeilen_hoehe;
+            if zelle.hg != hintergrund {
+                z.rechteck_fuellen(
+                    Rechteck::neu(x, y, zeichen_breite, zeilen_hoehe),
+                    Rgba::neu(zelle.hg.r, zelle.hg.g, zelle.hg.b),
+                );
+            }
+            if zelle.zeichen != ' ' {
+                z.text(
+                    x,
+                    y,
+                    zelle.zeichen.encode_utf8(&mut puffer_utf8),
+                    METRIK.schrift_ui,
+                    FontWeight::Regular,
+                    Rgba::neu(zelle.vg.r, zelle.vg.g, zelle.vg.b),
+                );
+            }
+        }
+    }
+    // Der Terminal-Cursor (ruhig, nicht blinkend — der Konsolen-
+    // Blink-Task ist im Desktop-Modus pausiert):
+    let (cursor_spalte, cursor_zeile) = term.cursor();
+    z.rechteck_fuellen(
+        Rechteck::neu(
+            cursor_spalte as i32 * zeichen_breite,
+            cursor_zeile as i32 * zeilen_hoehe + zeilen_hoehe - 2,
+            zeichen_breite,
+            2,
+        ),
+        thema.akzent,
+    );
+}
+
+/// Zeichnet den Inhalt eines Fensters in SEINEN Puffer.
 fn inhalt_zeichnen(fenster: &mut Fenster) {
+    // Terminal: Rastergröße an die Fenstergröße anpassen, dann rendern.
+    // (&mut fenster.inhalt und &mut fenster.puffer sind verschiedene
+    // Felder — der Borrow-Checker erlaubt beides gleichzeitig.)
+    if let Inhalt::Terminal(term) = &mut fenster.inhalt {
+        let zeichen_breite = get_raster_width(FontWeight::Regular, METRIK.schrift_ui);
+        let spalten = (fenster.puffer.breite / zeichen_breite).max(1);
+        let zeilen = (fenster.puffer.hoehe / METRIK.zeilen_hoehe as usize).max(1);
+        term.groesse_setzen(spalten, zeilen);
+        terminal_rendern(term, &mut fenster.puffer);
+        return;
+    }
+
     let thema = theme::aktuell();
     let breite = fenster.puffer.breite as i32;
     let hoehe = fenster.puffer.hoehe as i32;
@@ -1247,6 +1413,8 @@ fn inhalt_zeichnen(fenster: &mut Fenster) {
     );
 
     match &fenster.inhalt {
+        // Oben schon behandelt (früher return):
+        Inhalt::Terminal(_) => {}
         Inhalt::Uhr => {
             let ticks = zeit::ticks();
             let ms = zeit::ms_seit_boot();
@@ -1313,16 +1481,11 @@ pub fn desktop_starten() {
         let noetig_pages = noetig_bytes.div_ceil(4096);
         let _ = crate::allocator::heap_erweitern(noetig_pages);
 
+        // Der Desktop startet mit EINEM offenen Terminal-Fenster —
+        // die SpeedShell läuft darin weiter. Alles andere (Uhr,
+        // Malkasten, ...) öffnet man über das Startmenü.
         let mut manager = FensterManager::neu(info.width as i32, info.height as i32);
-        manager.fenster_erstellen("Uhr", 140, 120, 420, 150, Inhalt::Uhr);
-        manager.fenster_erstellen(
-            "Tastatur", 420, 320, 560, 140,
-            Inhalt::TastaturEcho { text: String::new() },
-        );
-        manager.fenster_erstellen(
-            "Grafik", 820, 200, 380, 220,
-            Inhalt::Malflaeche { klicks: Vec::new() },
-        );
+        manager.terminal_oeffnen();
         x86_64::instructions::interrupts::without_interrupts(|| {
             *MANAGER.lock() = Some(manager);
         });
@@ -1381,6 +1544,43 @@ pub fn startmenue_taste(taste: DecodedKey) {
     }
 }
 
+// ----- Terminal (die SpeedShell als Fenster) -----
+
+/// Öffnet das Terminal-Fenster (oder holt es nach vorn).
+/// Liefert true, wenn es NEU erstellt wurde — dann sollte der
+/// Aufrufer per shell::prompt_nachholen() einen Prompt hineindrucken.
+pub fn terminal_oeffnen() -> bool {
+    mit_manager(|m| m.terminal_oeffnen()).unwrap_or(false)
+}
+
+/// Existiert (irgendwo, auch minimiert) ein Terminal-Fenster?
+pub fn terminal_vorhanden() -> bool {
+    mit_manager(|m| m.terminal_index().is_some()).unwrap_or(false)
+}
+
+/// Ist das fokussierte Fenster das Terminal? Dann verarbeitet die
+/// Shell Tasten selbst (ZeilenEditor), statt sie ans Fenster zu geben.
+pub fn terminal_fokussiert() -> bool {
+    mit_manager(|m| {
+        m.fokus
+            .and_then(|id| m.index_von(id))
+            .map(|i| matches!(m.fenster[i].inhalt, Inhalt::Terminal(_)) && !m.fenster[i].minimiert)
+            .unwrap_or(false)
+    })
+    .unwrap_or(false)
+}
+
+/// Umleitung von konsole::_print im Desktop-Modus: formatierten Text
+/// ins Terminal-Fenster schreiben. false = kein Terminal offen.
+pub fn terminal_schreiben(args: core::fmt::Arguments, vg: Farbe, hg: Farbe) -> bool {
+    mit_manager(|m| m.terminal_schreiben(args, vg, hg)).unwrap_or(false)
+}
+
+/// Leert das Terminal (clear-Befehl im Desktop-Modus).
+pub fn terminal_leeren() {
+    let _ = mit_manager(|m| m.terminal_leeren());
+}
+
 // ----- Schnittstelle für die App-Registry (apps.rs) -----
 
 /// Öffnet ein neues App-Fenster — leicht versetzt (Kaskade), damit
@@ -1425,6 +1625,9 @@ pub async fn compositor_task() {
             continue;
         }
         let dirty = mit_manager(|m| {
+            // Geänderte Inhalte (z. B. Terminal-Ausgabe) EINMAL pro
+            // Frame in die Fenster-Puffer rendern:
+            m.inhalte_rendern();
             let dirty = m.ist_dirty();
             if dirty {
                 m.dirty_zuruecksetzen();
@@ -1555,6 +1758,33 @@ mod tests {
         assert_eq!(manager.fenster[index].breite(), 500);
         // Höhe = Bildschirm - Titelzeile - Taskleisten-Reserve.
         assert_eq!(manager.fenster[index].hoehe(), 800 - METRIK.titel_hoehe - METRIK.taskleiste_hoehe);
+    }
+
+    /// Terminal: einmal öffnen, danach nur noch fokussieren; Schreiben
+    /// landet im Raster, inhalte_rendern setzt das Render-Flag zurück.
+    #[test_case]
+    fn test_terminal_oeffnen_und_schreiben() {
+        let mut manager = FensterManager::neu(1000, 800);
+        assert!(manager.terminal_oeffnen()); // neu erstellt
+        assert!(!manager.terminal_oeffnen()); // schon da -> nur fokussiert
+        let index = manager.terminal_index().unwrap();
+
+        let vg = Farbe::neu(200, 200, 200);
+        let hg = Farbe::neu(0, 0, 0);
+        assert!(manager.terminal_schreiben(format_args!("hi"), vg, hg));
+        if let Inhalt::Terminal(term) = &manager.fenster[index].inhalt {
+            assert_eq!(term.zelle(0, 0).zeichen, 'h');
+            assert_eq!(term.zelle(1, 0).zeichen, 'i');
+        } else {
+            panic!("Terminal-Fenster hat keinen Terminal-Inhalt");
+        }
+        assert!(manager.fenster[index].inhalt_neu);
+        manager.inhalte_rendern();
+        assert!(!manager.fenster[index].inhalt_neu);
+
+        // Ohne Terminal schlägt das Schreiben "sauber" fehl:
+        let mut leer = FensterManager::neu(1000, 800);
+        assert!(!leer.terminal_schreiben(format_args!("x"), vg, hg));
     }
 
     /// Startmenü: Umschalten, Suchtext filtert, Enter liefert die

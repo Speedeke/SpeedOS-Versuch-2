@@ -8,8 +8,16 @@ ist alles selbst gebaut (auf Basis der bewährten Architektur aus
 > Lernprojekt: Der Code ist bewusst ausführlich auf Deutsch kommentiert —
 > jede Datei erklärt, *was* sie tut und *warum* es so funktioniert.
 
+![SpeedOS-Desktop](docs/screenshots/desktop-komplett.png)
+*SpeedOS bootet direkt in den Desktop: SpeedShell als Terminal-Fenster, Taskleiste mit
+Startknopf/Fenster-Knöpfen/Uhr, Startmenü mit App-Registry und Live-Suche.*
+
+![Aurora Hell](docs/screenshots/desktop-hell.png)
+*Dasselbe System nach einem Klick auf "Theme wechseln": Aurora Hell — alle UI-Farben
+kommen aus dem zentralen Theme-Modul, nur das Terminal bleibt bewusst dunkel.*
+
 ![Fenster-Desktop](docs/screenshots/desktop-fenster.png)
-*Der Desktop: Fenster mit Titelleiste, Icon, Knöpfen (Minimieren/Maximieren/Schließen), Schatten und Aurora-Fokus.*
+*Fenster mit Titelleiste, Icon, Knöpfen (Minimieren/Maximieren/Schließen), Schatten und Aurora-Fokus.*
 
 ![Alt+Tab](docs/screenshots/alt-tab.png)
 *Alt+Tab-Fensterwechsler mit zentriertem Overlay und Auswahl-Highlight.*
@@ -41,10 +49,14 @@ ist alles selbst gebaut (auf Basis der bewährten Architektur aus
 - **Multitasking:** kooperativ mit async/await — eigener Executor mit
   Waker-Support, lock-freien Task-Queues und `hlt`-Schlaf im Leerlauf
 - **SpeedShell:** interaktive Kommandozeile mit Befehls-Registry,
-  Verlauf (Pfeiltasten), Tab-Vervollständigung und 17 Befehlen
-  (`help`, `echo`, `clear`, `ticks`, `meminfo`, `version`, `farbtest`,
-  `neustart`, `dir`, `cd`, `mkdir`, `type`, `write`, `del`, `copy`,
-  `move`, `tree`)
+  Verlauf (Pfeiltasten), Tab-Vervollständigung und 19 Befehlen —
+  läuft im Desktop als Terminal-FENSTER (Ausgabe-Umleitung in ein
+  unit-getestetes Text-Raster), auf Wunsch (ESC) auch im Vollbild
+- **Desktop:** Fenster-Manager + Compositor (private Fenster-Puffer,
+  Dirty-Flags), Theme-System (Aurora Dunkel/Hell, zur Laufzeit
+  umschaltbar — keine hartcodierten UI-Farben), Taskleiste
+  (Startknopf, Fenster-Knöpfe, Uhr+Datum aus Ticks), Startmenü mit
+  App-Registry und Live-Suche (Super-Taste), PS/2-Maus, Snap, Alt+Tab
 - **Dateisystem:** RAM-Dateisystem hinter einer VFS-Abstraktion
   (Trait `FileSystem`) — vorbereitet für FAT32/Disk-Dateisysteme
 - **Tests:** 30 Integrationstests, die als eigene Mini-Kernel in QEMU
@@ -115,6 +127,10 @@ docs/                Migrationsplan bootloader 0.9 -> 0.11
 - [x] **Grafik-Konsole:** Font-Rendering, Double Buffering, Boot-Screen
 - [x] **Desktop:** Maus, Zeichen-Werkzeuge, Fenster mit Compositor,
       Titelleisten, Verschieben/Größe/Min/Max/Close, Snap, Alt+Tab
+- [x] **Desktop komplett:** Theme-System (Aurora Dunkel/Hell, zur
+      Laufzeit umschaltbar), Taskleiste mit Startknopf/Fenster-Knöpfen/
+      Uhr+Datum, Startmenü mit App-Registry und Live-Suche (Super-Taste),
+      SpeedShell als Terminal-Fenster — SpeedOS bootet in den Desktop
 - [ ] **Persistenz:** Block-Device-Treiber + Disk-Dateisystem (VFS ist bereit)
 - [ ] **User Space:** Ring-3-Prozesse, Syscalls, präemptiver Scheduler
 - [ ] Ferner: eigene Programme laden (ELF), Netzwerk, Sound

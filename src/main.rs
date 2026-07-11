@@ -87,13 +87,19 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     #[cfg(test)]
     test_main();
 
-    // 6. Der Executor übernimmt als Hauptschleife: SpeedShell +
-    //    Cursor-Blinken laufen als kooperative Tasks.
+    // 6. Direkt in den DESKTOP booten: FensterManager + Terminal-
+    //    Fenster stehen bereit, BEVOR der erste Task läuft — die
+    //    SpeedShell druckt ihr Banner dann gleich ins Terminal-Fenster
+    //    (konsole::_print leitet im Desktop-Modus dorthin um).
+    //    ESC führt weiterhin zurück zur Vollbild-Konsole.
+    speed_os::fenster::desktop_starten();
+
+    // 7. Der Executor übernimmt als Hauptschleife: SpeedShell,
+    //    Compositor, Maus & Co. laufen als kooperative Tasks.
     let mut executor = Executor::new();
     executor.spawn(Task::new(shell::run()));
     executor.spawn(Task::new(konsole::cursor_blink_task()));
     executor.spawn(Task::new(speed_os::maus::maus_task()));
-    // Desktop-Tasks: schlafen, solange kein Desktop läuft.
     executor.spawn(Task::new(speed_os::fenster::compositor_task()));
     executor.spawn(Task::new(speed_os::fenster::uhr_task()));
     executor.run();

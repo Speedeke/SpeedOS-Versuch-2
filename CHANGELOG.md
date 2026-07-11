@@ -5,6 +5,36 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### Hinzugefügt (Desktop komplett: Theme, Taskleiste, Startmenü, Terminal)
+- Theme-System (src/theme.rs): ALLE UI-Farben in einer zentralen
+  Struktur, zwei Themes "Aurora Dunkel" (Standard) und "Aurora Hell",
+  zur Laufzeit umschaltbar (alle Fenster werden neu gezeichnet);
+  METRIK bündelt alle Abstände und Schriftgrößen — keine
+  hartcodierten Farben mehr im UI-Code
+- Taskleiste (40px, unten, immer im Vordergrund): SpeedOS-Startknopf,
+  ein Knopf pro Fenster (Icon + Titel, fokussiert hervorgehoben,
+  Klick = Fokus/Minimieren-Toggle, stabile Reihenfolge), Systray mit
+  Platzhalter-Icons und Uhrzeit + Datum (aus Ticks abgeleitet;
+  RTC-Kalibrierung bleibt bekanntes TODO)
+- App-Registry (src/apps.rs): Name + Icon + Start-Funktion — die
+  Architektur für alle künftigen Apps; Einträge: Terminal, Uhr,
+  Tastatur-Echo, Malkasten, Theme wechseln, Neustart
+- Startmenü im Aurora-Stil (Startknopf oder Super-Taste): Suchfeld
+  filtert die App-Liste live (Grundlage der späteren Schnellsuche),
+  Bedienung per Maus (Klick/Hover) und Tastatur (Pfeile, Enter, ESC)
+- SpeedShell als Terminal-FENSTER: konsole::_print leitet im
+  Desktop-Modus in ein unit-getestetes Text-Raster um
+  (fenster/terminal.rs, Zellen/Cursor/Scrolling/Resize), gerendert
+  gebündelt pro Compositor-Frame; serielle Doppel-Ausgabe unberührt
+- SpeedOS bootet jetzt DIREKT in den Desktop (Terminal offen);
+  ESC wechselt zur Vollbild-Konsole, `desktop` zurück
+- Fenster-Icons je nach Inhalt (Terminal/Uhr/Tastatur/Pinsel) in
+  Titelleiste, Taskleiste und Alt+Tab; 6 neue 16x16-Icons
+- Datum/Uhrzeit-Arithmetik in zeit.rs (Schaltjahre, Monatsübertrag),
+  Neustart-Logik nach lib.rs gezogen (Shell-Befehl + App teilen sie)
+- 9 neue Unit-Tests (Terminal-Raster, Taskleiste, Startmenü,
+  App-Filter, Datum, Theme)
+
 ### Hinzugefügt (Fenster-Deko & volle Bedienung)
 - Titelleiste pro Fenster: Icon, Titel, 3 Knöpfe (Minimieren,
   Maximieren/Wiederherstellen, Schließen rot); Aurora-Verlauf beim

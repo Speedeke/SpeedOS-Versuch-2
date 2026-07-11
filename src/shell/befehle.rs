@@ -95,7 +95,8 @@ impl Befehl for Help {
         println!("Verfuegbare Befehle:");
         for befehl in registry {
             konsole::set_color(Color::LightCyan, Color::Black);
-            print!("  {:<10}", befehl.name());
+            // 12 Zeichen: auch "grafiktest" (10) bekommt noch Abstand.
+            print!("  {:<12}", befehl.name());
             konsole::set_color(Color::LightGray, Color::Black);
             println!("{}", befehl.beschreibung());
         }
@@ -274,6 +275,12 @@ impl Befehl for Grafiktest {
             println!("Kein Framebuffer verfuegbar.");
             return;
         }
+        // Im Desktop-Modus gehört der Bildschirm dem Compositor —
+        // die Demo würde sofort wieder übermalt.
+        if crate::fenster::desktop_aktiv() {
+            println!("Bitte erst den Desktop mit ESC verlassen.");
+            return;
+        }
         // Zeichnet die Demo und setzt den Demo-Modus: Die Shell
         // fängt die nächste Taste ab und kehrt zur Konsole zurück.
         crate::grafik::demo_zeichnen();
@@ -293,6 +300,10 @@ impl Befehl for Desktop {
     fn ausfuehren(&self, _argumente: &str, _kontext: &mut ShellKontext, _registry: &[Box<dyn Befehl>]) {
         if !crate::framebuffer::ist_initialisiert() {
             println!("Kein Framebuffer verfuegbar.");
+            return;
+        }
+        if crate::fenster::desktop_aktiv() {
+            println!("Der Desktop laeuft bereits.");
             return;
         }
         crate::fenster::desktop_starten();

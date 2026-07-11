@@ -30,13 +30,23 @@ pub fn alle_apps() -> &'static [App] {
     &APPS
 }
 
-static APPS: [App; 5] = [
+static APPS: [App; 6] = [
+    App { name: "Terminal", icon: &grafik::ICON_TERMINAL, start: terminal_starten },
     App { name: "Uhr", icon: &grafik::ICON_UHR, start: uhr_starten },
     App { name: "Tastatur-Echo", icon: &grafik::ICON_TASTATUR, start: tastatur_starten },
     App { name: "Malkasten", icon: &grafik::ICON_PINSEL, start: malkasten_starten },
     App { name: "Theme wechseln", icon: &grafik::ICON_THEME, start: fenster::theme_wechseln },
     App { name: "Neustart", icon: &grafik::ICON_NEUSTART, start: crate::neustart },
 ];
+
+fn terminal_starten() {
+    // Öffnet die SpeedShell als Fenster (oder holt sie nach vorn).
+    // Bei einem FRISCHEN Fenster den Prompt nachholen — die Shell
+    // wartet gerade auf Tasten und würde sonst keinen zeigen.
+    if fenster::terminal_oeffnen() {
+        crate::shell::prompt_nachholen();
+    }
+}
 
 fn uhr_starten() {
     fenster::app_fenster_oeffnen("Uhr", 420, 150, Inhalt::Uhr);

@@ -256,6 +256,15 @@ pub fn _print(args: fmt::Arguments) {
 
     x86_64::instructions::interrupts::without_interrupts(|| {
         let mut zustand = KONSOLE.lock();
+        // Desktop-Modus: Der Bildschirm gehört dem Compositor! Die
+        // Ausgabe geht ins Terminal-FENSTER (mit den aktuellen
+        // Konsolen-Farben) statt in den Bildschirm-Back-Buffer.
+        // Existiert kein Terminal, bleibt nur die serielle Ausgabe.
+        // (Lock-Ordnung: KONSOLE -> MANAGER, siehe Deadlock-Regeln.)
+        if crate::fenster::desktop_aktiv() {
+            crate::fenster::terminal_schreiben(args, zustand.vordergrund, zustand.hintergrund);
+            return;
+        }
         framebuffer::mit_framebuffer(|fb| {
             // Cursor vor dem Schreiben wegnehmen (er wandert gleich).
             zustand.cursor_zeichnen(fb, false);
@@ -299,6 +308,12 @@ pub fn set_color(foreground: Color, background: Color) {
 
 /// Leert den Bildschirm (und das serielle Terminal per ANSI).
 pub fn clear_screen() {
+    // Desktop-Modus: Der clear-Befehl leert das Terminal-FENSTER.
+    if crate::fenster::desktop_aktiv() {
+        crate::fenster::terminal_leeren();
+        serial_print!("\x1b[2J\x1b[H");
+        return;
+    }
     x86_64::instructions::interrupts::without_interrupts(|| {
         let mut konsole = KONSOLE.lock();
         konsole.spalte = 0;
@@ -315,6 +330,12 @@ pub fn clear_screen() {
 /// Schaltet den blinkenden Software-Cursor ein
 /// (den Blink-Takt macht cursor_blink_task).
 pub fn cursor_aktivieren() {
+    // Im Desktop-Modus bleibt der Konsolen-Cursor aus — der Blink-
+    // Task würde sonst mitten in den Desktop malen. Das Terminal-
+    // Fenster zeichnet seinen eigenen Cursor.
+    if crate::fenster::desktop_aktiv() {
+        return;
+    }
     x86_64::instructions::interrupts::without_interrupts(|| {
         KONSOLE.lock().cursor_aktiv = true;
     });

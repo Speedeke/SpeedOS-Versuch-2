@@ -53,6 +53,9 @@ pub async fn run() {
         // Desktop-Modus? ESC schließt erst das Startmenü, dann den
         // Desktop; Tasten gehen ins offene Startmenü oder ans
         // fokussierte Fenster (Event-Routing im FensterManager).
+        // AUSNAHME Terminal-Fenster: Dessen Tasten verarbeitet die
+        // Shell SELBST (der Code unter diesem Block) — print! landet
+        // dann automatisch im Terminal-Fenster (konsole::_print).
         if crate::fenster::desktop_aktiv() {
             if key == DecodedKey::Unicode('\u{1b}') {
                 if crate::fenster::startmenue_offen() {
@@ -63,12 +66,17 @@ pub async fn run() {
                     konsole::clear_screen();
                     prompt(&kontext);
                 }
-            } else if crate::fenster::startmenue_offen() {
-                crate::fenster::startmenue_taste(key);
-            } else {
-                crate::fenster::taste_event(key);
+                continue;
             }
-            continue;
+            if crate::fenster::startmenue_offen() {
+                crate::fenster::startmenue_taste(key);
+                continue;
+            }
+            if !crate::fenster::terminal_fokussiert() {
+                crate::fenster::taste_event(key);
+                continue;
+            }
+            // Terminal fokussiert: unten normal weiterverarbeiten.
         }
 
         // Grafik-Demo aktiv? Dann beendet JEDE Taste sie und wir
@@ -111,13 +119,23 @@ pub async fn run() {
             }
             // Schritt 4: fertige Zeile ausführen.
             Reaktion::Fertig(eingabe) => {
+                let desktop_vorher = crate::fenster::desktop_aktiv();
                 println!();
                 if !eingabe.is_empty() {
                     befehl_ausfuehren(&registry, &mut kontext, &eingabe);
                 }
-                // Kein Prompt, wenn gerade Grafik-Demo oder Desktop
-                // laufen — der würde mitten ins Bild malen.
-                if !crate::grafik::demo_aktiv() && !crate::fenster::desktop_aktiv() {
+                // Kein Prompt, wenn gerade die Grafik-Demo läuft oder
+                // der Desktop OHNE Terminal-Fenster — der würde mitten
+                // ins Bild malen. Mit Terminal landet er genau dort.
+                // AUSNAHME: Der desktop-Befehl hat den Desktop GERADE
+                // gestartet — im Terminal wartet noch der alte Prompt
+                // von vorhin, ein zweiter gäbe "SpeedOS:/> SpeedOS:/>".
+                let desktop = crate::fenster::desktop_aktiv();
+                let gerade_gestartet = desktop && !desktop_vorher;
+                if !crate::grafik::demo_aktiv()
+                    && !gerade_gestartet
+                    && (!desktop || crate::fenster::terminal_vorhanden())
+                {
                     prompt(&kontext);
                 }
             }
@@ -167,12 +185,40 @@ pub fn befehl_ausfuehren(registry: &[Box<dyn Befehl>], kontext: &mut ShellKontex
     }
 }
 
+/// Spiegel des aktuellen Verzeichnisses für prompt_nachholen — das
+/// ECHTE cwd lebt im ShellKontext des Shell-Tasks; hier steht nur
+/// eine Kopie für Aufrufer außerhalb des Tasks (Terminal-App).
+static CWD_SPIEGEL: spin::Mutex<String> = spin::Mutex::new(String::new());
+
 /// Gibt den Eingabe-Prompt aus — mit dem aktuellen Verzeichnis,
 /// wie man es von cmd kennt (C:\> ... bei uns: SpeedOS:/system>).
 fn prompt(kontext: &ShellKontext) {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        *CWD_SPIEGEL.lock() = kontext.aktuelles_verzeichnis.clone();
+    });
+    prompt_zeigen(&kontext.aktuelles_verzeichnis);
+}
+
+fn prompt_zeigen(pfad: &str) {
     konsole::set_color(Color::LightGreen, Color::Black);
-    print!("SpeedOS:{}> ", kontext.aktuelles_verzeichnis);
+    print!("SpeedOS:{}> ", pfad);
     konsole::set_color(Color::LightGray, Color::Black);
+}
+
+/// Druckt den Prompt "von außen" nach — z. B. wenn die Terminal-App
+/// ein FRISCHES Terminal-Fenster geöffnet hat, während die Shell
+/// gerade auf Tasten wartet (sie würde sonst erst nach dem nächsten
+/// Enter wieder einen Prompt zeigen).
+pub fn prompt_nachholen() {
+    let pfad = x86_64::instructions::interrupts::without_interrupts(|| {
+        let spiegel = CWD_SPIEGEL.lock();
+        if spiegel.is_empty() {
+            String::from("/")
+        } else {
+            spiegel.clone()
+        }
+    });
+    prompt_zeigen(&pfad);
 }
 
 /// Das farbige SpeedOS-Banner beim Start der Shell.
@@ -217,8 +263,11 @@ mod tests {
             befehl.ausfuehren("", &mut kontext, &registry);
         }
         // grafiktest hat den Demo-Modus gesetzt (und dabei alle
-        // Primitive wirklich gezeichnet — guter Test!): aufräumen.
+        // Primitive wirklich gezeichnet), desktop den Desktop-Modus
+        // (samt Terminal-Fenster — die restlichen Ausgaben liefen
+        // wirklich durch die Terminal-Umleitung!): beides aufräumen.
         crate::grafik::demo_beenden();
+        crate::fenster::desktop_beenden();
         crate::konsole::cursor_aktivieren();
     }
 
