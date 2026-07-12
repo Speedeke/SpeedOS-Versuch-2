@@ -277,16 +277,29 @@ pub struct Textfeld {
     editor: ZeilenEditor,
     /// Nachricht bei Enter (der Text steht danach im Verlauf).
     nachricht: u32,
+    /// Nachricht bei JEDER Textänderung (Live-Filter wie im
+    /// Startmenü-Suchfeld); None = nur neu zeichnen.
+    nachricht_geaendert: Option<u32>,
     fokus: bool,
 }
 
 impl Textfeld {
     pub fn neu(nachricht: u32) -> Self {
-        Textfeld { editor: ZeilenEditor::neu(10), nachricht, fokus: false }
+        Textfeld { editor: ZeilenEditor::neu(10), nachricht, nachricht_geaendert: None, fokus: false }
+    }
+
+    /// Textfeld, das zusätzlich jede Textänderung meldet.
+    pub fn mit_aenderungs_nachricht(nachricht_enter: u32, nachricht_geaendert: u32) -> Self {
+        Textfeld { nachricht_geaendert: Some(nachricht_geaendert), ..Textfeld::neu(nachricht_enter) }
     }
 
     pub fn text(&self) -> &str {
         self.editor.zeile()
+    }
+
+    /// Fokus direkt setzen (z. B. Suchfeld beim Menü-Öffnen).
+    pub fn fokus_setzen(&mut self, fokus: bool) {
+        self.fokus = fokus;
     }
 }
 
@@ -353,9 +366,15 @@ impl Widget for Textfeld {
                     DecodedKey::Unicode(c) if *c >= ' ' => Taste::Zeichen(*c),
                     _ => return UiReaktion::verbraucht(), // fokussiert: schlucken
                 };
+                let text_vorher = alloc::string::String::from(self.editor.zeile());
                 match self.editor.taste(editor_taste, "/", &KeineVervollstaendigung) {
                     Reaktion::Fertig(_) => UiReaktion::nachricht(self.nachricht),
-                    _ => UiReaktion::neu_zeichnen(),
+                    _ => match self.nachricht_geaendert {
+                        Some(id) if self.editor.zeile() != text_vorher => {
+                            UiReaktion::nachricht(id)
+                        }
+                        _ => UiReaktion::neu_zeichnen(),
+                    },
                 }
             }
             _ => UiReaktion::ignoriert(),
@@ -458,6 +477,34 @@ impl ScrollListe {
             inhalt,
             bereich.hoehe,
         )
+    }
+
+    /// Bewegt die Auswahl um `delta` Einträge (mit Wrap-Around) und
+    /// scrollt sie in den Sichtbereich — für Pfeiltasten-Navigation
+    /// (Startmenü) und Alt+Tab.
+    pub fn auswahl_bewegen(&mut self, delta: i32, sicht_hoehe: i32) {
+        if self.eintraege.is_empty() {
+            self.auswahl = None;
+            return;
+        }
+        let anzahl = self.eintraege.len() as i32;
+        let neu = (self.auswahl.unwrap_or(0) as i32 + delta).rem_euclid(anzahl);
+        self.auswahl = Some(neu as usize);
+        // In den Sichtbereich holen:
+        let oben = neu * METRIK.listen_eintrag_hoehe;
+        let unten = oben + METRIK.listen_eintrag_hoehe;
+        if oben < self.scroll {
+            self.scroll = oben;
+        } else if unten > self.scroll + sicht_hoehe {
+            self.scroll = unten - sicht_hoehe;
+        }
+    }
+
+    /// Setzt neue Einträge (Live-Filter) und beginnt oben.
+    pub fn eintraege_setzen(&mut self, eintraege: Vec<ListenEintrag>) {
+        self.eintraege = eintraege;
+        self.scroll = 0;
+        self.auswahl = if self.eintraege.is_empty() { None } else { Some(0) };
     }
 
     fn eintrag_bei(&self, bereich: Rechteck, x: i32, y: i32) -> Option<usize> {

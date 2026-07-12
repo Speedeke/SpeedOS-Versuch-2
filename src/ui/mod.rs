@@ -30,7 +30,10 @@
 // unter dem MANAGER-Lock ausgeführt — der Fenster-Manager reicht sie
 // als NachLock-Wert nach draußen.
 
+pub mod app;
 pub mod widgets;
+
+pub use app::{App, AppFenster, AppReaktion};
 
 use crate::fenster::FensterPuffer;
 use crate::grafik::{Rechteck, Zeichenflaeche, Zeichner};
@@ -422,6 +425,12 @@ impl UiFenster {
 
     pub fn handler(&self) -> NachrichtHandler {
         self.handler
+    }
+
+    /// Ersetzt den Widget-Baum (App-Trait: nach Zustandsänderung
+    /// liefert aufbau() einen frischen Baum).
+    pub fn wurzel_setzen(&mut self, wurzel: Box<dyn Widget>) {
+        self.wurzel = wurzel;
     }
 
     /// Der Bereich des Wurzel-Widgets (Fenster-Inhalt minus Rand).

@@ -175,15 +175,21 @@
   Fokus/Minimieren-Toggle. Uhr+Datum leitet `zeit::datum_nach` aus den
   Ticks ab (fester Boot-Zeitpunkt als Platzhalter — RTC/CMOS-Kalibrierung
   ist bekanntes TODO); neu komponiert wird nur beim Sekundenwechsel.
-- **App-Registry (Juli 2026):** `src/apps.rs` — jede App = Name + Icon +
-  `start: fn()`. Das Startmenü filtert die Liste live (Suchfeld, Basis
-  der späteren Schnellsuche); Bedienung per Maus UND Tastatur (Tippen,
-  Pfeile, Enter; Super-Taste öffnet — Abgriff im KeyStream wie Alt+Tab).
-  WICHTIG (Deadlock-Regel): Start-Funktionen werden NIE unter dem
-  MANAGER-Lock gerufen — Manager-Methoden geben die fn() als
-  Rückgabewert nach draußen, die Wrapper in fenster/mod.rs führen sie
-  nach dem Loslassen aus. Neue App = Start-Funktion + ein Eintrag in
-  APPS, fertig.
+- **App-Registry & App-Trait (Juli 2026):** `src/apps.rs` — jeder
+  Registry-Eintrag (`AppEintrag`) = Name + Icon + `start: fn()`.
+  NEUE Apps implementieren `ui::App` (name/icon/aufbau/nachricht/tick)
+  und landen als `Inhalt::App(AppFenster)` im Fenster (die Brücke vom
+  Enum zum Trait; das Enum bleibt für Terminal und alte Demos) —
+  start-fn ruft `fenster::app_starten(Box::new(MeineApp))`. LOCK-REGEL
+  (ui/app.rs): App::nachricht/tick laufen UNTER dem MANAGER-Lock —
+  eigener Zustand/fs/serial_println erlaubt, print!/fenster:: verboten;
+  Außenwirkung über AppReaktion.danach (fn(), läuft nach dem Lock).
+  Startmenü und Alt+Tab-Switcher laufen aufs Toolkit: Suchfeld =
+  Textfeld-Widget (Änderungs-Nachricht = Live-Filter), Liste =
+  ScrollListe, gezeichnet in einen OFFSCREEN-FensterPuffer, den der
+  Compositor per puffer_blit zeigt (Muster für alle Overlays).
+  Deadlock-Regel unverändert: Start-Funktionen/Nachrichten via
+  NachLock (jetzt: Keine | Ausfuehren(fn()) | Nachricht) nach draußen.
 - **UI-Widget-Toolkit (Juli 2026):** `src/ui/` = das UI-Fundament
   aller Apps. Retained Widget-Baum: `trait Widget` (wunschgroesse,
   zeichnen in den FensterPuffer, ereignis mit Rechteck-Routing wie

@@ -5,6 +5,27 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### Geändert (Toolkit-Beweis: App-Trait, Startmenü + Alt+Tab umgezogen)
+- trait ui::App (name/icon/aufbau/nachricht/tick) + Inhalt::App als
+  Brücke vom Enum zum Trait — jede NEUE App implementiert das Trait
+  (Enum bleibt für Terminal/Demos); fenster::app_starten öffnet
+  Trait-Apps, die Widget-Galerie ist die erste (Nachrichten laufen
+  über App::nachricht statt fn-Handler; Lock-Regel in ui/app.rs)
+- Startmenü aufs Toolkit umgezogen: Suchfeld = Textfeld-Widget (neue
+  Änderungs-Nachricht für den Live-Filter), App-Liste = ScrollListe;
+  Panel zeichnet in einen Offscreen-Puffer, der Compositor blittet
+  (Overlay-Muster). Verhalten unverändert: Super-Taste, Klick
+  außerhalb schließt, Tippen filtert live, Pfeile + Enter, Klick
+  startet — per QMP-Screenshot-Vergleich verifiziert
+- Alt+Tab-Switcher ebenso: ScrollListe mit Auswahl-Highlight statt
+  handgemalter Liste (auswahl_bewegen mit Wrap-Around)
+- Aufräum-Bilanz der Event-Kaskade: maus_gedrueckt 61 -> 55 Zeilen;
+  handgestrickter Startmenü-Sondercode (Tasten-Kaskade, Eintrags-
+  Geometrie, Hover-Pflege, Panel-Malerei) 161 -> 69 Zeilen
+  Widget-Anbindung; switcher_zeichnen (46 Zeilen) ersatzlos
+- NachLock::AppStarten -> NachLock::Ausfuehren (traegt jetzt auch
+  AppReaktion.danach-Aktionen)
+
 ### Hinzugefügt (UI-Widget-Toolkit: das Fundament aller Apps)
 - Neues Modul src/ui/: retained Widget-Baum mit `trait Widget`
   (wunschgroesse/zeichnen/ereignis), UiEreignis (Klick, Doppelklick,

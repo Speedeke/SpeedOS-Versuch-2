@@ -17,8 +17,10 @@ use crate::grafik::{self, Icon};
 use alloc::string::String;
 use alloc::vec::Vec;
 
-/// Ein Eintrag der App-Registry.
-pub struct App {
+/// Ein Eintrag der App-Registry. Trait-Apps (ui::App) tragen hier
+/// eine Start-Funktion, die fenster::app_starten mit ihrer
+/// App-Instanz aufruft — siehe galerie_starten.
+pub struct AppEintrag {
     pub name: &'static str,
     pub icon: &'static Icon,
     /// Startet die App — läuft OHNE gehaltene Locks (siehe oben).
@@ -26,18 +28,18 @@ pub struct App {
 }
 
 /// Alle registrierten Apps (die Reihenfolge ist die Menü-Reihenfolge).
-pub fn alle_apps() -> &'static [App] {
+pub fn alle_apps() -> &'static [AppEintrag] {
     &APPS
 }
 
-static APPS: [App; 7] = [
-    App { name: "Terminal", icon: &grafik::ICON_TERMINAL, start: terminal_starten },
-    App { name: "Widget-Galerie", icon: &grafik::ICON_ZAHNRAD, start: galerie_starten },
-    App { name: "Uhr", icon: &grafik::ICON_UHR, start: uhr_starten },
-    App { name: "Tastatur-Echo", icon: &grafik::ICON_TASTATUR, start: tastatur_starten },
-    App { name: "Malkasten", icon: &grafik::ICON_PINSEL, start: malkasten_starten },
-    App { name: "Theme wechseln", icon: &grafik::ICON_THEME, start: fenster::theme_wechseln },
-    App { name: "Neustart", icon: &grafik::ICON_NEUSTART, start: crate::neustart },
+static APPS: [AppEintrag; 7] = [
+    AppEintrag { name: "Terminal", icon: &grafik::ICON_TERMINAL, start: terminal_starten },
+    AppEintrag { name: "Widget-Galerie", icon: &grafik::ICON_ZAHNRAD, start: galerie_starten },
+    AppEintrag { name: "Uhr", icon: &grafik::ICON_UHR, start: uhr_starten },
+    AppEintrag { name: "Tastatur-Echo", icon: &grafik::ICON_TASTATUR, start: tastatur_starten },
+    AppEintrag { name: "Malkasten", icon: &grafik::ICON_PINSEL, start: malkasten_starten },
+    AppEintrag { name: "Theme wechseln", icon: &grafik::ICON_THEME, start: fenster::theme_wechseln },
+    AppEintrag { name: "Neustart", icon: &grafik::ICON_NEUSTART, start: crate::neustart },
 ];
 
 fn terminal_starten() {
@@ -54,28 +56,33 @@ fn uhr_starten() {
 }
 
 // ---------------------------------------------------------------------------
-// Widget-Galerie: die Demo-App des ui-Moduls — zeigt alle Bausteine
-// und loggt jede Interaktion seriell (Nachricht-IDs siehe unten).
+// Widget-Galerie: die Demo-App des ui-Moduls — und die ERSTE App auf
+// dem neuen App-Trait (Inhalt::App statt Inhalt-Enum-Variante).
+// Sie zeigt alle Bausteine und loggt jede Interaktion seriell.
 // ---------------------------------------------------------------------------
 
-fn galerie_starten() {
-    fenster::app_fenster_oeffnen("Widget-Galerie", 480, 460, Inhalt::Ui(galerie_bauen()));
-}
+struct GalerieApp;
 
-/// Baut den Widget-Baum der Galerie. Die u32-IDs sind frei wählbar —
-/// sie landen im Nachricht-Handler (galerie_nachricht).
-fn galerie_bauen() -> crate::ui::UiFenster {
-    use crate::ui::widgets::{Button, Checkbox, Label, ListenEintrag, ScrollListe, Textfeld, Trennlinie};
-    use crate::ui::{hbox, vbox, Fueller, UiFenster, Widget};
-    use alloc::boxed::Box;
-    use alloc::format;
-    use alloc::vec;
+impl crate::ui::App for GalerieApp {
+    fn name(&self) -> &'static str {
+        "Widget-Galerie"
+    }
 
-    let eintraege = (1..=25)
-        .map(|i| ListenEintrag { icon: Some(&grafik::ICON_DATEI), text: format!("Listeneintrag {i}") })
-        .collect();
+    fn icon(&self) -> &'static Icon {
+        &grafik::ICON_ZAHNRAD
+    }
 
-    UiFenster::neu(
+    fn aufbau(&self) -> alloc::boxed::Box<dyn crate::ui::Widget> {
+        use crate::ui::widgets::{Button, Checkbox, Label, ListenEintrag, ScrollListe, Textfeld, Trennlinie};
+        use crate::ui::{hbox, vbox, Fueller, Widget};
+        use alloc::boxed::Box;
+        use alloc::format;
+        use alloc::vec;
+
+        let eintraege = (1..=25)
+            .map(|i| ListenEintrag { icon: Some(&grafik::ICON_DATEI), text: format!("Listeneintrag {i}") })
+            .collect();
+
         Box::new(vbox(vec![
             Box::new(Label::neu("Widget-Galerie")) as Box<dyn Widget>,
             // Nur Latin-1-Zeichen — der vorgerasterte Font hat
@@ -92,25 +99,29 @@ fn galerie_bauen() -> crate::ui::UiFenster {
             Box::new(Textfeld::neu(4)),
             Box::new(Trennlinie),
             Box::new(ScrollListe::neu(eintraege, 5, 6)),
-        ])),
-        galerie_nachricht,
-        &grafik::ICON_ZAHNRAD,
-    )
+        ]))
+    }
+
+    /// Läuft unter dem MANAGER-Lock — serial_println! ist dort
+    /// erlaubt (Blatt-Lock), print!/fenster:: wären es NICHT
+    /// (siehe Lock-Regel in ui/app.rs).
+    fn nachricht(&mut self, id: u32) -> crate::ui::AppReaktion {
+        let quelle = match id {
+            1 => "Button 'Start'",
+            2 => "Button 'Zweiter'",
+            3 => "Checkbox umgeschaltet",
+            4 => "Textfeld: Enter",
+            5 => "Liste: Auswahl",
+            6 => "Liste: DOPPELKLICK",
+            _ => "unbekannt",
+        };
+        crate::serial_println!("[GALERIE] Nachricht {}: {}", id, quelle);
+        crate::ui::AppReaktion::keine()
+    }
 }
 
-/// Der Nachricht-Handler der Galerie — läuft NIE unter dem
-/// MANAGER-Lock (NachLock-Regel), darf also bedenkenlos loggen.
-fn galerie_nachricht(id: u32) {
-    let quelle = match id {
-        1 => "Button 'Start'",
-        2 => "Button 'Zweiter'",
-        3 => "Checkbox umgeschaltet",
-        4 => "Textfeld: Enter",
-        5 => "Liste: Auswahl",
-        6 => "Liste: DOPPELKLICK",
-        _ => "unbekannt",
-    };
-    crate::serial_println!("[GALERIE] Nachricht {}: {}", id, quelle);
+fn galerie_starten() {
+    fenster::app_starten(alloc::boxed::Box::new(GalerieApp), 480, 460);
 }
 
 fn tastatur_starten() {
@@ -129,11 +140,22 @@ fn malkasten_starten() {
 /// Filtert die Registry nach dem Suchtext (Groß/Klein egal) — die
 /// Grundlage der späteren systemweiten Schnellsuche. Leerer Suchtext
 /// liefert alle Apps.
-pub fn filtern(suchtext: &str) -> Vec<&'static App> {
+pub fn filtern(suchtext: &str) -> Vec<&'static AppEintrag> {
+    filtern_indizes(suchtext)
+        .into_iter()
+        .map(|index| &alle_apps()[index])
+        .collect()
+}
+
+/// Wie filtern, aber als Indizes in alle_apps() — das Startmenü
+/// mappt damit Listenzeilen zurück auf Registry-Einträge.
+pub fn filtern_indizes(suchtext: &str) -> Vec<usize> {
     let klein = suchtext.to_ascii_lowercase();
     alle_apps()
         .iter()
-        .filter(|app| app.name.to_ascii_lowercase().contains(klein.as_str()))
+        .enumerate()
+        .filter(|(_, app)| app.name.to_ascii_lowercase().contains(klein.as_str()))
+        .map(|(index, _)| index)
         .collect()
 }
 

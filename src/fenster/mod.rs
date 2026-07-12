@@ -24,6 +24,7 @@ use crate::framebuffer::{self, Farbe};
 use crate::grafik::{Rechteck, Rgba, Zeichenflaeche, Zeichner};
 use crate::maus::{self, MausEvent, MausTaste};
 use crate::theme::{self, METRIK};
+use crate::ui::Widget as _; // Trait-Methoden (zeichnen/ereignis) für Menü/Switcher-Widgets
 use crate::zeit;
 use alloc::format;
 use alloc::string::String;
@@ -113,9 +114,13 @@ impl Zeichenflaeche for FensterPuffer {
 pub enum Inhalt {
     /// Die SpeedShell als Fenster (konsole::_print leitet hierher um).
     Terminal(terminal::Terminal),
-    /// Ein Widget-Baum aus dem ui-Modul — der Standard für alle
-    /// künftigen Apps (Galerie, Explorer, Einstellungen, ...).
+    /// Ein nackter Widget-Baum mit fn(u32)-Handler (zustandslose
+    /// Fälle); zustandsbehaftete Apps nehmen Inhalt::App.
     Ui(crate::ui::UiFenster),
+    /// Eine Trait-App (ui::App): Zustand + Widget-Baum — DIE Brücke
+    /// vom Enum zum Trait. Jede NEUE App implementiert das Trait;
+    /// das Enum bleibt für Terminal und die alten Demos.
+    App(crate::ui::AppFenster),
     Uhr,
     TastaturEcho { text: String },
     Malflaeche { klicks: Vec<(i32, i32)> },
@@ -127,7 +132,8 @@ pub enum Inhalt {
 /// KONSOLE-vor-MANAGER-Lock-Ordnung).
 pub enum NachLock {
     Keine,
-    AppStarten(fn()),
+    /// App-Start oder App-"danach"-Aktion (siehe ui::AppReaktion).
+    Ausfuehren(fn()),
     Nachricht(crate::ui::NachrichtHandler, u32),
 }
 
@@ -135,8 +141,44 @@ pub enum NachLock {
 fn nach_lock_ausfuehren(nach: NachLock) {
     match nach {
         NachLock::Keine => {}
-        NachLock::AppStarten(start) => start(),
+        NachLock::Ausfuehren(aktion) => aktion(),
         NachLock::Nachricht(handler, id) => handler(id),
+    }
+}
+
+/// Verarbeitet die Widget-Reaktion eines Ui-/App-Fensterinhalts:
+/// dirty-Flags setzen und die Nachricht zustellen — bei Ui-Inhalten
+/// nach draußen (fn(u32)-Handler), bei Trait-Apps direkt an
+/// App::nachricht (läuft unter dem Lock, siehe ui/app.rs).
+fn ui_reaktion_verarbeiten(
+    inhalt: &mut Inhalt,
+    dirty: &mut bool,
+    inhalt_neu: &mut bool,
+    reaktion: crate::ui::UiReaktion,
+) -> NachLock {
+    if reaktion.neu_zeichnen {
+        *inhalt_neu = true;
+        *dirty = true;
+    }
+    let id = match reaktion.nachricht {
+        Some(id) => id,
+        None => return NachLock::Keine,
+    };
+    match inhalt {
+        Inhalt::Ui(ui) => NachLock::Nachricht(ui.handler(), id),
+        Inhalt::App(app_fenster) => {
+            let app_reaktion = app_fenster.app.nachricht(id);
+            if app_reaktion.neu_aufbauen {
+                app_fenster.neu_aufbauen();
+                *inhalt_neu = true;
+                *dirty = true;
+            }
+            match app_reaktion.danach {
+                Some(aktion) => NachLock::Ausfuehren(aktion),
+                None => NachLock::Keine,
+            }
+        }
+        _ => NachLock::Keine,
     }
 }
 
@@ -264,19 +306,156 @@ enum Interaktion {
     },
 }
 
-/// Der Alt+Tab-Fensterwechsler.
+/// Der Alt+Tab-Fensterwechsler — seit dem Toolkit-Umzug eine
+/// ScrollListe, die in einen Offscreen-Puffer zeichnet (der
+/// Compositor blittet ihn zentriert und malt die Deko drumherum).
 struct Switcher {
     reihenfolge: Vec<FensterId>,
-    auswahl: usize,
+    liste: crate::ui::widgets::ScrollListe,
+    puffer: FensterPuffer,
 }
 
-/// Das offene Startmenü (None im Manager = zu).
+impl Switcher {
+    /// Innenmaß der Liste im Puffer.
+    fn liste_bereich(&self) -> Rechteck {
+        Rechteck::neu(
+            METRIK.abstand,
+            METRIK.abstand,
+            self.puffer.breite as i32 - 2 * METRIK.abstand,
+            self.puffer.hoehe as i32 - 2 * METRIK.abstand,
+        )
+    }
+
+    fn zeichnen(&mut self) {
+        let thema = theme::aktuell();
+        let bereich = self.liste_bereich();
+        let (breite, hoehe) = (self.puffer.breite as i32, self.puffer.hoehe as i32);
+        let mut z = Zeichner::neu(&mut self.puffer);
+        z.rechteck_fuellen(Rechteck::neu(0, 0, breite, hoehe), thema.flaeche);
+        self.liste.zeichnen(&mut z, bereich);
+    }
+}
+
+// Die Widget-Nachrichten des Startmenüs (u32-IDs, siehe ui-Modul).
+const MENUE_ENTER: u32 = 1;
+const MENUE_SUCHE_GEAENDERT: u32 = 2;
+const MENUE_EINTRAG_KLICK: u32 = 3;
+
+/// Das Startmenü (None im Manager = zu) — seit dem Toolkit-Umzug
+/// ein Widget-Verbund: Suchfeld (Textfeld) + App-Liste (ScrollListe)
+/// in einem Offscreen-Puffer; der Compositor blittet ihn über der
+/// Taskleiste. Der Manager routet Maus (in Panel-Koordinaten) und
+/// Tasten hierher — die alte handgestrickte Eintrags-Geometrie,
+/// Hover-Pflege und Tasten-Kaskade sind damit Geschichte.
 struct StartMenue {
-    /// Der getippte Suchtext — filtert die App-Liste live.
-    suchtext: String,
-    /// Ausgewählter Eintrag (Index in der GEFILTERTEN Liste) —
-    /// Pfeiltasten bewegen ihn, Enter startet ihn, Maus-Hover setzt ihn.
-    auswahl: usize,
+    suchfeld: crate::ui::widgets::Textfeld,
+    liste: crate::ui::widgets::ScrollListe,
+    puffer: FensterPuffer,
+    /// gefiltert[zeile] = Index des Listeneintrags in apps::alle_apps().
+    gefiltert: Vec<usize>,
+}
+
+impl StartMenue {
+    const BREITE: i32 = 340;
+    /// Suchfeld + 8 Listenzeilen + Innenränder.
+    fn hoehe() -> i32 {
+        METRIK.ui_element_hoehe + 8 * METRIK.listen_eintrag_hoehe + 3 * METRIK.abstand
+    }
+
+    fn neu() -> Self {
+        use crate::ui::widgets::{ScrollListe, Textfeld};
+
+        let mut suchfeld =
+            Textfeld::mit_aenderungs_nachricht(MENUE_ENTER, MENUE_SUCHE_GEAENDERT);
+        // Das Suchfeld ist immer fokussiert — Tippen filtert sofort.
+        suchfeld.fokus_setzen(true);
+        let mut menue = StartMenue {
+            suchfeld,
+            liste: ScrollListe::neu(Vec::new(), MENUE_EINTRAG_KLICK, MENUE_EINTRAG_KLICK),
+            puffer: FensterPuffer::neu(
+                Self::BREITE as usize,
+                Self::hoehe() as usize,
+                theme::aktuell().inhalt_hintergrund,
+            ),
+            gefiltert: Vec::new(),
+        };
+        menue.filtern();
+        menue.zeichnen();
+        menue
+    }
+
+    fn suchfeld_bereich() -> Rechteck {
+        Rechteck::neu(
+            METRIK.abstand,
+            METRIK.abstand,
+            Self::BREITE - 2 * METRIK.abstand,
+            METRIK.ui_element_hoehe,
+        )
+    }
+
+    fn liste_bereich() -> Rechteck {
+        let oben = 2 * METRIK.abstand + METRIK.ui_element_hoehe;
+        Rechteck::neu(
+            METRIK.abstand,
+            oben,
+            Self::BREITE - 2 * METRIK.abstand,
+            Self::hoehe() - oben - METRIK.abstand,
+        )
+    }
+
+    /// Filtert die App-Liste nach dem Suchfeld-Text.
+    fn filtern(&mut self) {
+        use crate::ui::widgets::ListenEintrag;
+
+        self.gefiltert = crate::apps::filtern_indizes(self.suchfeld.text());
+        let eintraege = self
+            .gefiltert
+            .iter()
+            .map(|&index| {
+                let app = &crate::apps::alle_apps()[index];
+                ListenEintrag { icon: Some(app.icon), text: String::from(app.name) }
+            })
+            .collect();
+        self.liste.eintraege_setzen(eintraege);
+    }
+
+    /// Zeichnet Suchfeld + Liste in den Offscreen-Puffer.
+    fn zeichnen(&mut self) {
+        let thema = theme::aktuell();
+        let (breite, hoehe) = (self.puffer.breite as i32, self.puffer.hoehe as i32);
+        let mut z = Zeichner::neu(&mut self.puffer);
+        z.rechteck_fuellen(Rechteck::neu(0, 0, breite, hoehe), thema.flaeche);
+        self.suchfeld.zeichnen(&mut z, Self::suchfeld_bereich());
+        self.liste.zeichnen(&mut z, Self::liste_bereich());
+    }
+
+    /// Routet ein Ereignis (Panel-Koordinaten): Pfeiltasten steuern
+    /// die Liste, andere Tasten das Suchfeld; Maus-Ereignisse gehen
+    /// je nach Position an Suchfeld oder Liste.
+    fn ereignis(&mut self, ereignis: &crate::ui::UiEreignis) -> crate::ui::UiReaktion {
+        use crate::ui::UiEreignis;
+        use pc_keyboard::KeyCode;
+
+        match ereignis {
+            UiEreignis::Taste(DecodedKey::RawKey(KeyCode::ArrowUp)) => {
+                self.liste.auswahl_bewegen(-1, Self::liste_bereich().hoehe);
+                crate::ui::UiReaktion::neu_zeichnen()
+            }
+            UiEreignis::Taste(DecodedKey::RawKey(KeyCode::ArrowDown)) => {
+                self.liste.auswahl_bewegen(1, Self::liste_bereich().hoehe);
+                crate::ui::UiReaktion::neu_zeichnen()
+            }
+            UiEreignis::Taste(_) => self.suchfeld.ereignis(ereignis, Self::suchfeld_bereich()),
+            _ => match ereignis.position() {
+                Some((x, y)) if Self::suchfeld_bereich().enthaelt(x, y) => {
+                    self.suchfeld.ereignis(ereignis, Self::suchfeld_bereich())
+                }
+                // Alles andere an die Liste (auch Bewegt/Losgelassen
+                // außerhalb — für den Scrollbalken-Drag).
+                _ => self.liste.ereignis(ereignis, Self::liste_bereich()),
+            },
+        }
+    }
 }
 
 pub struct FensterManager {
@@ -546,7 +725,7 @@ impl FensterManager {
     fn startmenue_umschalten(&mut self) {
         self.start_menue = match self.start_menue {
             Some(_) => None,
-            None => Some(StartMenue { suchtext: String::new(), auswahl: 0 }),
+            None => Some(StartMenue::neu()),
         };
         self.alles_dirty = true;
     }
@@ -557,118 +736,85 @@ impl FensterManager {
         }
     }
 
-    /// Das Panel-Rechteck des Startmenüs — direkt über dem Startknopf,
-    /// die Höhe wächst mit der (gefilterten) App-Liste.
-    fn menue_rechteck(&self, anzahl_eintraege: usize) -> Rechteck {
-        let n = anzahl_eintraege.max(1) as i32;
-        let hoehe = METRIK.menue_suchfeld_hoehe + n * METRIK.menue_eintrag_hoehe + METRIK.abstand;
+    /// Das Panel-Rechteck des Startmenüs (über dem Startknopf).
+    fn menue_panel_rechteck(&self) -> Rechteck {
         Rechteck::neu(
             METRIK.abstand,
-            self.taskleiste_y() - hoehe - METRIK.abstand,
-            METRIK.menue_breite,
-            hoehe,
+            self.taskleiste_y() - StartMenue::hoehe() - METRIK.abstand,
+            StartMenue::BREITE,
+            StartMenue::hoehe(),
         )
     }
 
-    /// Das Rechteck des i-ten Menü-Eintrags (innerhalb von `menue`).
-    fn menue_eintrag_rechteck(menue: Rechteck, i: usize) -> Rechteck {
-        Rechteck::neu(
-            menue.x + METRIK.abstand,
-            menue.y + METRIK.menue_suchfeld_hoehe + i as i32 * METRIK.menue_eintrag_hoehe,
-            menue.breite - 2 * METRIK.abstand,
-            METRIK.menue_eintrag_hoehe,
-        )
-    }
-
-    /// Tastatur im offenen Startmenü: Tippen filtert, Pfeile wählen,
-    /// Enter startet. Liefert die Start-Funktion der gewählten App —
-    /// der Aufrufer führt sie NACH dem Loslassen des Locks aus!
-    fn startmenue_taste(&mut self, taste: DecodedKey) -> Option<fn()> {
-        self.start_menue.as_ref()?;
-
-        // Enter: gewählte App starten und Menü schließen.
-        if matches!(taste, DecodedKey::Unicode('\n') | DecodedKey::Unicode('\r')) {
-            let menue = self.start_menue.as_ref().unwrap();
-            let start = crate::apps::filtern(&menue.suchtext)
-                .get(menue.auswahl)
-                .map(|app| app.start);
-            if start.is_some() {
-                self.start_menue = None;
+    /// Verarbeitet eine Widget-Reaktion des Startmenüs: Suche filtert
+    /// live, Enter/Eintrag-Klick startet die gewählte App (nach dem
+    /// Loslassen des Locks — NachLock).
+    fn startmenue_reaktion(&mut self, reaktion: crate::ui::UiReaktion) -> NachLock {
+        let menue = match &mut self.start_menue {
+            Some(menue) => menue,
+            None => return NachLock::Keine,
+        };
+        match reaktion.nachricht {
+            Some(MENUE_SUCHE_GEAENDERT) => {
+                menue.filtern();
+                menue.zeichnen();
                 self.alles_dirty = true;
             }
-            return start;
-        }
-
-        let menue = self.start_menue.as_mut().unwrap();
-        match taste {
-            DecodedKey::Unicode('\u{8}') | DecodedKey::Unicode('\u{7f}') => {
-                menue.suchtext.pop();
-                menue.auswahl = 0;
-            }
-            DecodedKey::RawKey(pc_keyboard::KeyCode::ArrowUp) => {
-                menue.auswahl = menue.auswahl.saturating_sub(1);
-            }
-            DecodedKey::RawKey(pc_keyboard::KeyCode::ArrowDown) => {
-                let anzahl = crate::apps::filtern(&menue.suchtext).len();
-                if menue.auswahl + 1 < anzahl {
-                    menue.auswahl += 1;
+            Some(MENUE_ENTER) | Some(MENUE_EINTRAG_KLICK) => {
+                let start = menue
+                    .liste
+                    .auswahl
+                    .and_then(|zeile| menue.gefiltert.get(zeile))
+                    .map(|&index| crate::apps::alle_apps()[index].start);
+                if let Some(start) = start {
+                    self.startmenue_schliessen();
+                    return NachLock::Ausfuehren(start);
                 }
             }
-            DecodedKey::Unicode(zeichen) if zeichen >= ' ' => {
-                if menue.suchtext.chars().count() < 24 {
-                    menue.suchtext.push(zeichen);
-                    menue.auswahl = 0;
-                }
-            }
-            _ => return None,
+            _ => {}
         }
-        self.alles_dirty = true;
-        None
+        if reaktion.neu_zeichnen {
+            if let Some(menue) = &mut self.start_menue {
+                menue.zeichnen();
+            }
+            self.alles_dirty = true;
+        }
+        NachLock::Keine
     }
 
-    /// Klick bei offenem Startmenü. Liefert wie startmenue_taste ggf.
-    /// eine Start-Funktion nach draußen.
-    fn startmenue_klick(&mut self, px: i32, py: i32) -> Option<fn()> {
-        let suchtext = self.start_menue.as_ref()?.suchtext.clone();
-        let gefiltert = crate::apps::filtern(&suchtext);
-        let rect = self.menue_rechteck(gefiltert.len());
-
-        if rect.enthaelt(px, py) {
-            for (i, app) in gefiltert.iter().enumerate() {
-                if Self::menue_eintrag_rechteck(rect, i).enthaelt(px, py) {
-                    self.start_menue = None;
-                    self.alles_dirty = true;
-                    return Some(app.start);
-                }
-            }
-            // Klick ins Menü, aber auf keinen Eintrag (Suchfeld, Rand):
-            return None;
-        }
-
-        // Klick AUSSERHALB schließt das Menü und wird verschluckt —
-        // auch auf dem Startknopf (das ist der Toggle-Effekt).
-        self.startmenue_schliessen();
-        None
-    }
-
-    /// Maus-Hover im offenen Menü wählt den Eintrag unter dem Cursor.
-    fn startmenue_hover(&mut self, px: i32, py: i32) {
-        let suchtext = match &self.start_menue {
-            Some(menue) => menue.suchtext.clone(),
-            None => return,
+    /// Tastatur im offenen Startmenü (ruft die Shell).
+    fn startmenue_taste(&mut self, taste: DecodedKey) -> NachLock {
+        let reaktion = match &mut self.start_menue {
+            Some(menue) => menue.ereignis(&crate::ui::UiEreignis::Taste(taste)),
+            None => return NachLock::Keine,
         };
-        let anzahl = crate::apps::filtern(&suchtext).len();
-        let rect = self.menue_rechteck(anzahl);
-        for i in 0..anzahl {
-            if Self::menue_eintrag_rechteck(rect, i).enthaelt(px, py) {
-                let menue = self.start_menue.as_mut().unwrap();
-                if menue.auswahl != i {
-                    menue.auswahl = i;
-                    self.alles_dirty = true;
-                }
-                return;
+        self.startmenue_reaktion(reaktion)
+    }
+
+    /// Maus im offenen Startmenü: Ereignisse gehen in Panel-
+    /// Koordinaten an die Widgets; ein Klick außerhalb schließt
+    /// (auch auf dem Startknopf — das ist der Toggle-Effekt).
+    fn startmenue_maus(&mut self, event: &MausEvent, px: i32, py: i32) -> NachLock {
+        use crate::ui::UiEreignis;
+
+        let panel = self.menue_panel_rechteck();
+        let (lx, ly) = (px - panel.x, py - panel.y);
+        let ereignis = match event {
+            MausEvent::Gedrueckt(MausTaste::Links) if !panel.enthaelt(px, py) => {
+                self.startmenue_schliessen();
+                return NachLock::Keine;
             }
-        }
+            MausEvent::Gedrueckt(MausTaste::Links) => UiEreignis::Klick { x: lx, y: ly },
+            MausEvent::Losgelassen(MausTaste::Links) => UiEreignis::Losgelassen { x: lx, y: ly },
+            MausEvent::Bewegt { .. } => UiEreignis::Bewegt { x: lx, y: ly },
+            MausEvent::Gescrollt(delta) => UiEreignis::Scroll { delta: *delta, x: lx, y: ly },
+            _ => return NachLock::Keine,
+        };
+        let reaktion = match &mut self.start_menue {
+            Some(menue) => menue.ereignis(&ereignis),
+            None => return NachLock::Keine,
+        };
+        self.startmenue_reaktion(reaktion)
     }
 
     /// Resize-Kante am Punkt (nur unterhalb der Titelzeile relevant).
@@ -715,6 +861,11 @@ impl FensterManager {
     /// Nachricht) — der Aufrufer MUSS sie erst nach dem Loslassen des
     /// MANAGER-Locks ausführen (Deadlock-Regel).
     pub fn maus_event(&mut self, event: &MausEvent, px: i32, py: i32) -> NachLock {
+        // Ein offenes Startmenü fängt ALLE Maus-Ereignisse ab
+        // (liegt zuoberst) — das Widget-Routing übernimmt den Rest.
+        if self.start_menue.is_some() {
+            return self.startmenue_maus(event, px, py);
+        }
         match event {
             MausEvent::Gedrueckt(MausTaste::Links) => self.maus_gedrueckt(px, py),
             MausEvent::Losgelassen(MausTaste::Links) => self.maus_losgelassen(px, py),
@@ -733,17 +884,12 @@ impl FensterManager {
     /// übersetzt die Widget-Reaktion in dirty-Flags + NachLock.
     fn ui_maus(&mut self, index: usize, ereignis: crate::ui::UiEreignis) -> NachLock {
         let Fenster { inhalt, puffer, dirty, inhalt_neu, .. } = &mut self.fenster[index];
-        if let Inhalt::Ui(ui) = inhalt {
-            let reaktion = ui.maus(ereignis, puffer);
-            if reaktion.neu_zeichnen {
-                *inhalt_neu = true;
-                *dirty = true;
-            }
-            if let Some(id) = reaktion.nachricht {
-                return NachLock::Nachricht(ui.handler(), id);
-            }
-        }
-        NachLock::Keine
+        let reaktion = match inhalt {
+            Inhalt::Ui(ui) => ui.maus(ereignis, puffer),
+            Inhalt::App(app_fenster) => app_fenster.ui.maus(ereignis, puffer),
+            _ => return NachLock::Keine,
+        };
+        ui_reaktion_verarbeiten(inhalt, dirty, inhalt_neu, reaktion)
     }
 
     /// Scrollrad: geht an den Ui-Inhalt unter dem Cursor.
@@ -760,15 +906,9 @@ impl FensterManager {
     }
 
     fn maus_gedrueckt(&mut self, px: i32, py: i32) -> NachLock {
-        // Ein offenes Startmenü fängt ALLE Klicks ab (liegt zuoberst).
-        if self.start_menue.is_some() {
-            return match self.startmenue_klick(px, py) {
-                Some(start) => NachLock::AppStarten(start),
-                None => NachLock::Keine,
-            };
-        }
         // Die Taskleiste liegt IMMER obenauf — sie fängt Klicks vor
-        // allen Fenstern ab.
+        // allen Fenstern ab. (Das Startmenü hat maus_event schon
+        // davor abgefangen.)
         if py >= self.taskleiste_y() {
             self.taskleiste_klick(px, py);
             return NachLock::Keine;
@@ -913,10 +1053,8 @@ impl FensterManager {
                 }
             }
             Interaktion::Keine => {
-                // Hover im offenen Startmenü wählt den Eintrag darunter:
-                if self.start_menue.is_some() {
-                    self.startmenue_hover(x, y);
-                }
+                // (Bei offenem Startmenü kommt maus_bewegt gar nicht
+                // erst hierher — maus_event fängt alles vorher ab.)
                 self.cursor_aktualisieren(x, y);
                 self.ui_hover(x, y);
             }
@@ -1050,15 +1188,13 @@ impl FensterManager {
             match inhalt {
                 // Widget-Fenster: Tab-Fokuskette + Tasten ans
                 // fokussierte Widget (macht das UiFenster).
-                Inhalt::Ui(ui) => {
-                    let reaktion = ui.taste(taste, puffer);
-                    if reaktion.neu_zeichnen {
-                        *inhalt_neu = true;
-                        *dirty = true;
-                    }
-                    if let Some(id) = reaktion.nachricht {
-                        return NachLock::Nachricht(ui.handler(), id);
-                    }
+                Inhalt::Ui(_) | Inhalt::App(_) => {
+                    let reaktion = match inhalt {
+                        Inhalt::Ui(ui) => ui.taste(taste, puffer),
+                        Inhalt::App(app_fenster) => app_fenster.ui.taste(taste, puffer),
+                        _ => unreachable!(),
+                    };
+                    return ui_reaktion_verarbeiten(inhalt, dirty, inhalt_neu, reaktion);
                 }
                 Inhalt::TastaturEcho { text } => {
                     match taste {
@@ -1087,19 +1223,46 @@ impl FensterManager {
     fn switcher_weiter(&mut self) {
         match &mut self.switcher {
             Some(sw) => {
-                if !sw.reihenfolge.is_empty() {
-                    sw.auswahl = (sw.auswahl + 1) % sw.reihenfolge.len();
-                }
+                sw.liste.auswahl_bewegen(1, sw.liste_bereich().hoehe);
+                sw.zeichnen();
             }
             None => {
+                use crate::ui::widgets::{ListenEintrag, ScrollListe};
+
                 // Reihenfolge: oberstes zuerst (MRU), inkl. minimierte.
                 let reihenfolge: Vec<FensterId> =
                     self.fenster.iter().rev().map(|f| f.id).collect();
-                if !reihenfolge.is_empty() {
-                    // Erster Tab wählt das NÄCHSTE Fenster.
-                    let auswahl = if reihenfolge.len() > 1 { 1 } else { 0 };
-                    self.switcher = Some(Switcher { reihenfolge, auswahl });
+                if reihenfolge.is_empty() {
+                    return;
                 }
+                let eintraege = self
+                    .fenster
+                    .iter()
+                    .rev()
+                    .map(|f| ListenEintrag {
+                        icon: Some(inhalt_icon(&f.inhalt)),
+                        text: if f.minimiert {
+                            format!("{} (minimiert)", f.titel)
+                        } else {
+                            f.titel.clone()
+                        },
+                    })
+                    .collect();
+                let liste = ScrollListe::neu(eintraege, 0, 0);
+                // Höhe: bis zu 8 Zeilen sichtbar, Rest scrollt.
+                let zeilen = (reihenfolge.len() as i32).min(8);
+                let hoehe = (zeilen * METRIK.listen_eintrag_hoehe + 2 * METRIK.abstand) as usize;
+                let mut sw = Switcher {
+                    reihenfolge,
+                    liste,
+                    puffer: FensterPuffer::neu(420, hoehe, theme::aktuell().inhalt_hintergrund),
+                };
+                // Erster Tab wählt das NÄCHSTE Fenster (Index 1).
+                if sw.reihenfolge.len() > 1 {
+                    sw.liste.auswahl_bewegen(1, sw.liste_bereich().hoehe);
+                }
+                sw.zeichnen();
+                self.switcher = Some(sw);
             }
         }
         self.alles_dirty = true;
@@ -1107,7 +1270,8 @@ impl FensterManager {
 
     fn switcher_bestaetigen(&mut self) {
         if let Some(sw) = self.switcher.take() {
-            if let Some(&id) = sw.reihenfolge.get(sw.auswahl) {
+            let auswahl = sw.liste.auswahl.unwrap_or(0);
+            if let Some(&id) = sw.reihenfolge.get(auswahl) {
                 if let Some(index) = self.index_von(id) {
                     self.fenster[index].minimiert = false;
                 }
@@ -1123,13 +1287,26 @@ impl FensterManager {
                 inhalt_zeichnen(fenster);
                 fenster.dirty = true;
             }
-            // Ui-Fenster mit fokussiertem Textfeld: regelmäßig neu
-            // zeichnen, damit der Cursor blinkt (zeit-API im Widget).
-            if let Inhalt::Ui(ui) = &fenster.inhalt {
-                if !fenster.minimiert && ui.blinkt() {
-                    fenster.inhalt_neu = true;
-                    fenster.dirty = true;
+            // Widget-Fenster: Cursor-Blinken (fokussiertes Textfeld)
+            // und der Tick von Trait-Apps (Live-Inhalte).
+            let minimiert = fenster.minimiert;
+            let Fenster { inhalt, dirty, inhalt_neu, .. } = fenster;
+            match inhalt {
+                Inhalt::Ui(ui) if !minimiert && ui.blinkt() => {
+                    *inhalt_neu = true;
+                    *dirty = true;
                 }
+                Inhalt::App(app_fenster) if !minimiert => {
+                    if app_fenster.app.tick() {
+                        app_fenster.neu_aufbauen();
+                        *inhalt_neu = true;
+                        *dirty = true;
+                    } else if app_fenster.ui.blinkt() {
+                        *inhalt_neu = true;
+                        *dirty = true;
+                    }
+                }
+                _ => {}
             }
         }
         // Taskleisten-Uhr: nur neu komponieren, wenn die angezeigte
@@ -1201,78 +1378,33 @@ impl FensterManager {
         // 4. Taskleiste — IMMER im Vordergrund, deshalb NACH den Fenstern:
         self.taskleiste_zeichnen(&mut z);
 
-        // 5. Startmenü (über der Taskleiste):
+        // 5. Startmenü (über der Taskleiste): Der Widget-Verbund hat
+        // sich in seinen Offscreen-Puffer gezeichnet — hier nur noch
+        // Schatten, Blit und Akzent-Rahmen.
         if let Some(menue) = &self.start_menue {
-            self.startmenue_zeichnen(&mut z, menue);
+            let panel = self.menue_panel_rechteck();
+            z.rechteck_fuellen(
+                Rechteck::neu(panel.x + METRIK.abstand, panel.y + METRIK.abstand, panel.breite, panel.hoehe),
+                thema.schatten,
+            );
+            z.puffer_blit(panel.x, panel.y, menue.puffer.breite, &menue.puffer.pixel);
+            z.rechteck_rahmen(panel, thema.akzent);
         }
 
-        // 6. Alt+Tab-Overlay (ganz oben):
+        // 6. Alt+Tab-Overlay (ganz oben): Titelband + Listen-Blit.
         if let Some(sw) = &self.switcher {
-            self.switcher_zeichnen(&mut z, sw);
-        }
-    }
-
-    /// Zeichnet das Startmenü: Panel im Aurora-Stil, Suchfeld oben,
-    /// darunter die (gefilterte) App-Liste aus der Registry.
-    fn startmenue_zeichnen<F: Zeichenflaeche>(&self, z: &mut Zeichner<'_, F>, menue: &StartMenue) {
-        let thema = theme::aktuell();
-        let gefiltert = crate::apps::filtern(&menue.suchtext);
-        let rect = self.menue_rechteck(gefiltert.len());
-
-        // Schatten, Panel, Akzent-Rahmen:
-        z.rechteck_abgerundet(
-            Rechteck::neu(rect.x + METRIK.abstand, rect.y + METRIK.abstand, rect.breite, rect.hoehe),
-            METRIK.radius_gross,
-            thema.schatten,
-        );
-        z.rechteck_abgerundet(rect, METRIK.radius_gross, thema.flaeche);
-        z.rechteck_rahmen(rect, thema.akzent);
-
-        // Suchfeld: getippter Text oder Platzhalter, dazu ein Cursor.
-        let feld = Rechteck::neu(
-            rect.x + METRIK.abstand,
-            rect.y + METRIK.abstand,
-            rect.breite - 2 * METRIK.abstand,
-            METRIK.menue_suchfeld_hoehe - 2 * METRIK.abstand + 2,
-        );
-        z.rechteck_abgerundet(feld, METRIK.radius_klein, thema.eingabefeld);
-        let feld_text_y = feld.y + (feld.hoehe - METRIK.zeilen_hoehe) / 2;
-        if menue.suchtext.is_empty() {
-            z.text(feld.x + 10, feld_text_y, "Suchen ...", METRIK.schrift_ui, FontWeight::Regular, thema.text_gedimmt);
-        } else {
-            let text = format!("{}_", menue.suchtext);
-            z.text(feld.x + 10, feld_text_y, &text, METRIK.schrift_ui, FontWeight::Regular, thema.text_stark);
-        }
-
-        // Die App-Liste (jeder Eintrag: Icon + Name):
-        if gefiltert.is_empty() {
-            let leer = Self::menue_eintrag_rechteck(rect, 0);
-            z.text(
-                leer.x + 10,
-                leer.y + (leer.hoehe - METRIK.zeilen_hoehe) / 2,
-                "Keine Treffer",
-                METRIK.schrift_ui,
-                FontWeight::Regular,
-                thema.text_gedimmt,
+            let breite = sw.puffer.breite as i32;
+            let hoehe = sw.puffer.hoehe as i32 + 36; // Titelband oben
+            let bx = (self.bildschirm_breite - breite) / 2;
+            let by = (self.bildschirm_hoehe - hoehe) / 2;
+            z.rechteck_fuellen(
+                Rechteck::neu(bx + METRIK.abstand, by + METRIK.abstand, breite, hoehe),
+                thema.schatten,
             );
-            return;
-        }
-        for (i, app) in gefiltert.iter().enumerate() {
-            let eintrag = Self::menue_eintrag_rechteck(rect, i);
-            let gewaehlt = i == menue.auswahl;
-            if gewaehlt {
-                z.rechteck_abgerundet(eintrag, METRIK.radius_klein, thema.auswahl);
-            }
-            let text_y = eintrag.y + (eintrag.hoehe - METRIK.zeilen_hoehe) / 2;
-            z.icon(eintrag.x + 10, text_y, app.icon, 1);
-            z.text(
-                eintrag.x + 38,
-                text_y,
-                app.name,
-                METRIK.schrift_ui,
-                FontWeight::Regular,
-                if gewaehlt { thema.text_stark } else { thema.text_normal },
-            );
+            z.rechteck_fuellen(Rechteck::neu(bx, by, breite, 36), thema.flaeche);
+            z.text(bx + 14, by + 10, "Fenster wechseln", METRIK.schrift_ui, FontWeight::Bold, thema.text_normal);
+            z.puffer_blit(bx, by + 36, sw.puffer.breite, &sw.puffer.pixel);
+            z.rechteck_rahmen(Rechteck::neu(bx, by, breite, hoehe), thema.akzent);
         }
     }
 
@@ -1352,52 +1484,6 @@ impl FensterManager {
         z.text(datum_x, y + 21, &datum, METRIK.schrift_ui, FontWeight::Regular, thema.text_gedimmt);
     }
 
-    fn switcher_zeichnen<F: Zeichenflaeche>(&self, z: &mut Zeichner<'_, F>, sw: &Switcher) {
-        let thema = theme::aktuell();
-        let n = sw.reihenfolge.len() as i32;
-        let zeilen_h = 30;
-        let box_b = 420;
-        let box_h = 54 + n * zeilen_h;
-        let bx = (self.bildschirm_breite - box_b) / 2;
-        let by = (self.bildschirm_hoehe - box_h) / 2;
-
-        z.rechteck_abgerundet(
-            Rechteck::neu(bx + METRIK.abstand, by + METRIK.abstand, box_b, box_h),
-            METRIK.radius_gross,
-            thema.schatten,
-        );
-        z.rechteck_abgerundet(Rechteck::neu(bx, by, box_b, box_h), METRIK.radius_gross, thema.flaeche);
-        z.rechteck_rahmen(Rechteck::neu(bx, by, box_b, box_h), thema.akzent);
-        z.text(bx + 18, by + 14, "Fenster wechseln", METRIK.schrift_ui, FontWeight::Bold, thema.text_normal);
-
-        for (i, id) in sw.reihenfolge.iter().enumerate() {
-            let zy = by + 46 + i as i32 * zeilen_h;
-            if i == sw.auswahl {
-                z.rechteck_abgerundet(
-                    Rechteck::neu(bx + 10, zy - 4, box_b - 20, zeilen_h - 2),
-                    METRIK.radius_klein,
-                    thema.auswahl,
-                );
-            }
-            let (titel, icon, minimiert) = self
-                .index_von(*id)
-                .map(|idx| {
-                    let f = &self.fenster[idx];
-                    (f.titel.as_str(), inhalt_icon(&f.inhalt), f.minimiert)
-                })
-                .unwrap_or(("?", &crate::grafik::ICON_LOGO, false));
-            let farbe = if i == sw.auswahl {
-                thema.text_stark
-            } else {
-                thema.text_sekundaer
-            };
-            z.icon(bx + 16, zy, icon, 1);
-            z.text(bx + 40, zy, titel, METRIK.schrift_ui, FontWeight::Regular, farbe);
-            if minimiert {
-                z.text(bx + box_b - 110, zy, "(minimiert)", METRIK.schrift_ui, FontWeight::Regular, thema.text_gedimmt);
-            }
-        }
-    }
 }
 
 /// Zeichnet EIN Fenster (Schatten, Titelleiste + Knöpfe, Rahmen, Inhalt).
@@ -1477,6 +1563,7 @@ fn inhalt_icon(inhalt: &Inhalt) -> &'static crate::grafik::Icon {
     match inhalt {
         Inhalt::Terminal(_) => &crate::grafik::ICON_TERMINAL,
         Inhalt::Ui(ui) => ui.icon,
+        Inhalt::App(app_fenster) => app_fenster.ui.icon,
         Inhalt::Uhr => &crate::grafik::ICON_UHR,
         Inhalt::TastaturEcho { .. } => &crate::grafik::ICON_TASTATUR,
         Inhalt::Malflaeche { .. } => &crate::grafik::ICON_PINSEL,
@@ -1543,6 +1630,10 @@ fn inhalt_zeichnen(fenster: &mut Fenster) {
         ui.zeichnen(&mut fenster.puffer);
         return;
     }
+    if let Inhalt::App(app_fenster) = &fenster.inhalt {
+        app_fenster.ui.zeichnen(&mut fenster.puffer);
+        return;
+    }
     // Terminal: Rastergröße an die Fenstergröße anpassen, dann rendern.
     // (&mut fenster.inhalt und &mut fenster.puffer sind verschiedene
     // Felder — der Borrow-Checker erlaubt beides gleichzeitig.)
@@ -1566,7 +1657,7 @@ fn inhalt_zeichnen(fenster: &mut Fenster) {
 
     match &fenster.inhalt {
         // Oben schon behandelt (frühe returns):
-        Inhalt::Terminal(_) | Inhalt::Ui(_) => {}
+        Inhalt::Terminal(_) | Inhalt::Ui(_) | Inhalt::App(_) => {}
         Inhalt::Uhr => {
             let ticks = zeit::ticks();
             let ms = zeit::ms_seit_boot();
@@ -1689,10 +1780,8 @@ pub fn startmenue_schliessen() {
 /// Taste ins offene Startmenü (ruft die Shell). Startet die gewählte
 /// App — wie bei maus_event erst NACH dem Loslassen des Locks.
 pub fn startmenue_taste(taste: DecodedKey) {
-    let aktion = mit_manager(|m| m.startmenue_taste(taste)).flatten();
-    if let Some(start) = aktion {
-        start();
-    }
+    let nach = mit_manager(|m| m.startmenue_taste(taste)).unwrap_or(NachLock::Keine);
+    nach_lock_ausfuehren(nach);
 }
 
 // ----- Terminal (die SpeedShell als Fenster) -----
@@ -1741,6 +1830,14 @@ pub fn app_fenster_oeffnen(titel: &str, breite: usize, hoehe: usize, inhalt: Inh
         let versatz = (m.fenster.len() as i32 % 5) * 40;
         m.fenster_erstellen(titel, 120 + versatz, 90 + versatz, breite, hoehe, inhalt);
     });
+}
+
+/// Öffnet eine Trait-App (ui::App) als Fenster — die Brücke der
+/// App-Registry zum App-Trait: Titel und Icon liefert die App selbst.
+pub fn app_starten(app: alloc::boxed::Box<dyn crate::ui::App>, breite: usize, hoehe: usize) {
+    let app_fenster = crate::ui::AppFenster::neu(app);
+    let titel = app_fenster.app.name();
+    app_fenster_oeffnen(titel, breite, hoehe, Inhalt::App(app_fenster));
 }
 
 /// Wechselt das Theme und zeichnet ALLE Fenster neu (Inhalte nutzen
@@ -2204,20 +2301,26 @@ mod tests {
         assert!(!leer.terminal_schreiben(format_args!("x"), vg, hg));
     }
 
-    /// Startmenü: Umschalten, Suchtext filtert, Enter liefert die
-    /// Start-Funktion des Treffers nach draußen (Deadlock-Regel).
+    /// Startmenü (Widget-Verbund): Suchtext filtert live, Enter
+    /// liefert die Start-Funktion als NachLock nach draußen
+    /// (Deadlock-Regel), ohne Treffer bleibt das Menü offen.
     #[test_case]
     fn test_startmenue_suche_und_start() {
         let (mut manager, _, _) = test_manager();
         manager.startmenue_umschalten();
         assert!(manager.start_menue.is_some());
+        let alle = manager.start_menue.as_ref().unwrap().gefiltert.len();
+        assert_eq!(alle, crate::apps::alle_apps().len());
 
-        // "uhr" tippen -> genau ein Treffer, Enter startet ihn:
+        // "uhr" tippen -> Live-Filter auf genau einen Treffer:
         for zeichen in "uhr".chars() {
-            assert!(manager.startmenue_taste(DecodedKey::Unicode(zeichen)).is_none());
+            let nach = manager.startmenue_taste(DecodedKey::Unicode(zeichen));
+            assert!(matches!(nach, NachLock::Keine));
         }
+        assert_eq!(manager.start_menue.as_ref().unwrap().gefiltert.len(), 1);
+        // Enter startet ihn (Aktion geht als NachLock nach draußen):
         let aktion = manager.startmenue_taste(DecodedKey::Unicode('\n'));
-        assert!(aktion.is_some());
+        assert!(matches!(aktion, NachLock::Ausfuehren(_)));
         assert!(manager.start_menue.is_none()); // Menü hat sich geschlossen
 
         // Ohne Treffer startet Enter nichts (Menü bleibt offen):
@@ -2225,7 +2328,9 @@ mod tests {
         for zeichen in "xyz".chars() {
             manager.startmenue_taste(DecodedKey::Unicode(zeichen));
         }
-        assert!(manager.startmenue_taste(DecodedKey::Unicode('\n')).is_none());
+        assert!(manager.start_menue.as_ref().unwrap().gefiltert.is_empty());
+        let leer = manager.startmenue_taste(DecodedKey::Unicode('\n'));
+        assert!(matches!(leer, NachLock::Keine));
         assert!(manager.start_menue.is_some());
 
         // Klick weit außerhalb schließt das Menü:
