@@ -11,7 +11,7 @@ use super::{UiEreignis, UiReaktion, Widget};
 use crate::fenster::FensterPuffer;
 use crate::grafik::{Icon, Rechteck, Zeichner};
 use crate::shell::editor::{Reaktion, Taste, Vervollstaendiger, ZeilenEditor};
-use crate::theme::{self, METRIK};
+use crate::theme::{self, metrik};
 use alloc::string::String;
 use alloc::vec::Vec;
 use noto_sans_mono_bitmap::{get_raster_width, FontWeight};
@@ -19,12 +19,12 @@ use pc_keyboard::{DecodedKey, KeyCode};
 
 /// Breite eines Zeichens der UI-Schrift in Pixeln.
 fn zeichen_breite() -> i32 {
-    get_raster_width(FontWeight::Regular, METRIK.schrift_ui) as i32
+    get_raster_width(FontWeight::Regular, metrik().schrift_ui) as i32
 }
 
 /// Text vertikal in einem Bereich zentrieren (y der Textoberkante).
 fn text_mitte_y(bereich: Rechteck) -> i32 {
-    bereich.y + (bereich.hoehe - METRIK.zeilen_hoehe) / 2
+    bereich.y + (bereich.hoehe - metrik().zeilen_hoehe) / 2
 }
 
 // ---------------------------------------------------------------------------
@@ -51,7 +51,7 @@ impl Widget for Label {
     fn wunschgroesse(&self) -> (i32, i32) {
         let zeilen = self.text.lines().count().max(1) as i32;
         let laengste = self.text.lines().map(|z| z.chars().count()).max().unwrap_or(0) as i32;
-        (laengste * zeichen_breite(), zeilen * METRIK.zeilen_hoehe)
+        (laengste * zeichen_breite(), zeilen * metrik().zeilen_hoehe)
     }
 
     fn zeichnen(&self, z: &mut Zeichner<'_, FensterPuffer>, bereich: Rechteck) {
@@ -60,9 +60,9 @@ impl Widget for Label {
         for (i, zeile) in self.text.lines().enumerate() {
             z.text(
                 bereich.x,
-                bereich.y + i as i32 * METRIK.zeilen_hoehe,
+                bereich.y + i as i32 * metrik().zeilen_hoehe,
                 zeile,
-                METRIK.schrift_ui,
+                metrik().schrift_ui,
                 FontWeight::Regular,
                 farbe,
             );
@@ -82,7 +82,7 @@ pub struct Trennlinie;
 
 impl Widget for Trennlinie {
     fn wunschgroesse(&self) -> (i32, i32) {
-        (0, METRIK.abstand)
+        (0, metrik().abstand)
     }
     fn zeichnen(&self, z: &mut Zeichner<'_, FensterPuffer>, bereich: Rechteck) {
         let y = bereich.y + bereich.hoehe / 2;
@@ -118,8 +118,8 @@ impl Widget for Button {
     fn wunschgroesse(&self) -> (i32, i32) {
         let icon_platz = if self.icon.is_some() { 22 } else { 0 };
         (
-            self.text.chars().count() as i32 * zeichen_breite() + 2 * METRIK.abstand + icon_platz + 8,
-            METRIK.ui_element_hoehe,
+            self.text.chars().count() as i32 * zeichen_breite() + 2 * metrik().abstand + icon_platz + 8,
+            metrik().ui_element_hoehe,
         )
     }
 
@@ -133,7 +133,7 @@ impl Widget for Button {
         } else {
             thema.eingabefeld
         };
-        z.rechteck_abgerundet(bereich, METRIK.radius_klein, fuellung);
+        z.rechteck_abgerundet(bereich, metrik().radius_klein, fuellung);
         z.rechteck_rahmen(bereich, if self.hover { thema.akzent } else { thema.rahmen_passiv });
 
         let mut text_x = bereich.x
@@ -149,7 +149,7 @@ impl Widget for Button {
             text_x,
             text_mitte_y(bereich),
             &self.text,
-            METRIK.schrift_ui,
+            metrik().schrift_ui,
             FontWeight::Regular,
             thema.text_stark,
         );
@@ -208,8 +208,8 @@ impl Checkbox {
 impl Widget for Checkbox {
     fn wunschgroesse(&self) -> (i32, i32) {
         (
-            METRIK.zeilen_hoehe + METRIK.abstand + self.text.chars().count() as i32 * zeichen_breite(),
-            METRIK.ui_element_hoehe,
+            metrik().zeilen_hoehe + metrik().abstand + self.text.chars().count() as i32 * zeichen_breite(),
+            metrik().ui_element_hoehe,
         )
     }
 
@@ -217,9 +217,9 @@ impl Widget for Checkbox {
         let thema = theme::aktuell();
         let kasten = Rechteck::neu(
             bereich.x,
-            bereich.y + (bereich.hoehe - METRIK.zeilen_hoehe) / 2,
-            METRIK.zeilen_hoehe,
-            METRIK.zeilen_hoehe,
+            bereich.y + (bereich.hoehe - metrik().zeilen_hoehe) / 2,
+            metrik().zeilen_hoehe,
+            metrik().zeilen_hoehe,
         );
         z.rechteck_abgerundet(kasten, 3, if self.an { thema.akzent } else { thema.eingabefeld });
         z.rechteck_rahmen(kasten, if self.hover { thema.akzent } else { thema.rahmen_passiv });
@@ -230,10 +230,10 @@ impl Widget for Checkbox {
             z.linie(cx - 1, cy + 3, cx + 4, cy - 3, thema.text_titel_aktiv);
         }
         z.text(
-            kasten.x + kasten.breite + METRIK.abstand,
+            kasten.x + kasten.breite + metrik().abstand,
             text_mitte_y(bereich),
             &self.text,
-            METRIK.schrift_ui,
+            metrik().schrift_ui,
             FontWeight::Regular,
             thema.text_normal,
         );
@@ -307,25 +307,25 @@ impl Widget for Textfeld {
     fn wunschgroesse(&self) -> (i32, i32) {
         // Breite: Box-Container strecken quer sowieso auf volle
         // Breite — der Wunsch ist nur das Minimum.
-        (120, METRIK.ui_element_hoehe)
+        (120, metrik().ui_element_hoehe)
     }
 
     fn zeichnen(&self, z: &mut Zeichner<'_, FensterPuffer>, bereich: Rechteck) {
         let thema = theme::aktuell();
-        z.rechteck_abgerundet(bereich, METRIK.radius_klein, thema.eingabefeld);
+        z.rechteck_abgerundet(bereich, metrik().radius_klein, thema.eingabefeld);
         z.rechteck_rahmen(bereich, if self.fokus { thema.akzent } else { thema.rahmen_passiv });
 
         // Text (bei Überlänge das ENDE zeigen — dort wird getippt):
-        let platz = ((bereich.breite - 2 * METRIK.abstand) / zeichen_breite()).max(0) as usize;
+        let platz = ((bereich.breite - 2 * metrik().abstand) / zeichen_breite()).max(0) as usize;
         let text = self.editor.zeile();
         let anzahl = text.chars().count();
         let sichtbar: String = text.chars().skip(anzahl.saturating_sub(platz)).collect();
         let text_y = text_mitte_y(bereich);
         z.text(
-            bereich.x + METRIK.abstand,
+            bereich.x + metrik().abstand,
             text_y,
             &sichtbar,
-            METRIK.schrift_ui,
+            metrik().schrift_ui,
             FontWeight::Regular,
             thema.text_stark,
         );
@@ -333,9 +333,9 @@ impl Widget for Textfeld {
         // Cursor: blinkt über die zeit-API (500-ms-Takt); der Uhr-Task
         // stößt das Neuzeichnen an, solange das Feld fokussiert ist.
         if self.fokus && (crate::zeit::us_seit_boot() / 500_000).is_multiple_of(2) {
-            let cursor_x = bereich.x + METRIK.abstand + sichtbar.chars().count() as i32 * zeichen_breite();
+            let cursor_x = bereich.x + metrik().abstand + sichtbar.chars().count() as i32 * zeichen_breite();
             z.rechteck_fuellen(
-                Rechteck::neu(cursor_x, text_y, 2, METRIK.zeilen_hoehe),
+                Rechteck::neu(cursor_x, text_y, 2, metrik().zeilen_hoehe),
                 theme::aktuell().akzent,
             );
         }
@@ -447,7 +447,7 @@ impl ScrollListe {
     }
 
     fn inhalt_hoehe(&self) -> i32 {
-        self.eintraege.len() as i32 * METRIK.listen_eintrag_hoehe
+        self.eintraege.len() as i32 * metrik().listen_eintrag_hoehe
     }
 
     /// Das Rechteck des Scrollbalken-GRIFFS (None = alles sichtbar).
@@ -460,9 +460,9 @@ impl ScrollListe {
         let weg = bereich.hoehe - hoehe;
         let y = bereich.y + weg * self.scroll / (inhalt - bereich.hoehe);
         Some(Rechteck::neu(
-            bereich.x + bereich.breite - METRIK.scrollbalken_breite,
+            bereich.x + bereich.breite - metrik().scrollbalken_breite,
             y,
-            METRIK.scrollbalken_breite,
+            metrik().scrollbalken_breite,
             hoehe,
         ))
     }
@@ -491,8 +491,8 @@ impl ScrollListe {
         let neu = (self.auswahl.unwrap_or(0) as i32 + delta).rem_euclid(anzahl);
         self.auswahl = Some(neu as usize);
         // In den Sichtbereich holen:
-        let oben = neu * METRIK.listen_eintrag_hoehe;
-        let unten = oben + METRIK.listen_eintrag_hoehe;
+        let oben = neu * metrik().listen_eintrag_hoehe;
+        let unten = oben + metrik().listen_eintrag_hoehe;
         if oben < self.scroll {
             self.scroll = oben;
         } else if unten > self.scroll + sicht_hoehe {
@@ -508,17 +508,17 @@ impl ScrollListe {
     }
 
     fn eintrag_bei(&self, bereich: Rechteck, x: i32, y: i32) -> Option<usize> {
-        if !bereich.enthaelt(x, y) || x >= bereich.x + bereich.breite - METRIK.scrollbalken_breite {
+        if !bereich.enthaelt(x, y) || x >= bereich.x + bereich.breite - metrik().scrollbalken_breite {
             return None;
         }
-        let index = ((y - bereich.y + self.scroll) / METRIK.listen_eintrag_hoehe) as usize;
+        let index = ((y - bereich.y + self.scroll) / metrik().listen_eintrag_hoehe) as usize;
         (index < self.eintraege.len()).then_some(index)
     }
 }
 
 impl Widget for ScrollListe {
     fn wunschgroesse(&self) -> (i32, i32) {
-        (160, 3 * METRIK.listen_eintrag_hoehe)
+        (160, 3 * metrik().listen_eintrag_hoehe)
     }
 
     fn flex(&self) -> i32 {
@@ -535,31 +535,31 @@ impl Widget for ScrollListe {
         let (erster, letzter) = sichtbare_eintraege(
             self.scroll,
             bereich.hoehe,
-            METRIK.listen_eintrag_hoehe,
+            metrik().listen_eintrag_hoehe,
             self.eintraege.len(),
         );
         for index in erster..letzter {
             let eintrag = &self.eintraege[index];
-            let y = bereich.y + index as i32 * METRIK.listen_eintrag_hoehe - self.scroll;
+            let y = bereich.y + index as i32 * metrik().listen_eintrag_hoehe - self.scroll;
             let zeile = Rechteck::neu(
                 bereich.x + 2,
                 y,
-                bereich.breite - METRIK.scrollbalken_breite - 4,
-                METRIK.listen_eintrag_hoehe,
+                bereich.breite - metrik().scrollbalken_breite - 4,
+                metrik().listen_eintrag_hoehe,
             );
             if self.auswahl == Some(index) {
-                z.rechteck_abgerundet(zeile, METRIK.radius_klein, thema.auswahl);
+                z.rechteck_abgerundet(zeile, metrik().radius_klein, thema.auswahl);
             }
             let mut text_x = zeile.x + 6;
             if let Some(icon) = eintrag.icon {
-                z.icon(text_x, y + (METRIK.listen_eintrag_hoehe - 16) / 2, icon, 1);
+                z.icon(text_x, y + (metrik().listen_eintrag_hoehe - 16) / 2, icon, 1);
                 text_x += 22;
             }
             z.text(
                 text_x,
-                y + (METRIK.listen_eintrag_hoehe - METRIK.zeilen_hoehe) / 2,
+                y + (metrik().listen_eintrag_hoehe - metrik().zeilen_hoehe) / 2,
                 &eintrag.text,
-                METRIK.schrift_ui,
+                metrik().schrift_ui,
                 FontWeight::Regular,
                 if self.auswahl == Some(index) { thema.text_stark } else { thema.text_normal },
             );
@@ -569,12 +569,12 @@ impl Widget for ScrollListe {
         // Scrollbalken (nur wenn nötig):
         if let Some(griff) = self.balken_rechteck(bereich) {
             z.rechteck_fuellen(
-                Rechteck::neu(griff.x, bereich.y, METRIK.scrollbalken_breite, bereich.hoehe),
+                Rechteck::neu(griff.x, bereich.y, metrik().scrollbalken_breite, bereich.hoehe),
                 thema.leiste_knopf,
             );
             z.rechteck_abgerundet(
                 griff,
-                METRIK.radius_klein,
+                metrik().radius_klein,
                 if self.balken_griff.is_some() { thema.akzent } else { thema.text_gedimmt },
             );
         }
@@ -585,7 +585,7 @@ impl Widget for ScrollListe {
             UiEreignis::Scroll { delta, x, y } if bereich.enthaelt(*x, *y) => {
                 // Rad hoch (delta > 0) = Inhalt nach oben scrollen.
                 self.scroll = scroll_klemmen(
-                    self.scroll - *delta as i32 * 3 * METRIK.listen_eintrag_hoehe / 2,
+                    self.scroll - *delta as i32 * 3 * metrik().listen_eintrag_hoehe / 2,
                     self.inhalt_hoehe(),
                     bereich.hoehe,
                 );

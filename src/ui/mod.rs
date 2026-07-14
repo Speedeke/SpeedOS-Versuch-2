@@ -3,7 +3,7 @@
 // ARCHITEKTUR (retained Widget-Baum, siehe CLAUDE.md):
 //   * Ein Fenster-Inhalt = EIN Widget-Baum (Wurzel meist VBox/HBox).
 //     Jedes Widget zeichnet sich in den Fenster-Puffer und reagiert
-//     auf Ereignisse — Farben/Abstände IMMER aus theme/METRIK.
+//     auf Ereignisse — Farben/Abstände IMMER aus theme/metrik().
 //   * Koordinaten: ALLES in Fensterinhalt-Koordinaten. Ein Widget
 //     bekommt sein zugewiesenes Rechteck (`bereich`) mitgereicht und
 //     prüft selbst `bereich.enthaelt(x, y)` — dasselbe Rechteck-
@@ -37,7 +37,7 @@ pub use app::{App, AppFenster, AppReaktion};
 
 use crate::fenster::FensterPuffer;
 use crate::grafik::{Rechteck, Zeichenflaeche, Zeichner};
-use crate::theme::METRIK;
+use crate::theme::metrik;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use pc_keyboard::DecodedKey;
@@ -247,7 +247,7 @@ impl BoxContainer {
             })
             .collect();
         let laenge = if self.richtung == Richtung::Vertikal { bereich.hoehe } else { bereich.breite };
-        laengen_verteilen(&elemente, laenge, METRIK.abstand)
+        laengen_verteilen(&elemente, laenge, metrik().abstand)
             .into_iter()
             .map(|(start, groesse)| match self.richtung {
                 Richtung::Vertikal => Rechteck::neu(bereich.x, bereich.y + start, bereich.breite, groesse),
@@ -272,7 +272,7 @@ impl Widget for BoxContainer {
                 Richtung::Vertikal => (h, b),
                 Richtung::Horizontal => (b, h),
             };
-            haupt += kind_haupt + if i > 0 { METRIK.abstand } else { 0 };
+            haupt += kind_haupt + if i > 0 { metrik().abstand } else { 0 };
             quer = quer.max(kind_quer);
         }
         match self.richtung {
@@ -436,10 +436,10 @@ impl UiFenster {
     /// Der Bereich des Wurzel-Widgets (Fenster-Inhalt minus Rand).
     fn wurzel_bereich(puffer: &FensterPuffer) -> Rechteck {
         Rechteck::neu(
-            METRIK.ui_rand,
-            METRIK.ui_rand,
-            puffer.flaeche_breite() as i32 - 2 * METRIK.ui_rand,
-            puffer.flaeche_hoehe() as i32 - 2 * METRIK.ui_rand,
+            metrik().ui_rand,
+            metrik().ui_rand,
+            puffer.flaeche_breite() as i32 - 2 * metrik().ui_rand,
+            puffer.flaeche_hoehe() as i32 - 2 * metrik().ui_rand,
         )
     }
 
@@ -550,7 +550,7 @@ mod tests {
             Box::new(Button::neu("Zwei", 2)),
         ]);
         let bereich = Rechteck::neu(0, 0, 200, 200);
-        // Button-Höhe = METRIK.ui_element_hoehe (30), Abstand 8:
+        // Button-Höhe = metrik().ui_element_hoehe (30), Abstand 8:
         // Button "Zwei" beginnt bei y=38. Klick+Loslassen bei y=45:
         baum.ereignis(&UiEreignis::Klick { x: 10, y: 45 }, bereich);
         let reaktion = baum.ereignis(&UiEreignis::Losgelassen { x: 10, y: 45 }, bereich);

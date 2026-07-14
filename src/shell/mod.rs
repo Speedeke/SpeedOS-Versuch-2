@@ -266,8 +266,12 @@ mod tests {
         // Primitive wirklich gezeichnet), desktop den Desktop-Modus
         // (samt Terminal-Fenster — die restlichen Ausgaben liefen
         // wirklich durch die Terminal-Umleitung!): beides aufräumen.
+        // desktop_starten hat außerdem die UI-Skalierung nach der
+        // Auflösung gesetzt — zurück auf 1.0, sonst rechnen die
+        // metrik()-abhängigen ui-Tests bei 4K-Läufen mit 2.0.
         crate::grafik::demo_beenden();
         crate::fenster::desktop_beenden();
+        crate::theme::skala_setzen_nach_breite(0);
         crate::konsole::cursor_aktivieren();
     }
 

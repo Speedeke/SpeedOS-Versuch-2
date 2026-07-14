@@ -50,6 +50,11 @@ pub struct DoppelPuffer {
     vorne: &'static mut [u8],
     /// Der Back-Buffer im RAM — hierauf zeichnet alles.
     hinten: &'static mut [u8],
+    /// Hintergrund-Cache fürs Dirty-Rect-Compositing: BYTE-identisch
+    /// zum Back-Buffer (gleiches Pixelformat!), damit die Wieder-
+    /// herstellung ein reines memcpy pro Zeile ist. None, bis der
+    /// Compositor ihn per hintergrund_uebernehmen() füllt.
+    hintergrund: Option<&'static mut [u8]>,
     info: FrameBufferInfo,
 }
 
@@ -178,6 +183,47 @@ impl DoppelPuffer {
                     ziel.fill(((farbe.r as u16 + farbe.g as u16 + farbe.b as u16) / 3) as u8);
                 }
             }
+        }
+    }
+
+    /// Merkt sich den AKTUELLEN Back-Buffer-Inhalt als Hintergrund
+    /// (einmal rufen, nachdem der Desktop-Verlauf gerendert wurde;
+    /// alloziert den Cache beim ersten Mal).
+    pub fn hintergrund_uebernehmen(&mut self) {
+        if self.hintergrund.is_none() {
+            let pages = self.info.byte_len.div_ceil(4096);
+            let start = match crate::memory::allocate_pages(pages) {
+                Ok(start) => start,
+                Err(_) => return, // kein Speicher: Cache bleibt aus
+            };
+            // unsafe: allocate_pages hat genau diesen Bereich frisch
+            // gemappt und niemand sonst kennt ihn — die Slice-
+            // Erzeugung ist exklusiv (dasselbe Muster wie `hinten`).
+            self.hintergrund = Some(unsafe {
+                core::slice::from_raw_parts_mut(start.as_mut_ptr::<u8>(), self.info.byte_len)
+            });
+        }
+        if let Some(cache) = &mut self.hintergrund {
+            cache.copy_from_slice(self.hinten);
+        }
+    }
+
+    /// Stellt den Hintergrund in einem Rechteck des Back-Buffers
+    /// wieder her — ein memcpy pro Zeile (DER Dirty-Rect-Startpunkt).
+    /// Ohne Cache (hintergrund_uebernehmen nie gerufen): no-op,
+    /// der Aufrufer malt dann eben auf den alten Inhalt.
+    pub fn hintergrund_wiederherstellen(&mut self, x: usize, y: usize, breite: usize, hoehe: usize) {
+        let cache = match &self.hintergrund {
+            Some(cache) => cache,
+            None => return,
+        };
+        let bpp = self.info.bytes_per_pixel;
+        let x = x.min(self.info.width);
+        let breite = breite.min(self.info.width - x);
+        for zeile in y..(y + hoehe).min(self.info.height) {
+            let von = (zeile * self.info.stride + x) * bpp;
+            let bis = von + breite * bpp;
+            self.hinten[von..bis].copy_from_slice(&cache[von..bis]);
         }
     }
 
@@ -331,6 +377,7 @@ pub fn init(framebuffer: FrameBuffer) {
     *FRAMEBUFFER.lock() = Some(DoppelPuffer {
         vorne: framebuffer.into_buffer(),
         hinten,
+        hintergrund: None,
         info,
     });
 }

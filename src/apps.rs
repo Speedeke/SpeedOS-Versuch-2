@@ -32,13 +32,14 @@ pub fn alle_apps() -> &'static [AppEintrag] {
     &APPS
 }
 
-static APPS: [AppEintrag; 7] = [
+static APPS: [AppEintrag; 8] = [
     AppEintrag { name: "Terminal", icon: &grafik::ICON_TERMINAL, start: terminal_starten },
     AppEintrag { name: "Widget-Galerie", icon: &grafik::ICON_ZAHNRAD, start: galerie_starten },
     AppEintrag { name: "Uhr", icon: &grafik::ICON_UHR, start: uhr_starten },
     AppEintrag { name: "Tastatur-Echo", icon: &grafik::ICON_TASTATUR, start: tastatur_starten },
     AppEintrag { name: "Malkasten", icon: &grafik::ICON_PINSEL, start: malkasten_starten },
     AppEintrag { name: "Theme wechseln", icon: &grafik::ICON_THEME, start: fenster::theme_wechseln },
+    AppEintrag { name: "Skalierung", icon: &grafik::ICON_ZAHNRAD, start: fenster::skalierung_wechseln },
     AppEintrag { name: "Neustart", icon: &grafik::ICON_NEUSTART, start: crate::neustart },
 ];
 

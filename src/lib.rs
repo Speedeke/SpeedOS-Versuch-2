@@ -256,13 +256,21 @@ fn test_kernel_main(boot_info: &'static mut bootloader_api::BootInfo) -> ! {
         .expect("Bootloader hat kein Physik-Mapping angelegt");
     memory::init(VirtAddr::new(phys_mem_offset), &boot_info.memory_regions);
     allocator::init_heap().expect("Heap-Initialisierung fehlgeschlagen");
-    // Mehr Luft für Tests mit Fenster-Puffern (4 MiB extra — ein
-    // gesnapptes/maximiertes Test-Fenster braucht ~1 MiB).
-    allocator::heap_erweitern(1024).expect("Heap-Erweiterung fehlgeschlagen");
+    // Mehr Luft für Tests mit Fenster-Puffern (16 MiB extra): Seit
+    // dem Dirty-Rect-Compositing trägt JEDER FensterManager einen
+    // bildschirmgroßen Hintergrund-Cache (~2,4 MiB bei 1000x800) —
+    // und etliche Tests bauen eigene Manager.
+    allocator::heap_erweitern(4096).expect("Heap-Erweiterung fehlgeschlagen");
 
     // Framebuffer + Konsole, damit auch die Grafik-Pfade getestet
     // werden (println! zeichnet in den Tests wirklich auf den Puffer).
     if let Some(fb) = fb {
+        // Auflösungsabhängige Zugabe: Der Frame-Zeit-Messtest baut
+        // einen FensterManager in Bildschirmgröße — dessen
+        // Hintergrund-Cache (Breite*Höhe*3) plus Reserve.
+        let info = fb.info();
+        allocator::heap_erweitern((info.width * info.height * 3 * 2).div_ceil(4096))
+            .expect("Heap-Erweiterung (Framebuffer-Tests) fehlgeschlagen");
         framebuffer::init(fb);
         konsole::init();
     }

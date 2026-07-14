@@ -5,6 +5,31 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### Hinzugefügt (UI-Skalierung + Dirty-Rect-Compositing — die 4K-Baustellen)
+- UI-Skalierung 1.0/1.5/2.0 (in Halben, soft-float-frei): metrik()
+  liefert die skalierte Metrik, Schrift mappt auf die vorgerasterten
+  Fonts 16/24/32 (neues Cargo-Feature size_24). Boot-Standard nach
+  Breite (>=2560 -> 1.5, >=3840 -> 2.0), Laufzeit-Umschaltung über
+  die neue Registry-App "Skalierung" (Mechanik wie Theme-Wechsel).
+  4K-Screenshot mit Faktor 2.0: docs/screenshots/desktop-4k-skaliert
+- Dirty-Rect-Compositing: Änderungen melden ihre Fläche (Drag/Resize
+  alte+neue, Uhr-Tick nur den Systray, Menü/Switcher ihre Panels,
+  max. 16 Rects mit Vollbild-Fallback); der Compositor komponiert
+  je Rect mit Clip (Fenster ohne Schnitt übersprungen) und presentet
+  nur diese Bereiche. Desktop-Verlauf als byte-identischer Cache im
+  DoppelPuffer (Wiederherstellen = memcpy pro Zeile; die erste
+  Fassung als Farbe-Array war LANGSAMER als der Gradient — Lehre:
+  Cache immer im Zielformat)
+- Messwerte (Berichts-Test, drei Szenarien, warm):
+  | Szenario     | 720p vorher | 720p nachher | 4K vorher | 4K nachher |
+  | Vollbild     | ~1,2 ms     | ~1,1 ms      | ~9,3 ms   | ~9,3 ms    |
+  | Uhr-Tick     | = Vollbild  | 0,25 ms      | = Vollbild| 0,31 ms    |
+  | Fenster-Drag | = Vollbild  | 0,37 ms      | = Vollbild| 0,41 ms    |
+  (vorher war JEDER dirty Frame ein Vollbild-Frame; Ziel
+  "Uhr-Tick bei 4K unter 1 ms" mit 0,31 ms erreicht)
+- Taskleiste skaliert sauber mit (Logo waechst mit der Leiste,
+  Uhr/Datum als zentrierter Block statt fester Offsets)
+
 ### Geändert (Toolkit-Beweis: App-Trait, Startmenü + Alt+Tab umgezogen)
 - trait ui::App (name/icon/aufbau/nachricht/tick) + Inhalt::App als
   Brücke vom Enum zum Trait — jede NEUE App implementiert das Trait

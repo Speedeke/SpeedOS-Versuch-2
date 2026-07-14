@@ -65,12 +65,13 @@ futures-util = { version = "0.3", default-features = false, features = ["alloc"]
 # Vorgerenderter Bitmap-Font (Noto Sans Mono) für den Framebuffer:
 # pure Rust (const-Arrays, kein Datei-Parsing wie bei PSF), mit
 # Antialiasing-Intensitäten vorgerastert — und der Latin-1-Block
-# liefert unsere Umlaute (ä ö ü ß). Größe 16 = Konsole,
-# 32 + bold = Boot-Screen-Schriftzug.
+# liefert unsere Umlaute (ä ö ü ß). Größe 16 = Konsole/UI-Skala 1.0,
+# 24 = UI-Skala 1.5, 32 = UI-Skala 2.0 + Boot-Screen-Schriftzug.
 noto-sans-mono-bitmap = { version = "0.3.2", default-features = false, features = [
     "regular",
     "bold",
     "size_16",
+    "size_24",
     "size_32",
     "unicode-basic-latin",
     "unicode-latin-1-supplement",

@@ -79,6 +79,23 @@
 - **Async-Zeitwarten:** `zeit::warte_ms(ms)` statt yield-Polling — der
   Timer-Interrupt weckt per AtomicWaker (aktuell EIN Warter; bei Bedarf
   auf eine Waker-Liste erweitern).
+- **Dirty-Rect-Compositing (Juli 2026) — DAS PROTOKOLL:** Änderungen
+  melden ihre Bildschirm-Fläche per `dirty_melden(rect)` an (max.
+  MAX_DIRTY_RECTS=16, Überlauf -> alles_dirty-Vollbild-Fallback):
+  Fenster-Drag/Resize melden ALTE+NEUE Fläche (fenster_flaeche =
+  gesamt_rechteck + 10px Schatten), Heben meldet Fenster + Alt-Fokus +
+  Taskleiste, der Uhr-Sekundenwechsel NUR das systray_rechteck,
+  Startmenü/Switcher ihre Panel-Flächen; Fenster mit fenster.dirty
+  werden in dirty_abholen eingesammelt. Der Compositor holt per
+  `dirty_abholen(b, h)` die (geklemmten) Rects, komponiert JE Rect mit
+  Zeichner-Clip (Fenster ohne Schnitt werden übersprungen, Alpha-Fills
+  clippen vorab) und presentet nur diese Bereiche. Der Desktop-
+  Verlauf liegt als BYTE-IDENTISCHER Cache im DoppelPuffer
+  (hintergrund_uebernehmen/_wiederherstellen = memcpy pro Zeile —
+  NICHT als Farbe-Array, das wäre eine Pro-Pixel-Konvertierung und
+  LANGSAMER als der alte Gradient!); das Flag manager.hintergrund_neu
+  lässt den Compositor ihn beim ersten Frame/Theme-Wechsel neu
+  rendern. Gemessen: Uhr-Tick bei 4K 0,31 ms statt 9,3 ms Vollbild.
 - **Fenster & Compositor (Juli 2026):** `src/fenster/mod.rs`. JEDES
   Fenster = eigener Pixel-Puffer (`FensterPuffer`, Vec<Farbe>) +
   Metadaten (Position, Größe, Titel, Fokus). Z-Ordnung = Reihenfolge
@@ -158,11 +175,22 @@
   nicht (interrupts.rs). (3) PIC-Masken explizit setzen — OVMF übergibt
   alles maskiert; LAPIC deaktivieren für die Pre-APIC-Verdrahtung (lib.rs).
 - **Theme-System (Juli 2026):** `src/theme.rs` = `Theme` (ALLE UI-Farben;
-  zwei Instanzen: AURORA_DUNKEL Standard, AURORA_HELL) + `METRIK` (alle
+  zwei Instanzen: AURORA_DUNKEL Standard, AURORA_HELL) + `metrik()` (alle
   Abstände/Schriftgrößen, in beiden Themes gleich). Aktives Theme über
   AtomicBool, `theme::aktuell()` ist lockfrei (wird unter gehaltenen
   Locks im Compositor gerufen). SEITDEM GILT: KEINE hartcodierten Farben
-  oder Abstände in UI-Code — alles über theme::aktuell()/METRIK.
+  oder Abstände in UI-Code — alles über theme::aktuell()/metrik().
+- **UI-Skalierung (Juli 2026):** Faktor 1.0/1.5/2.0, gespeichert in
+  HALBEN (AtomicI32: 2/3/4 — kein Fließkomma im Kernel!). `metrik()`
+  liefert die SKALIERTE Kopie der BASIS_METRIK; die Schrift mappt auf
+  die vorgerasterten Fonts (16/24/32 — Cargo-Features size_16/24/32),
+  schrift_gross ist bei 32 gedeckelt. Boot-Standard nach Breite
+  (>=2560 -> 1.5, >=3840 -> 2.0, desktop_starten); Umschalten zur
+  Laufzeit über die Registry-App "Skalierung" (fenster::
+  skalierung_wechseln = Theme-Wechsel-Mechanik: Inhalte neu zeichnen
+  + alles_dirty). ACHTUNG Tests: metrik()-abhängige Koordinaten gelten
+  für Skala 1.0 — der Shell-Befehls-Test setzt die Skala im Cleanup
+  zurück (desktop_starten hätte sie bei 4K-Testläufen verstellt).
   Wechsel via `fenster::theme_wechseln()` (schaltet um UND rendert alle
   Fenster-Inhalte neu). Das Terminal bleibt bewusst in beiden Themes
   dunkel (Shell-Farben sind auf dunklen Grund abgestimmt, Zellen-

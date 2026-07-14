@@ -93,6 +93,9 @@ pub struct Theme {
 
 /// Alle Abstände und Schriftgrößen — in beiden Themes gleich
 /// (ein Theme-Wechsel färbt um, verschiebt aber kein Layout).
+/// Seit der UI-Skalierung liefert `metrik()` eine SKALIERTE Kopie
+/// dieser Struktur — UI-Code greift NIE auf die Basis zu.
+#[derive(Clone, Copy)]
 pub struct Metrik {
     // Fenster
     pub titel_hoehe: i32,
@@ -137,7 +140,8 @@ pub struct Metrik {
     pub zeilen_hoehe: i32,
 }
 
-pub const METRIK: Metrik = Metrik {
+/// Die UNSKALIERTE Basis (Faktor 1.0) — nur metrik() liest sie.
+const BASIS_METRIK: Metrik = Metrik {
     titel_hoehe: 30,
     rand: 6,
     knopf_breite: 30,
@@ -246,6 +250,93 @@ pub static AURORA_HELL: Theme = Theme {
 
     terminal_hintergrund: Farbe::neu(0x0b, 0x0e, 0x14),
 };
+
+// ---------------------------------------------------------------------------
+// UI-Skalierung: Faktor 1.0 / 1.5 / 2.0, gespeichert in HALBEN
+// (2/3/4) — Fließkomma gibt es im Kernel nicht (soft-float).
+// Die Fonts liegen vorgerastert in 16/24/32 vor; die Faktoren mappen
+// exakt darauf (16*1.0=16, 16*1.5=24, 16*2.0=32).
+// ---------------------------------------------------------------------------
+
+use core::sync::atomic::AtomicI32;
+
+static SKALA_HALBE: AtomicI32 = AtomicI32::new(2);
+
+/// Der aktuelle Faktor in Halben (2 = 1.0, 3 = 1.5, 4 = 2.0).
+pub fn skala_halbe() -> i32 {
+    SKALA_HALBE.load(Ordering::Relaxed)
+}
+
+/// Anzeigename des Faktors ("1.0", "1.5", "2.0").
+pub fn skala_name() -> &'static str {
+    match skala_halbe() {
+        3 => "1.5",
+        4 => "2.0",
+        _ => "1.0",
+    }
+}
+
+/// Boot-Standard nach Bildschirmbreite: ab 2560 -> 1.5, ab 3840 -> 2.0.
+pub fn skala_setzen_nach_breite(breite: usize) {
+    let halbe = if breite >= 3840 {
+        4
+    } else if breite >= 2560 {
+        3
+    } else {
+        2
+    };
+    SKALA_HALBE.store(halbe, Ordering::Relaxed);
+}
+
+/// Schaltet zyklisch 1.0 -> 1.5 -> 2.0 -> 1.0. Der Aufrufer muss
+/// danach alle Fenster neu zeichnen (fenster::skalierung_wechseln).
+pub fn skala_weiter() {
+    let neu = match skala_halbe() {
+        2 => 3,
+        3 => 4,
+        _ => 2,
+    };
+    SKALA_HALBE.store(neu, Ordering::Relaxed);
+}
+
+/// DIE Metrik-Quelle für allen UI-Code: die Basis, skaliert mit dem
+/// aktiven Faktor. Schriftgrößen mappen auf die vorgerasterten Fonts
+/// (16/24/32); schrift_gross ist bei 32 gedeckelt (größer liegt
+/// nicht vorgerastert vor).
+pub fn metrik() -> Metrik {
+    let halbe = skala_halbe();
+    let sk = |wert: i32| wert * halbe / 2;
+    let basis = BASIS_METRIK;
+    Metrik {
+        titel_hoehe: sk(basis.titel_hoehe),
+        rand: sk(basis.rand),
+        knopf_breite: sk(basis.knopf_breite),
+        min_fenster_breite: (sk(basis.min_fenster_breite as i32)) as usize,
+        min_fenster_hoehe: (sk(basis.min_fenster_hoehe as i32)) as usize,
+        snap_rand: basis.snap_rand,
+        taskleiste_hoehe: sk(basis.taskleiste_hoehe),
+        start_knopf_breite: sk(basis.start_knopf_breite),
+        leisten_knopf_breite: sk(basis.leisten_knopf_breite),
+        systray_breite: sk(basis.systray_breite),
+        menue_breite: sk(basis.menue_breite),
+        menue_eintrag_hoehe: sk(basis.menue_eintrag_hoehe),
+        menue_suchfeld_hoehe: sk(basis.menue_suchfeld_hoehe),
+        ui_rand: sk(basis.ui_rand),
+        ui_element_hoehe: sk(basis.ui_element_hoehe),
+        listen_eintrag_hoehe: sk(basis.listen_eintrag_hoehe),
+        scrollbalken_breite: sk(basis.scrollbalken_breite),
+        abstand: sk(basis.abstand),
+        radius_gross: sk(basis.radius_gross),
+        radius_klein: sk(basis.radius_klein),
+        schrift_ui: match halbe {
+            3 => RasterHeight::Size24,
+            4 => RasterHeight::Size32,
+            _ => RasterHeight::Size16,
+        },
+        schrift_gross: RasterHeight::Size32,
+        zeilen_hoehe: sk(basis.zeilen_hoehe),
+    }
+}
 
 /// Ist gerade das helle Theme aktiv? (AtomicBool statt Mutex: Das
 /// Theme wird mitten im Compositor unter gehaltenen Locks abgefragt —

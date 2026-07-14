@@ -23,7 +23,7 @@ pub mod terminal;
 use crate::framebuffer::{self, Farbe};
 use crate::grafik::{Rechteck, Rgba, Zeichenflaeche, Zeichner};
 use crate::maus::{self, MausEvent, MausTaste};
-use crate::theme::{self, METRIK};
+use crate::theme::{self, metrik};
 use crate::ui::Widget as _; // Trait-Methoden (zeichnen/ereignis) für Menü/Switcher-Widgets
 use crate::zeit;
 use alloc::format;
@@ -238,17 +238,17 @@ impl Fenster {
 
     /// Gesamtfläche inkl. Titelzeile.
     fn gesamt_rechteck(&self) -> Rechteck {
-        Rechteck::neu(self.x, self.y, self.breite(), METRIK.titel_hoehe + self.hoehe())
+        Rechteck::neu(self.x, self.y, self.breite(), metrik().titel_hoehe + self.hoehe())
     }
 
     fn in_titelzeile(&self, px: i32, py: i32) -> bool {
-        px >= self.x && px < self.x + self.breite() && py >= self.y && py < self.y + METRIK.titel_hoehe
+        px >= self.x && px < self.x + self.breite() && py >= self.y && py < self.y + metrik().titel_hoehe
     }
 
     /// Bildschirm- -> Fensterinhalts-Koordinaten (None = außerhalb).
     fn lokal(&self, px: i32, py: i32) -> Option<(i32, i32)> {
         let lx = px - self.x;
-        let ly = py - self.y - METRIK.titel_hoehe;
+        let ly = py - self.y - metrik().titel_hoehe;
         if lx >= 0 && ly >= 0 && lx < self.breite() && ly < self.hoehe() {
             Some((lx, ly))
         } else {
@@ -261,11 +261,11 @@ impl Fenster {
     fn knoepfe(&self) -> [(Knopf, Rechteck); 3] {
         let rechts = self.x + self.breite();
         let y = self.y + 3;
-        let h = METRIK.titel_hoehe - 6;
+        let h = metrik().titel_hoehe - 6;
         [
-            (Knopf::Schliessen, Rechteck::neu(rechts - METRIK.knopf_breite, y, METRIK.knopf_breite - 4, h)),
-            (Knopf::Maximieren, Rechteck::neu(rechts - 2 * METRIK.knopf_breite, y, METRIK.knopf_breite - 4, h)),
-            (Knopf::Minimieren, Rechteck::neu(rechts - 3 * METRIK.knopf_breite, y, METRIK.knopf_breite - 4, h)),
+            (Knopf::Schliessen, Rechteck::neu(rechts - metrik().knopf_breite, y, metrik().knopf_breite - 4, h)),
+            (Knopf::Maximieren, Rechteck::neu(rechts - 2 * metrik().knopf_breite, y, metrik().knopf_breite - 4, h)),
+            (Knopf::Minimieren, Rechteck::neu(rechts - 3 * metrik().knopf_breite, y, metrik().knopf_breite - 4, h)),
         ]
     }
 
@@ -278,8 +278,8 @@ impl Fenster {
 
     /// Setzt die Inhaltsgröße neu (realloziert den Puffer).
     fn groesse_setzen(&mut self, breite: usize, hoehe: usize) {
-        let breite = breite.max(METRIK.min_fenster_breite);
-        let hoehe = hoehe.max(METRIK.min_fenster_hoehe);
+        let breite = breite.max(metrik().min_fenster_breite);
+        let hoehe = hoehe.max(metrik().min_fenster_hoehe);
         if breite != self.puffer.breite || hoehe != self.puffer.hoehe {
             self.puffer = FensterPuffer::neu(breite, hoehe, theme::aktuell().inhalt_hintergrund);
         }
@@ -319,10 +319,10 @@ impl Switcher {
     /// Innenmaß der Liste im Puffer.
     fn liste_bereich(&self) -> Rechteck {
         Rechteck::neu(
-            METRIK.abstand,
-            METRIK.abstand,
-            self.puffer.breite as i32 - 2 * METRIK.abstand,
-            self.puffer.hoehe as i32 - 2 * METRIK.abstand,
+            metrik().abstand,
+            metrik().abstand,
+            self.puffer.breite as i32 - 2 * metrik().abstand,
+            self.puffer.hoehe as i32 - 2 * metrik().abstand,
         )
     }
 
@@ -359,7 +359,7 @@ impl StartMenue {
     const BREITE: i32 = 340;
     /// Suchfeld + 8 Listenzeilen + Innenränder.
     fn hoehe() -> i32 {
-        METRIK.ui_element_hoehe + 8 * METRIK.listen_eintrag_hoehe + 3 * METRIK.abstand
+        metrik().ui_element_hoehe + 8 * metrik().listen_eintrag_hoehe + 3 * metrik().abstand
     }
 
     fn neu() -> Self {
@@ -386,20 +386,20 @@ impl StartMenue {
 
     fn suchfeld_bereich() -> Rechteck {
         Rechteck::neu(
-            METRIK.abstand,
-            METRIK.abstand,
-            Self::BREITE - 2 * METRIK.abstand,
-            METRIK.ui_element_hoehe,
+            metrik().abstand,
+            metrik().abstand,
+            Self::BREITE - 2 * metrik().abstand,
+            metrik().ui_element_hoehe,
         )
     }
 
     fn liste_bereich() -> Rechteck {
-        let oben = 2 * METRIK.abstand + METRIK.ui_element_hoehe;
+        let oben = 2 * metrik().abstand + metrik().ui_element_hoehe;
         Rechteck::neu(
-            METRIK.abstand,
+            metrik().abstand,
             oben,
-            Self::BREITE - 2 * METRIK.abstand,
-            Self::hoehe() - oben - METRIK.abstand,
+            Self::BREITE - 2 * metrik().abstand,
+            Self::hoehe() - oben - metrik().abstand,
         )
     }
 
@@ -475,6 +475,31 @@ pub struct FensterManager {
     letzte_uhr_sekunde: u64,
     /// Über welchem Ui-Fenster schwebt der Cursor? (für MausRaus)
     ui_hover_fenster: Option<FensterId>,
+    /// Der Desktop-Verlauf muss (neu) in den Framebuffer-Hintergrund-
+    /// Cache gerendert werden (erster Frame, Theme-Wechsel). Das
+    /// erledigt der Compositor, weil nur er den Framebuffer hat.
+    hintergrund_neu: bool,
+    /// DIRTY-RECT-PROTOKOLL: Änderungen melden ihre Fläche hier an
+    /// (dirty_melden); der Compositor komponiert + presentet NUR diese
+    /// Rechtecke. alles_dirty bleibt der Vollbild-Fallback (Theme/
+    /// Skalierung/Snap-Vorschau, Überlauf von MAX_DIRTY_RECTS).
+    dirty_rects: Vec<Rechteck>,
+}
+
+/// Mehr als so viele Einzel-Rechtecke pro Frame -> Vollbild-Fallback.
+const MAX_DIRTY_RECTS: usize = 16;
+
+/// Rendert den Aurora-Verlauf des aktiven Themes in den Back-Buffer
+/// und übernimmt ihn als Hintergrund-Cache (byte-identisches memcpy-
+/// Format — deshalb lebt der Cache im DoppelPuffer, nicht hier).
+pub(crate) fn hintergrund_in_cache_rendern(fb: &mut framebuffer::DoppelPuffer) {
+    let thema = theme::aktuell();
+    let hoehe = fb.info().height;
+    for y in 0..hoehe {
+        let t = (y * 255 / hoehe.max(1)) as u8;
+        fb.zeile_fuellen(y, thema.desktop_oben.mischen(thema.desktop_unten, t));
+    }
+    fb.hintergrund_uebernehmen();
 }
 
 impl FensterManager {
@@ -491,7 +516,80 @@ impl FensterManager {
             bildschirm_hoehe,
             letzte_uhr_sekunde: 0,
             ui_hover_fenster: None,
+            hintergrund_neu: true,
+            dirty_rects: Vec::new(),
         }
+    }
+
+    /// Meldet eine geänderte Bildschirm-Fläche fürs nächste
+    /// Komponieren an (das Dirty-Rect-Protokoll). Läuft die Liste
+    /// über, fällt der Frame auf Vollbild zurück.
+    fn dirty_melden(&mut self, rect: Rechteck) {
+        if self.alles_dirty {
+            return;
+        }
+        if self.dirty_rects.len() >= MAX_DIRTY_RECTS {
+            self.alles_dirty = true;
+            self.dirty_rects.clear();
+            return;
+        }
+        self.dirty_rects.push(rect);
+    }
+
+    /// Die Bildschirm-Fläche eines Fensters INKLUSIVE Schatten
+    /// (10 Pixel rechts/unten) — die Einheit des Dirty-Meldens.
+    fn fenster_flaeche(&self, index: usize) -> Rechteck {
+        let rect = self.fenster[index].gesamt_rechteck();
+        Rechteck::neu(rect.x, rect.y, rect.breite + 10, rect.hoehe + 10)
+    }
+
+    /// Meldet die Fläche des Fensters mit dieser Id.
+    fn fenster_dirty_melden(&mut self, id: FensterId) {
+        if let Some(index) = self.index_von(id) {
+            let flaeche = self.fenster_flaeche(index);
+            self.dirty_melden(flaeche);
+        }
+    }
+
+    /// Die Systray-Fläche (Uhr + Icons) der Taskleiste.
+    fn systray_rechteck(&self) -> Rechteck {
+        Rechteck::neu(
+            self.bildschirm_breite - metrik().systray_breite,
+            self.taskleiste_y(),
+            metrik().systray_breite,
+            metrik().taskleiste_hoehe,
+        )
+    }
+
+    /// Holt die zu komponierenden Rechtecke ab und setzt alle Flags
+    /// zurück. None = nichts zu tun; alles_dirty -> ein Vollbild-Rect.
+    /// Die Rects sind auf den Bildschirm geklemmt.
+    fn dirty_abholen(&mut self, breite: i32, hoehe: i32) -> Option<Vec<Rechteck>> {
+        // Fenster mit geändertem Inhalt melden ihre Fläche selbst:
+        for index in 0..self.fenster.len() {
+            if self.fenster[index].dirty {
+                self.fenster[index].dirty = false;
+                let flaeche = self.fenster_flaeche(index);
+                self.dirty_melden(flaeche);
+            }
+        }
+        let vollbild = Rechteck::neu(0, 0, breite, hoehe);
+        if self.alles_dirty {
+            self.alles_dirty = false;
+            self.dirty_rects.clear();
+            return Some(vec![vollbild]);
+        }
+        if self.dirty_rects.is_empty() {
+            return None;
+        }
+        let rects: Vec<Rechteck> = core::mem::take(&mut self.dirty_rects)
+            .into_iter()
+            .filter_map(|rect| rect.schneiden(&vollbild))
+            .collect();
+        if rects.is_empty() {
+            return None;
+        }
+        Some(rects)
     }
 
     pub fn fenster_erstellen(
@@ -518,9 +616,27 @@ impl FensterManager {
         };
         inhalt_zeichnen(&mut fenster);
         self.fenster.push(fenster);
+        let fokus_vorher = self.fokus;
         self.fokus = Some(id);
-        self.alles_dirty = true;
+        // Neues Fenster + alter Fokus (Titel dimmt) + Taskleiste
+        // (neuer Knopf):
+        self.fenster_dirty_melden(id);
+        if let Some(alt) = fokus_vorher {
+            self.fenster_dirty_melden(alt);
+        }
+        let leiste = self.taskleiste_rechteck();
+        self.dirty_melden(leiste);
         id
+    }
+
+    /// Die komplette Taskleisten-Fläche.
+    fn taskleiste_rechteck(&self) -> Rechteck {
+        Rechteck::neu(
+            0,
+            self.taskleiste_y(),
+            self.bildschirm_breite,
+            metrik().taskleiste_hoehe,
+        )
     }
 
     fn index_von(&self, id: FensterId) -> Option<usize> {
@@ -538,10 +654,18 @@ impl FensterManager {
 
     pub fn fokussieren_und_heben(&mut self, id: FensterId) {
         if let Some(index) = self.index_von(id) {
+            let fokus_vorher = self.fokus;
             let fenster = self.fenster.remove(index);
             self.fenster.push(fenster);
             self.fokus = Some(id);
-            self.alles_dirty = true;
+            // Gehobenes Fenster + alter Fokus (Titel dimmt) +
+            // Taskleiste (Knopf-Highlight wandert):
+            self.fenster_dirty_melden(id);
+            if let Some(alt) = fokus_vorher {
+                self.fenster_dirty_melden(alt);
+            }
+            let leiste = self.taskleiste_rechteck();
+            self.dirty_melden(leiste);
         }
     }
 
@@ -559,7 +683,7 @@ impl FensterManager {
 
     /// Y-Position der Oberkante der Taskleiste.
     fn taskleiste_y(&self) -> i32 {
-        self.bildschirm_hoehe - METRIK.taskleiste_hoehe
+        self.bildschirm_hoehe - metrik().taskleiste_hoehe
     }
 
     /// Das Rechteck des Startknopfs (ganz links in der Leiste).
@@ -567,8 +691,8 @@ impl FensterManager {
         Rechteck::neu(
             0,
             self.taskleiste_y(),
-            METRIK.start_knopf_breite,
-            METRIK.taskleiste_hoehe,
+            metrik().start_knopf_breite,
+            metrik().taskleiste_hoehe,
         )
     }
 
@@ -582,17 +706,17 @@ impl FensterManager {
         if ids.is_empty() {
             return Vec::new();
         }
-        let von = METRIK.start_knopf_breite + METRIK.abstand;
-        let bis = self.bildschirm_breite - METRIK.systray_breite;
+        let von = metrik().start_knopf_breite + metrik().abstand;
+        let bis = self.bildschirm_breite - metrik().systray_breite;
         // Standardbreite, aber schrumpfen, wenn es eng wird:
         let breite =
-            ((bis - von) / ids.len() as i32 - 4).clamp(40, METRIK.leisten_knopf_breite);
+            ((bis - von) / ids.len() as i32 - 4).clamp(40, metrik().leisten_knopf_breite);
         let y = self.taskleiste_y() + 5;
         ids.into_iter()
             .enumerate()
             .map(|(i, id)| {
                 let x = von + i as i32 * (breite + 4);
-                (FensterId(id), Rechteck::neu(x, y, breite, METRIK.taskleiste_hoehe - 10))
+                (FensterId(id), Rechteck::neu(x, y, breite, metrik().taskleiste_hoehe - 10))
             })
             .collect()
     }
@@ -647,18 +771,18 @@ impl FensterManager {
             return false;
         }
         // Wunschgröße: 80x24 Zellen — auf kleinen Schirmen weniger.
-        let zeichen_breite = get_raster_width(FontWeight::Regular, METRIK.schrift_ui);
+        let zeichen_breite = get_raster_width(FontWeight::Regular, metrik().schrift_ui);
         let breite = (80 * zeichen_breite)
             .min((self.bildschirm_breite as usize).saturating_sub(80))
-            .max(METRIK.min_fenster_breite);
-        let hoehe = (24 * METRIK.zeilen_hoehe as usize)
+            .max(metrik().min_fenster_breite);
+        let hoehe = (24 * metrik().zeilen_hoehe as usize)
             .min((self.bildschirm_hoehe as usize).saturating_sub(160))
-            .max(METRIK.min_fenster_hoehe);
+            .max(metrik().min_fenster_hoehe);
         let x = (self.bildschirm_breite - breite as i32) / 2;
-        let y = ((self.taskleiste_y() - METRIK.titel_hoehe - hoehe as i32) / 2).max(20);
+        let y = ((self.taskleiste_y() - metrik().titel_hoehe - hoehe as i32) / 2).max(20);
         let term = terminal::Terminal::neu(
             breite / zeichen_breite,
-            hoehe / METRIK.zeilen_hoehe as usize,
+            hoehe / metrik().zeilen_hoehe as usize,
             theme::aktuell().terminal_hintergrund,
         );
         self.fenster_erstellen("Terminal", x, y, breite, hoehe, Inhalt::Terminal(term));
@@ -727,20 +851,39 @@ impl FensterManager {
             Some(_) => None,
             None => Some(StartMenue::neu()),
         };
-        self.alles_dirty = true;
+        // Panel-Fläche + Taskleiste (Startknopf-Highlight):
+        let panel = self.menue_dirty_rechteck();
+        self.dirty_melden(panel);
+        let leiste = self.taskleiste_rechteck();
+        self.dirty_melden(leiste);
     }
 
     fn startmenue_schliessen(&mut self) {
         if self.start_menue.take().is_some() {
-            self.alles_dirty = true;
+            let panel = self.menue_dirty_rechteck();
+            self.dirty_melden(panel);
+            let leiste = self.taskleiste_rechteck();
+            self.dirty_melden(leiste);
         }
+    }
+
+    /// Panel-Fläche INKLUSIVE Schatten-Versatz — die Dirty-Einheit
+    /// des Startmenüs.
+    fn menue_dirty_rechteck(&self) -> Rechteck {
+        let panel = self.menue_panel_rechteck();
+        Rechteck::neu(
+            panel.x,
+            panel.y,
+            panel.breite + metrik().abstand,
+            panel.hoehe + metrik().abstand,
+        )
     }
 
     /// Das Panel-Rechteck des Startmenüs (über dem Startknopf).
     fn menue_panel_rechteck(&self) -> Rechteck {
         Rechteck::neu(
-            METRIK.abstand,
-            self.taskleiste_y() - StartMenue::hoehe() - METRIK.abstand,
+            metrik().abstand,
+            self.taskleiste_y() - StartMenue::hoehe() - metrik().abstand,
             StartMenue::BREITE,
             StartMenue::hoehe(),
         )
@@ -758,7 +901,8 @@ impl FensterManager {
             Some(MENUE_SUCHE_GEAENDERT) => {
                 menue.filtern();
                 menue.zeichnen();
-                self.alles_dirty = true;
+                let panel = self.menue_dirty_rechteck();
+                self.dirty_melden(panel);
             }
             Some(MENUE_ENTER) | Some(MENUE_EINTRAG_KLICK) => {
                 let start = menue
@@ -777,7 +921,8 @@ impl FensterManager {
             if let Some(menue) = &mut self.start_menue {
                 menue.zeichnen();
             }
-            self.alles_dirty = true;
+            let panel = self.menue_dirty_rechteck();
+            self.dirty_melden(panel);
         }
         NachLock::Keine
     }
@@ -820,9 +965,9 @@ impl FensterManager {
     /// Resize-Kante am Punkt (nur unterhalb der Titelzeile relevant).
     fn kante_bei(fenster: &Fenster, px: i32, py: i32) -> Option<Kante> {
         let r = fenster.gesamt_rechteck();
-        let links = px >= r.x && px < r.x + METRIK.rand;
-        let rechts = px < r.x + r.breite && px >= r.x + r.breite - METRIK.rand;
-        let unten = py < r.y + r.hoehe && py >= r.y + r.hoehe - METRIK.rand;
+        let links = px >= r.x && px < r.x + metrik().rand;
+        let rechts = px < r.x + r.breite && px >= r.x + r.breite - metrik().rand;
+        let unten = py < r.y + r.hoehe && py >= r.y + r.hoehe - metrik().rand;
         match (links, rechts, unten) {
             (true, _, true) => Some(Kante::UntenLinks),
             (_, true, true) => Some(Kante::UntenRechts),
@@ -972,8 +1117,13 @@ impl FensterManager {
         }
         let hatte_interaktion = !matches!(self.interaktion, Interaktion::Keine);
         self.interaktion = Interaktion::Keine;
-        self.snap_hinweis = 0;
-        self.alles_dirty = true;
+        // Nur nach einem Drag/Resize gibt es etwas aufzuräumen
+        // (Snap-Vorschau verschwindet -> Vollbild; ein bloßer Klick
+        // meldet seine Flächen über die Fenster-/Ui-Pfade selbst):
+        if self.snap_hinweis != 0 {
+            self.snap_hinweis = 0;
+            self.alles_dirty = true;
+        }
 
         // Loslassen an den Ui-Inhalt unter dem Cursor (Buttons feuern
         // beim LOSLASSEN) — aber nicht nach einem Fenster-Drag/Resize.
@@ -992,21 +1142,31 @@ impl FensterManager {
             Interaktion::Verschieben { id, griff_dx, griff_dy } => {
                 let (id, dx, dy) = (*id, *griff_dx, *griff_dy);
                 if let Some(index) = self.index_von(id) {
+                    // Dirty-Rects: ALTE Fläche (Hintergrund wird frei)
+                    // und NEUE Fläche melden.
+                    let alt = self.fenster_flaeche(index);
+                    self.dirty_melden(alt);
                     let bb = self.bildschirm_breite;
                     // Die Titelzeile bleibt immer über der Taskleiste greifbar:
-                    let max_y = self.taskleiste_y() - METRIK.titel_hoehe;
+                    let max_y = self.taskleiste_y() - metrik().titel_hoehe;
                     let f = &mut self.fenster[index];
                     f.x = (x - dx).clamp(-(f.breite()) + 80, bb - 80);
                     f.y = (y - dy).clamp(0, max_y);
-                    // Snap-Vorschau:
-                    self.snap_hinweis = if x <= METRIK.snap_rand {
+                    // Snap-Vorschau: Ein WECHSEL der Vorschau braucht
+                    // das Vollbild (halbe Fläche erscheint/verschwindet).
+                    let hinweis = if x <= metrik().snap_rand {
                         -1
-                    } else if x >= bb - METRIK.snap_rand {
+                    } else if x >= bb - metrik().snap_rand {
                         1
                     } else {
                         0
                     };
-                    self.alles_dirty = true;
+                    if hinweis != self.snap_hinweis {
+                        self.snap_hinweis = hinweis;
+                        self.alles_dirty = true;
+                    }
+                    let neu = self.fenster_flaeche(index);
+                    self.dirty_melden(neu);
                 }
             }
             Interaktion::Groesse {
@@ -1035,21 +1195,24 @@ impl FensterManager {
                     }
                 }
                 // Mindestgröße einhalten (und beim Links-Ziehen x korrigieren):
-                if nb < METRIK.min_fenster_breite as i32 {
+                if nb < metrik().min_fenster_breite as i32 {
                     if matches!(kante, Kante::Links | Kante::UntenLinks) {
-                        nx = start_x + (start_breite - METRIK.min_fenster_breite as i32);
+                        nx = start_x + (start_breite - metrik().min_fenster_breite as i32);
                     }
-                    nb = METRIK.min_fenster_breite as i32;
+                    nb = metrik().min_fenster_breite as i32;
                 }
-                nh = nh.max(METRIK.min_fenster_hoehe as i32);
+                nh = nh.max(metrik().min_fenster_hoehe as i32);
 
                 if let Some(index) = self.index_von(id) {
+                    let alt = self.fenster_flaeche(index);
+                    self.dirty_melden(alt);
                     let f = &mut self.fenster[index];
                     f.x = nx;
                     f.y = ny;
                     f.groesse_setzen(nb as usize, nh as usize);
                     inhalt_zeichnen(f);
-                    self.alles_dirty = true;
+                    let neu = self.fenster_flaeche(index);
+                    self.dirty_melden(neu);
                 }
             }
             Interaktion::Keine => {
@@ -1128,8 +1291,8 @@ impl FensterManager {
             f.vorher = Some((f.x, f.y, f.puffer.breite, f.puffer.hoehe));
             f.x = 0;
             f.y = 0;
-            let breite = bb.max(METRIK.min_fenster_breite as i32) as usize;
-            let hoehe = (bh - METRIK.titel_hoehe - METRIK.taskleiste_hoehe).max(METRIK.min_fenster_hoehe as i32) as usize;
+            let breite = bb.max(metrik().min_fenster_breite as i32) as usize;
+            let hoehe = (bh - metrik().titel_hoehe - metrik().taskleiste_hoehe).max(metrik().min_fenster_hoehe as i32) as usize;
             f.groesse_setzen(breite, hoehe);
             inhalt_zeichnen(f);
         }
@@ -1146,7 +1309,7 @@ impl FensterManager {
                 match unter_cursor {
                     Some((px, py)) => {
                         f.x = px - f.breite() / 2;
-                        f.y = (py - METRIK.titel_hoehe / 2).max(0);
+                        f.y = (py - metrik().titel_hoehe / 2).max(0);
                     }
                     None => {
                         f.x = vx;
@@ -1168,8 +1331,8 @@ impl FensterManager {
             if f.vorher.is_none() {
                 f.vorher = Some((f.x, f.y, f.puffer.breite, f.puffer.hoehe));
             }
-            let breite = (bb / 2).max(METRIK.min_fenster_breite as i32) as usize;
-            let hoehe = (bh - METRIK.titel_hoehe - METRIK.taskleiste_hoehe).max(METRIK.min_fenster_hoehe as i32) as usize;
+            let breite = (bb / 2).max(metrik().min_fenster_breite as i32) as usize;
+            let hoehe = (bh - metrik().titel_hoehe - metrik().taskleiste_hoehe).max(metrik().min_fenster_hoehe as i32) as usize;
             f.x = if seite < 0 { 0 } else { bb / 2 };
             f.y = 0;
             f.groesse_setzen(breite, hoehe);
@@ -1251,7 +1414,7 @@ impl FensterManager {
                 let liste = ScrollListe::neu(eintraege, 0, 0);
                 // Höhe: bis zu 8 Zeilen sichtbar, Rest scrollt.
                 let zeilen = (reihenfolge.len() as i32).min(8);
-                let hoehe = (zeilen * METRIK.listen_eintrag_hoehe + 2 * METRIK.abstand) as usize;
+                let hoehe = (zeilen * metrik().listen_eintrag_hoehe + 2 * metrik().abstand) as usize;
                 let mut sw = Switcher {
                     reihenfolge,
                     liste,
@@ -1265,19 +1428,45 @@ impl FensterManager {
                 self.switcher = Some(sw);
             }
         }
-        self.alles_dirty = true;
+        let overlay = self.switcher_dirty_rechteck();
+        self.dirty_melden(overlay);
+    }
+
+    /// Die Bildschirm-Fläche des Alt+Tab-Overlays (inkl. Titelband
+    /// und Schatten) — die Dirty-Einheit des Switchers.
+    fn switcher_dirty_rechteck(&self) -> Rechteck {
+        match &self.switcher {
+            Some(sw) => {
+                let breite = sw.puffer.breite as i32;
+                let hoehe = sw.puffer.hoehe as i32 + 36;
+                Rechteck::neu(
+                    (self.bildschirm_breite - breite) / 2,
+                    (self.bildschirm_hoehe - hoehe) / 2,
+                    breite + metrik().abstand,
+                    hoehe + metrik().abstand,
+                )
+            }
+            None => Rechteck::neu(0, 0, 0, 0),
+        }
     }
 
     fn switcher_bestaetigen(&mut self) {
+        // Overlay-Fläche VOR dem Schließen merken (danach ist der
+        // Switcher weg und die Fläche muss restauriert werden):
+        let overlay = self.switcher_dirty_rechteck();
         if let Some(sw) = self.switcher.take() {
+            self.dirty_melden(overlay);
             let auswahl = sw.liste.auswahl.unwrap_or(0);
             if let Some(&id) = sw.reihenfolge.get(auswahl) {
                 if let Some(index) = self.index_von(id) {
+                    // Ein zurückgeholtes minimiertes Fenster taucht
+                    // neu auf — seine Fläche melden:
                     self.fenster[index].minimiert = false;
+                    let flaeche = self.fenster_flaeche(index);
+                    self.dirty_melden(flaeche);
                 }
                 self.fokussieren_und_heben(id);
             }
-            self.alles_dirty = true;
         }
     }
 
@@ -1309,23 +1498,14 @@ impl FensterManager {
                 _ => {}
             }
         }
-        // Taskleisten-Uhr: nur neu komponieren, wenn die angezeigte
-        // Sekunde wirklich gewechselt hat (der Uhr-Task läuft öfter).
+        // Taskleisten-Uhr: nur beim Sekundenwechsel — und dann NUR
+        // die Systray-Ecke (das Ziel des Dirty-Rect-Umbaus: ein
+        // Uhr-Tick darf keinen Vollbild-Frame mehr kosten).
         let sekunde = zeit::ms_seit_boot() / 1000;
         if sekunde != self.letzte_uhr_sekunde {
             self.letzte_uhr_sekunde = sekunde;
-            self.alles_dirty = true;
-        }
-    }
-
-    pub fn ist_dirty(&self) -> bool {
-        self.alles_dirty || self.fenster.iter().any(|f| f.dirty)
-    }
-
-    fn dirty_zuruecksetzen(&mut self) {
-        self.alles_dirty = false;
-        for fenster in self.fenster.iter_mut() {
-            fenster.dirty = false;
+            let systray = self.systray_rechteck();
+            self.dirty_melden(systray);
         }
     }
 
@@ -1343,17 +1523,31 @@ impl FensterManager {
 
     // ----- Compositing -----
 
-    fn komponieren(&self, fb: &mut framebuffer::DoppelPuffer) {
-        let hoehe = fb.info().height;
+    /// Komponiert NUR die übergebenen Rechtecke (aus dirty_abholen):
+    /// Pro Rect wird der Zeichner-Clip gesetzt — die zeilenweisen
+    /// Schnellpfade clippen vorab, Fenster ohne Schnitt werden ganz
+    /// übersprungen. Ein Uhr-Tick komponiert so nur die Systray-Ecke.
+    fn komponieren(&self, fb: &mut framebuffer::DoppelPuffer, rects: &[Rechteck]) {
+        for rect in rects {
+            self.komponieren_bereich(fb, *rect);
+        }
+    }
+
+    fn komponieren_bereich(&self, fb: &mut framebuffer::DoppelPuffer, rect: Rechteck) {
         let thema = theme::aktuell();
 
-        // 1. Desktop-Hintergrund: Aurora-Verlauf des Themes (schnell).
-        for y in 0..hoehe {
-            let t = (y * 255 / hoehe.max(1)) as u8;
-            fb.zeile_fuellen(y, thema.desktop_oben.mischen(thema.desktop_unten, t));
-        }
+        // 1. Desktop-Hintergrund: aus dem byte-identischen Cache des
+        // DoppelPuffers wiederherstellen — ein memcpy pro Zeile,
+        // statt den Verlauf neu zu rechnen.
+        fb.hintergrund_wiederherstellen(
+            rect.x as usize,
+            rect.y as usize,
+            rect.breite as usize,
+            rect.hoehe as usize,
+        );
 
         let mut z = Zeichner::neu(fb);
+        z.clip_setzen(Some(rect));
 
         // 2. Snap-Vorschau (halbtransparente Hälfte):
         if self.snap_hinweis != 0 {
@@ -1361,22 +1555,26 @@ impl FensterManager {
             let x = if self.snap_hinweis < 0 { 0 } else { halb };
             let akzent = thema.akzent;
             z.rechteck_fuellen(
-                Rechteck::neu(x, 0, halb, self.bildschirm_hoehe - METRIK.taskleiste_hoehe),
+                Rechteck::neu(x, 0, halb, self.bildschirm_hoehe - metrik().taskleiste_hoehe),
                 Rgba::mit_alpha(akzent.r, akzent.g, akzent.b, 60),
             );
         }
 
-        // 3. Fenster von hinten nach vorne (minimierte überspringen):
-        for fenster in self.fenster.iter() {
-            if fenster.minimiert {
+        // 3. Fenster von hinten nach vorne — nur die, deren Fläche
+        // das Rect überhaupt schneidet (minimierte überspringen):
+        for (index, fenster) in self.fenster.iter().enumerate() {
+            if fenster.minimiert || self.fenster_flaeche(index).schneiden(&rect).is_none() {
                 continue;
             }
             let fokussiert = self.fokus == Some(fenster.id);
             fenster_komponieren(&mut z, fenster, fokussiert);
         }
 
-        // 4. Taskleiste — IMMER im Vordergrund, deshalb NACH den Fenstern:
-        self.taskleiste_zeichnen(&mut z);
+        // 4. Taskleiste — IMMER im Vordergrund, deshalb NACH den
+        // Fenstern (nur wenn das Rect sie berührt):
+        if rect.y + rect.hoehe > self.taskleiste_y() {
+            self.taskleiste_zeichnen(&mut z);
+        }
 
         // 5. Startmenü (über der Taskleiste): Der Widget-Verbund hat
         // sich in seinen Offscreen-Puffer gezeichnet — hier nur noch
@@ -1384,7 +1582,7 @@ impl FensterManager {
         if let Some(menue) = &self.start_menue {
             let panel = self.menue_panel_rechteck();
             z.rechteck_fuellen(
-                Rechteck::neu(panel.x + METRIK.abstand, panel.y + METRIK.abstand, panel.breite, panel.hoehe),
+                Rechteck::neu(panel.x + metrik().abstand, panel.y + metrik().abstand, panel.breite, panel.hoehe),
                 thema.schatten,
             );
             z.puffer_blit(panel.x, panel.y, menue.puffer.breite, &menue.puffer.pixel);
@@ -1398,11 +1596,11 @@ impl FensterManager {
             let bx = (self.bildschirm_breite - breite) / 2;
             let by = (self.bildschirm_hoehe - hoehe) / 2;
             z.rechteck_fuellen(
-                Rechteck::neu(bx + METRIK.abstand, by + METRIK.abstand, breite, hoehe),
+                Rechteck::neu(bx + metrik().abstand, by + metrik().abstand, breite, hoehe),
                 thema.schatten,
             );
             z.rechteck_fuellen(Rechteck::neu(bx, by, breite, 36), thema.flaeche);
-            z.text(bx + 14, by + 10, "Fenster wechseln", METRIK.schrift_ui, FontWeight::Bold, thema.text_normal);
+            z.text(bx + 14, by + 10, "Fenster wechseln", metrik().schrift_ui, FontWeight::Bold, thema.text_normal);
             z.puffer_blit(bx, by + 36, sw.puffer.breite, &sw.puffer.pixel);
             z.rechteck_rahmen(Rechteck::neu(bx, by, breite, hoehe), thema.akzent);
         }
@@ -1414,26 +1612,33 @@ impl FensterManager {
         let thema = theme::aktuell();
         let y = self.taskleiste_y();
         let breite = self.bildschirm_breite;
-        let zeichen_breite = get_raster_width(FontWeight::Regular, METRIK.schrift_ui) as i32;
+        let zeichen_breite = get_raster_width(FontWeight::Regular, metrik().schrift_ui) as i32;
 
         // Leisten-Grund (leicht transparent — der Desktop schimmert durch):
         z.rechteck_fuellen(
-            Rechteck::neu(0, y, breite, METRIK.taskleiste_hoehe),
+            Rechteck::neu(0, y, breite, metrik().taskleiste_hoehe),
             thema.leiste_hintergrund,
         );
         z.linie(0, y, breite - 1, y, thema.leiste_linie);
 
-        // Startknopf: das SpeedOS-Logo (2x skaliert = 32 Pixel);
+        // Startknopf: das SpeedOS-Logo, mit der Leiste skaliert
+        // (40px-Leiste -> 2x = 32px, 80px-Leiste -> 4x = 64px);
         // bei offenem Startmenü hervorgehoben.
         let start = self.start_knopf_rechteck();
         if self.start_menue.is_some() {
             z.rechteck_abgerundet(
                 Rechteck::neu(start.x + 4, start.y + 3, start.breite - 8, start.hoehe - 6),
-                METRIK.radius_klein,
+                metrik().radius_klein,
                 thema.leiste_knopf_aktiv,
             );
         }
-        z.icon(start.x + (start.breite - 32) / 2, y + 4, &crate::grafik::ICON_LOGO, 2);
+        let logo_skala = (metrik().taskleiste_hoehe / 20).max(1);
+        z.icon(
+            start.x + (start.breite - 16 * logo_skala) / 2,
+            y + (metrik().taskleiste_hoehe - 16 * logo_skala) / 2,
+            &crate::grafik::ICON_LOGO,
+            logo_skala,
+        );
 
         // Ein Knopf pro offenem Fenster:
         for (id, rect) in self.taskleisten_knoepfe() {
@@ -1444,7 +1649,7 @@ impl FensterManager {
             let aktiv = self.fokus == Some(id) && !fenster.minimiert;
             z.rechteck_abgerundet(
                 rect,
-                METRIK.radius_klein,
+                metrik().radius_klein,
                 if aktiv { thema.leiste_knopf_aktiv } else { thema.leiste_knopf },
             );
             if aktiv {
@@ -1454,7 +1659,7 @@ impl FensterManager {
                     thema.akzent,
                 );
             }
-            let text_y = rect.y + (rect.hoehe - METRIK.zeilen_hoehe) / 2;
+            let text_y = rect.y + (rect.hoehe - metrik().zeilen_hoehe) / 2;
             z.icon(rect.x + 6, text_y, inhalt_icon(&fenster.inhalt), 1);
             // Titel auf die Knopfbreite kürzen:
             let platz = ((rect.breite - 34) / zeichen_breite).max(0) as usize;
@@ -1466,22 +1671,31 @@ impl FensterManager {
             } else {
                 thema.text_sekundaer
             };
-            z.text(rect.x + 28, text_y, &titel, METRIK.schrift_ui, FontWeight::Regular, farbe);
+            z.text(rect.x + 28, text_y, &titel, metrik().schrift_ui, FontWeight::Regular, farbe);
         }
 
         // Systray rechts: Platzhalter-Icons (echte Features folgen),
-        // daneben Uhrzeit und Datum (aus Ticks — Kalibrierung: TODO).
-        let systray_x = breite - METRIK.systray_breite;
-        z.icon(systray_x, y + 12, &crate::grafik::ICON_ZAHNRAD, 1);
-        z.icon(systray_x + 22, y + 12, &crate::grafik::ICON_ORDNER, 1);
+        // daneben Uhrzeit über Datum — als Block vertikal zentriert
+        // (skalierte Zeilenhöhen, keine festen Offsets!).
+        let systray_x = breite - metrik().systray_breite;
+        let block_y = y + (metrik().taskleiste_hoehe - 2 * metrik().zeilen_hoehe) / 2;
+        z.icon(systray_x, y + (metrik().taskleiste_hoehe - 16) / 2, &crate::grafik::ICON_ZAHNRAD, 1);
+        z.icon(systray_x + 22, y + (metrik().taskleiste_hoehe - 16) / 2, &crate::grafik::ICON_ORDNER, 1);
 
         let jetzt = zeit::jetzt();
         let uhr = format!("{:02}:{:02}:{:02}", jetzt.stunde, jetzt.minute, jetzt.sekunde);
         let datum = format!("{:02}.{:02}.{}", jetzt.tag, jetzt.monat, jetzt.jahr);
-        let uhr_x = breite - METRIK.abstand - uhr.chars().count() as i32 * zeichen_breite;
-        let datum_x = breite - METRIK.abstand - datum.chars().count() as i32 * zeichen_breite;
-        z.text(uhr_x, y + 4, &uhr, METRIK.schrift_ui, FontWeight::Bold, thema.text_normal);
-        z.text(datum_x, y + 21, &datum, METRIK.schrift_ui, FontWeight::Regular, thema.text_gedimmt);
+        let uhr_x = breite - metrik().abstand - uhr.chars().count() as i32 * zeichen_breite;
+        let datum_x = breite - metrik().abstand - datum.chars().count() as i32 * zeichen_breite;
+        z.text(uhr_x, block_y, &uhr, metrik().schrift_ui, FontWeight::Bold, thema.text_normal);
+        z.text(
+            datum_x,
+            block_y + metrik().zeilen_hoehe,
+            &datum,
+            metrik().schrift_ui,
+            FontWeight::Regular,
+            thema.text_gedimmt,
+        );
     }
 
 }
@@ -1496,7 +1710,7 @@ fn fenster_komponieren<F: Zeichenflaeche>(z: &mut Zeichner<'_, F>, fenster: &Fen
     z.rechteck_fuellen(Rechteck::neu(rect.x + 10, rect.y + rect.hoehe, rect.breite, 10), thema.schatten);
 
     // Titelleiste: fokussiert = Aurora-Verlauf, sonst gedimmt.
-    let titel_rect = Rechteck::neu(rect.x, rect.y, rect.breite, METRIK.titel_hoehe);
+    let titel_rect = Rechteck::neu(rect.x, rect.y, rect.breite, metrik().titel_hoehe);
     if fokussiert {
         z.verlauf_vertikal(titel_rect, thema.titel_aktiv_oben, thema.titel_aktiv_unten);
     } else {
@@ -1510,7 +1724,7 @@ fn fenster_komponieren<F: Zeichenflaeche>(z: &mut Zeichner<'_, F>, fenster: &Fen
         rect.x + 30,
         rect.y + 7,
         &fenster.titel,
-        METRIK.schrift_ui,
+        metrik().schrift_ui,
         FontWeight::Bold,
         if fokussiert { thema.text_titel_aktiv } else { thema.text_titel_passiv },
     );
@@ -1551,7 +1765,7 @@ fn fenster_komponieren<F: Zeichenflaeche>(z: &mut Zeichner<'_, F>, fenster: &Fen
     // nicht Pixel für Pixel (Performance-Pass: ~2x schnellere Frames):
     z.puffer_blit(
         rect.x,
-        rect.y + METRIK.titel_hoehe,
+        rect.y + metrik().titel_hoehe,
         fenster.puffer.breite,
         &fenster.puffer.pixel,
     );
@@ -1576,8 +1790,8 @@ fn inhalt_icon(inhalt: &Inhalt) -> &'static crate::grafik::Icon {
 fn terminal_rendern(term: &terminal::Terminal, puffer: &mut FensterPuffer) {
     let thema = theme::aktuell();
     let hintergrund = thema.terminal_hintergrund;
-    let zeichen_breite = get_raster_width(FontWeight::Regular, METRIK.schrift_ui) as i32;
-    let zeilen_hoehe = METRIK.zeilen_hoehe;
+    let zeichen_breite = get_raster_width(FontWeight::Regular, metrik().schrift_ui) as i32;
+    let zeilen_hoehe = metrik().zeilen_hoehe;
     let (breite, hoehe) = (puffer.breite as i32, puffer.hoehe as i32);
 
     let mut z = Zeichner::neu(puffer);
@@ -1602,7 +1816,7 @@ fn terminal_rendern(term: &terminal::Terminal, puffer: &mut FensterPuffer) {
                     x,
                     y,
                     zelle.zeichen.encode_utf8(&mut puffer_utf8),
-                    METRIK.schrift_ui,
+                    metrik().schrift_ui,
                     FontWeight::Regular,
                     Rgba::neu(zelle.vg.r, zelle.vg.g, zelle.vg.b),
                 );
@@ -1638,9 +1852,9 @@ fn inhalt_zeichnen(fenster: &mut Fenster) {
     // (&mut fenster.inhalt und &mut fenster.puffer sind verschiedene
     // Felder — der Borrow-Checker erlaubt beides gleichzeitig.)
     if let Inhalt::Terminal(term) = &mut fenster.inhalt {
-        let zeichen_breite = get_raster_width(FontWeight::Regular, METRIK.schrift_ui);
+        let zeichen_breite = get_raster_width(FontWeight::Regular, metrik().schrift_ui);
         let spalten = (fenster.puffer.breite / zeichen_breite).max(1);
-        let zeilen = (fenster.puffer.hoehe / METRIK.zeilen_hoehe as usize).max(1);
+        let zeilen = (fenster.puffer.hoehe / metrik().zeilen_hoehe as usize).max(1);
         term.groesse_setzen(spalten, zeilen);
         terminal_rendern(term, &mut fenster.puffer);
         return;
@@ -1661,15 +1875,15 @@ fn inhalt_zeichnen(fenster: &mut Fenster) {
         Inhalt::Uhr => {
             let ticks = zeit::ticks();
             let ms = zeit::ms_seit_boot();
-            z.text(20, 16, &format!("{} Ticks", ticks), METRIK.schrift_gross, FontWeight::Bold, thema.akzent_cyan);
-            z.text(20, 60, &format!("Uptime: {},{:03} s", ms / 1000, ms % 1000), METRIK.schrift_ui, FontWeight::Regular, thema.text_normal);
-            z.text(20, 90, "(aktualisiert sich live)", METRIK.schrift_ui, FontWeight::Regular, thema.text_gedimmt);
+            z.text(20, 16, &format!("{} Ticks", ticks), metrik().schrift_gross, FontWeight::Bold, thema.akzent_cyan);
+            z.text(20, 60, &format!("Uptime: {},{:03} s", ms / 1000, ms % 1000), metrik().schrift_ui, FontWeight::Regular, thema.text_normal);
+            z.text(20, 90, "(aktualisiert sich live)", metrik().schrift_ui, FontWeight::Regular, thema.text_gedimmt);
         }
         Inhalt::TastaturEcho { text } => {
-            z.text(20, 12, "Tippe (bei Fokus!):", METRIK.schrift_ui, FontWeight::Regular, thema.text_sekundaer);
-            z.rechteck_abgerundet(Rechteck::neu(16, 40, breite - 32, 40), METRIK.radius_klein, thema.eingabefeld);
-            z.text(26, 50, text, METRIK.schrift_ui, FontWeight::Regular, thema.text_stark);
-            z.text(20, 96, "Enter leert, Backspace loescht", METRIK.schrift_ui, FontWeight::Regular, thema.text_gedimmt);
+            z.text(20, 12, "Tippe (bei Fokus!):", metrik().schrift_ui, FontWeight::Regular, thema.text_sekundaer);
+            z.rechteck_abgerundet(Rechteck::neu(16, 40, breite - 32, 40), metrik().radius_klein, thema.eingabefeld);
+            z.text(26, 50, text, metrik().schrift_ui, FontWeight::Regular, thema.text_stark);
+            z.text(20, 96, "Enter leert, Backspace loescht", metrik().schrift_ui, FontWeight::Regular, thema.text_gedimmt);
         }
         Inhalt::Malflaeche { klicks } => {
             z.verlauf_vertikal(
@@ -1677,7 +1891,7 @@ fn inhalt_zeichnen(fenster: &mut Fenster) {
                 thema.titel_aktiv_oben.mischen(thema.inhalt_hintergrund, 128),
                 thema.inhalt_hintergrund,
             );
-            z.text(16, 8, "Statische Grafik + Klicks", METRIK.schrift_ui, FontWeight::Bold, thema.text_stark);
+            z.text(16, 8, "Statische Grafik + Klicks", metrik().schrift_ui, FontWeight::Bold, thema.text_stark);
             let (akzent, cyan) = (thema.akzent, thema.akzent_cyan);
             z.kreis_fuellen(50, 110, 28, Rgba::mit_alpha(akzent.r, akzent.g, akzent.b, 180));
             z.kreis_fuellen(90, 110, 28, Rgba::mit_alpha(cyan.r, cyan.g, cyan.b, 180));
@@ -1716,11 +1930,14 @@ pub fn desktop_starten() {
     let erster_start =
         x86_64::instructions::interrupts::without_interrupts(|| MANAGER.lock().is_none());
     if erster_start {
-        // Heap passend zur Auflösung wachsen lassen: ein maximiertes
-        // Fenster braucht einen fast bildschirmgroßen Puffer
-        // (Breite*Höhe*3 Bytes). Wir reservieren Platz für ~3 solche
-        // Puffer plus Reserve — bei 2560x1600 sind das ~37 MiB.
-        let noetig_bytes = info.width * info.height * 3 * 3;
+        // UI-Skalierung nach Auflösung: ab 2560 breit 1.5, ab 3840
+        // 2.0 — sonst wäre die 16-px-Schrift bei 4K winzig.
+        crate::theme::skala_setzen_nach_breite(info.width);
+
+        // Heap passend zur Auflösung wachsen lassen: maximierte
+        // Fenster-Puffer (~3x Breite*Höhe*3 Bytes) PLUS der
+        // Hintergrund-Cache des Dirty-Rect-Compositings (1x).
+        let noetig_bytes = info.width * info.height * 3 * 4;
         let noetig_pages = noetig_bytes.div_ceil(4096);
         let _ = crate::allocator::heap_erweitern(noetig_pages);
 
@@ -1841,15 +2058,32 @@ pub fn app_starten(app: alloc::boxed::Box<dyn crate::ui::App>, breite: usize, ho
 }
 
 /// Wechselt das Theme und zeichnet ALLE Fenster neu (Inhalte nutzen
-/// Theme-Farben, deshalb reicht alles_dirty allein nicht).
+/// Theme-Farben, deshalb reicht alles_dirty allein nicht). Auch der
+/// Hintergrund-Cache trägt die Theme-Farben -> neu rendern.
 pub fn theme_wechseln() {
     crate::theme::umschalten();
+    let _ = mit_manager(|m| {
+        m.hintergrund_neu = true; // Verlauf trägt Theme-Farben
+        for index in 0..m.fenster.len() {
+            inhalt_zeichnen(&mut m.fenster[index]);
+        }
+        m.alles_dirty = true;
+    });
+}
+
+/// Schaltet die UI-Skalierung zyklisch weiter (1.0 -> 1.5 -> 2.0)
+/// und zeichnet alles neu — dieselbe Mechanik wie der Theme-Wechsel.
+/// Terminal-Raster und Widget-Layouts passen sich beim Neu-Rendern
+/// automatisch an die neue metrik() an.
+pub fn skalierung_wechseln() {
+    crate::theme::skala_weiter();
     let _ = mit_manager(|m| {
         for index in 0..m.fenster.len() {
             inhalt_zeichnen(&mut m.fenster[index]);
         }
         m.alles_dirty = true;
     });
+    crate::serial_println!("[UI] Skalierung: {}", crate::theme::skala_name());
 }
 
 /// Alt+Tab weiterschalten (ruft der KeyStream).
@@ -1872,29 +2106,46 @@ pub async fn compositor_task() {
         if !desktop_aktiv() {
             continue;
         }
-        let dirty = mit_manager(|m| {
+        let (breite, hoehe) = match framebuffer::mit_framebuffer(|fb| {
+            (fb.info().width as i32, fb.info().height as i32)
+        }) {
+            Some(masse) => masse,
+            None => continue,
+        };
+        let (rects, hintergrund_neu) = match mit_manager(|m| {
             // Geänderte Inhalte (z. B. Terminal-Ausgabe) EINMAL pro
-            // Frame in die Fenster-Puffer rendern:
+            // Frame in die Fenster-Puffer rendern, dann die Dirty-
+            // Rechtecke abholen (None = nichts zu tun):
             m.inhalte_rendern();
-            let dirty = m.ist_dirty();
-            if dirty {
-                m.dirty_zuruecksetzen();
-            }
-            dirty
-        })
-        .unwrap_or(false);
-        if !dirty {
-            continue;
+            let hintergrund_neu = core::mem::take(&mut m.hintergrund_neu);
+            (m.dirty_abholen(breite, hoehe), hintergrund_neu)
+        }) {
+            Some((Some(rects), hintergrund_neu)) => (rects, hintergrund_neu),
+            _ => continue,
+        };
+
+        // Frischer Desktop-Verlauf (erster Frame / Theme-Wechsel):
+        // in den Back-Buffer rendern und als Cache übernehmen.
+        if hintergrund_neu {
+            framebuffer::mit_framebuffer(hintergrund_in_cache_rendern);
         }
 
         framebuffer::mit_framebuffer(|fb| {
             // Lock-Ordnung: FRAMEBUFFER -> MANAGER.
             x86_64::instructions::interrupts::without_interrupts(|| {
                 if let Some(manager) = MANAGER.lock().as_ref() {
-                    manager.komponieren(fb);
+                    manager.komponieren(fb, &rects);
                 }
             });
-            fb.present();
+            // Nur die geänderten Rechtecke auf den Bildschirm:
+            for rect in &rects {
+                fb.present_bereich(
+                    rect.x as usize,
+                    rect.y as usize,
+                    rect.breite as usize,
+                    rect.hoehe as usize,
+                );
+            }
         });
         maus::cursor_neu_zeichnen();
     }
@@ -2005,7 +2256,7 @@ mod tests {
         assert_eq!(manager.fenster[index].x, 0);
         assert_eq!(manager.fenster[index].breite(), 500);
         // Höhe = Bildschirm - Titelzeile - Taskleisten-Reserve.
-        assert_eq!(manager.fenster[index].hoehe(), 800 - METRIK.titel_hoehe - METRIK.taskleiste_hoehe);
+        assert_eq!(manager.fenster[index].hoehe(), 800 - metrik().titel_hoehe - metrik().taskleiste_hoehe);
     }
 
     /// Koordinaten-Umrechnung Bildschirm -> Fensterinhalt: Grenzen,
@@ -2057,42 +2308,54 @@ mod tests {
         assert_eq!(manager.fokus(), Some(neu));
     }
 
-    /// Dirty-Flag-Logik: Nur echte Änderungen stoßen ein neues
-    /// Komponieren an — und dirty_zuruecksetzen räumt vollständig auf.
+    /// DAS DIRTY-RECT-PROTOKOLL: Änderungen melden genau ihre
+    /// Fläche, dirty_abholen räumt auf, Überlauf fällt auf Vollbild
+    /// zurück, und ohne Änderung gibt es nichts zu komponieren.
     #[test_case]
-    fn test_dirty_flags() {
+    fn test_dirty_rects() {
         let (mut manager, _, _) = test_manager();
-        assert!(manager.ist_dirty()); // frisch erstellt
-        manager.dirty_zuruecksetzen();
-        assert!(!manager.ist_dirty());
+        // Frisch erstellt: Vollbild (alles_dirty vom Aufbau).
+        let rects = manager.dirty_abholen(1000, 800).unwrap();
+        assert_eq!(rects, alloc::vec![Rechteck::neu(0, 0, 1000, 800)]);
+        // Danach: nichts mehr zu tun.
+        assert!(manager.dirty_abholen(1000, 800).is_none());
 
         // Mausbewegung OHNE Drag ändert nichts:
         manager.maus_event(&MausEvent::Bewegt { x: 500, y: 500 }, 500, 500);
-        assert!(!manager.ist_dirty());
+        assert!(manager.dirty_abholen(1000, 800).is_none());
 
-        // Tastatur ins fokussierte TastaturEcho-Fenster: nur DAS
-        // Fenster wird dirty (kein alles_dirty):
+        // Tastatur ins fokussierte TastaturEcho-Fenster: NUR dessen
+        // Fläche wird gemeldet (kein Vollbild):
         manager.taste_event(DecodedKey::Unicode('x'));
-        assert!(manager.ist_dirty());
-        assert!(!manager.alles_dirty);
-        manager.dirty_zuruecksetzen();
+        let rects = manager.dirty_abholen(1000, 800).unwrap();
+        assert_eq!(rects.len(), 1);
+        let flaeche = manager.fenster_flaeche(manager.index_von(manager.fokus().unwrap()).unwrap());
+        assert_eq!(rects[0], flaeche);
 
-        // Fenster-Drag setzt alles_dirty (Hintergrund wird frei):
+        // Fenster-Drag meldet ALTE + NEUE Fläche (fern vom Rand,
+        // damit keine Snap-Vorschau das Vollbild erzwingt):
         manager.maus_event(&MausEvent::Gedrueckt(MausTaste::Links), 200, 150);
+        let _ = manager.dirty_abholen(1000, 800); // Heben-Meldungen abräumen
         manager.maus_event(&MausEvent::Bewegt { x: 220, y: 160 }, 220, 160);
-        assert!(manager.alles_dirty);
+        let rects = manager.dirty_abholen(1000, 800).unwrap();
+        assert!(rects.len() >= 2, "Drag muss alte+neue Flaeche melden");
         manager.maus_event(&MausEvent::Losgelassen(MausTaste::Links), 220, 160);
-        manager.dirty_zuruecksetzen();
 
-        // Uhr-Update: erst beim SEKUNDENWECHSEL wird neu komponiert
-        // (die Test-Fenster enthalten ein Uhr-Fenster, das immer
-        // dirty wird — deshalb nur alles_dirty prüfen):
-        manager.letzte_uhr_sekunde = zeit::ms_seit_boot() / 1000;
-        manager.uhr_aktualisieren();
-        assert!(!manager.alles_dirty);
+        // Uhr-Update: erst beim SEKUNDENWECHSEL, und dann NUR die
+        // Systray-Ecke (das Uhr-Fenster im Test meldet sich separat):
+        let _ = manager.dirty_abholen(1000, 800);
         manager.letzte_uhr_sekunde = u64::MAX; // erzwungener "Wechsel"
         manager.uhr_aktualisieren();
-        assert!(manager.alles_dirty);
+        let rects = manager.dirty_abholen(1000, 800).unwrap();
+        assert!(rects.contains(&manager.systray_rechteck()));
+        assert!(!rects.contains(&Rechteck::neu(0, 0, 1000, 800)));
+
+        // Überlauf: mehr als MAX_DIRTY_RECTS -> Vollbild-Fallback.
+        for i in 0..(MAX_DIRTY_RECTS as i32 + 2) {
+            manager.dirty_melden(Rechteck::neu(i, i, 5, 5));
+        }
+        let rects = manager.dirty_abholen(1000, 800).unwrap();
+        assert_eq!(rects, alloc::vec![Rechteck::neu(0, 0, 1000, 800)]);
     }
 
     /// Theme-Umschaltung: inhalt_zeichnen übernimmt die neuen Farben
@@ -2212,30 +2475,51 @@ mod tests {
             Inhalt::Malflaeche { klicks: Vec::new() },
         );
 
-        // Fenster an der Titelzeile greifen (700..,200..) und pro
-        // Frame ein Stück ziehen — wie eine echte Mausbewegung.
-        // Gemessen wird mit der TSC-Mikrosekunden-Uhr: Die läuft auch
-        // unter without_interrupts weiter — die alte Mess-Falle
-        // ("ticks() steht in mit_framebuffer still") ist Geschichte.
-        manager.maus_event(&MausEvent::Gedrueckt(MausTaste::Links), 720, 210);
+        // Hintergrund-Cache einmalig füllen (macht sonst der
+        // Compositor-Task beim ersten Frame):
+        framebuffer::mit_framebuffer(hintergrund_in_cache_rendern);
+        manager.hintergrund_neu = false;
+
+        // Drei Szenarien, gemessen mit der TSC-µs-Uhr (läuft auch
+        // unter without_interrupts): Vollbild, nur Uhr-Tick, nur
+        // Fenster-Drag (Mausbewegung mit gegriffenem Fenster).
         const FRAMES: u64 = 40;
-        let start = zeit::us_seit_boot();
-        for i in 0..FRAMES {
+        let szenario = |name: &str, manager: &mut FensterManager, schritt: &mut dyn FnMut(&mut FensterManager, u64)| {
+            let start = zeit::us_seit_boot();
+            for i in 0..FRAMES {
+                schritt(manager, i);
+                framebuffer::mit_framebuffer(|fb| {
+                    let rects = manager.dirty_abholen(fb.info().width as i32, fb.info().height as i32);
+                    if let Some(rects) = rects {
+                        manager.komponieren(fb, &rects);
+                        for r in &rects {
+                            fb.present_bereich(r.x.max(0) as usize, r.y.max(0) as usize, r.breite as usize, r.hoehe as usize);
+                        }
+                    }
+                });
+            }
+            let dauer_us = zeit::us_seit_boot() - start;
+            serial_println!(
+                "[MESSUNG] {}: {} Frames -> {} us/Frame",
+                name,
+                FRAMES,
+                dauer_us / FRAMES
+            );
+        };
+
+        // 1. Vollbild: jede Runde alles neu.
+        szenario("Vollbild", &mut manager, &mut |m, _| m.alles_dirty = true);
+        // 2. Uhr-Tick: nur die Systray-Uhr (erzwungener Sekundenwechsel).
+        szenario("Uhr-Tick", &mut manager, &mut |m, _| {
+            m.letzte_uhr_sekunde = u64::MAX;
+            m.uhr_aktualisieren();
+        });
+        // 3. Fenster-Drag:
+        manager.maus_event(&MausEvent::Gedrueckt(MausTaste::Links), 720, 210);
+        szenario("Fenster-Drag", &mut manager, &mut |m, i| {
             let x = 720 - (i as i32 % 20) * 4;
-            manager.maus_event(&MausEvent::Bewegt { x, y: 210 }, x, 210);
-            framebuffer::mit_framebuffer(|fb| {
-                manager.komponieren(fb);
-                fb.present();
-            });
-            manager.dirty_zuruecksetzen();
-        }
-        let dauer_us = zeit::us_seit_boot() - start;
-        serial_println!(
-            "[MESSUNG] Compositor: {} Frames in {} us  ->  {} us/Frame",
-            FRAMES,
-            dauer_us,
-            dauer_us / FRAMES
-        );
+            m.maus_event(&MausEvent::Bewegt { x, y: 210 }, x, 210);
+        });
         manager.maus_event(&MausEvent::Losgelassen(MausTaste::Links), 640, 210);
 
         // A/B-Vergleich der Kern-Optimierung: EIN Fenster-Inhalt

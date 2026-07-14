@@ -264,8 +264,16 @@ impl<'a, F: Zeichenflaeche> Zeichner<'a, F> {
             }
             return;
         }
-        for y in rect.y..rect.y + rect.hoehe {
-            for x in rect.x..rect.x + rect.breite {
+        // Alpha braucht den Pixel-Pfad (Untergrund lesen) — aber auch
+        // hier lohnt das VORAB-Clipping: Bei Dirty-Rect-Frames läuft
+        // die Schleife nur über den sichtbaren Schnitt, statt das
+        // ganze Rechteck Pixel für Pixel am Clip abprallen zu lassen.
+        let ziel = match self.sichtbar(rect) {
+            Some(ziel) => ziel,
+            None => return,
+        };
+        for y in ziel.y..ziel.y + ziel.hoehe {
+            for x in ziel.x..ziel.x + ziel.breite {
                 self.pixel(x, y, farbe);
             }
         }
