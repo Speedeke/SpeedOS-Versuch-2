@@ -83,8 +83,11 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         None => serial_println!("[FB] WARNUNG: Kein Framebuffer — Ausgabe nur seriell!"),
     }
 
-    // 5. Dateisystem: RamFs als Wurzel mounten (mit Demo-Dateien).
+    // 5. Dateisystem: RamFs als Wurzel mounten (mit Demo-Dateien),
+    //    dann die persistenten Einstellungen laden und anwenden
+    //    (Theme, Akzent, Hintergrund — VOR dem Desktop-Start).
     speed_os::fs::init();
+    speed_os::einstellungen::laden();
 
     serial_println!("[BOOT] GDT/IDT/PIC, Speicher, Heap, Grafik und RamFs initialisiert.");
 

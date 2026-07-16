@@ -5,6 +5,47 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### Hinzugefügt (Einstellungen: App + persistenter Store)
+- src/einstellungen.rs, Teil 1 — der persistente Einstellungs-Store:
+  Schlüssel=Wert-Datei /system/einstellungen.txt im VFS (parsen/
+  serialisieren als reine, unit-getestete Funktionen; Kommentare und
+  kaputte Zeilen werden toleriert), typisierter Zugriff (hole_/
+  setze_zahl/bool/text — jedes setze_* speichert SOFORT), Laden +
+  Anwenden beim Boot (main.rs nach fs::init). Die API-Naht für
+  Serie 4: Kommt das Disk-Dateisystem, wird nur das gemountete VFS
+  getauscht — dann überleben die Werte auch echte Neustarts
+- Teil 2 — die Einstellungen-App (ui::App, Kategorien-ScrollListe
+  links, Inhaltsseiten rechts):
+  * Personalisierung: Theme Dunkel/Hell, Akzentfarbe aus 6er-Palette
+    (NEU: unabhängig von Hell/Dunkel, mit passender Farbvariante je
+    Theme — theme::aktuell() liefert jetzt eine Kopie mit
+    eingesetztem Akzent), Desktop-Hintergrund aus 5 Verlauf-Presets
+    (theme::hintergrund_verlauf; der Compositor-Hintergrund-CACHE
+    wird über hintergrund_neu invalidiert)
+  * Anzeige: Auflösung (nur Anzeige, mit SPEEDOS_AUFLOESUNG-Hinweis),
+    UI-Skalierung 1.0/1.5/2.0 direkt wählbar, Cursor-Blinktempo
+    (wirken live: Textfeld-Cursor + Konsolen-Blink-Task lesen
+    einstellungen::cursor_blink_ms)
+  * Datum & Uhrzeit: Live-Uhr, UTC-Offset in 30-min-Schritten und
+    12/24h-Format für die Systray-Uhr (jetzt_lokal/uhrzeit_text;
+    dokumentierte Annahme: die RTC liefert in QEMU die Host-
+    LOKALZEIT, der Offset ist eine reine Anzeige-Verschiebung)
+  * Info: Logo, Version aus Cargo.toml (Compile-Zeit-env!),
+    Auflösung, Speicher frei/gesamt (frame_statistik), TSC-Frequenz,
+    Uptime live (tick beim Sekundenwechsel), Task-Anzahl (neues
+    Atomic im Executor)
+- Alle Optionen wirken SOFORT und überleben Fenster-zu/auf — per
+  QMP-Fernsteuerung in QEMU verifiziert (Screenshots: Theme, Akzent
+  Grün, Ozean-Hintergrund, 12h-Systray, Skalierung; die Datei per
+  `type /system/einstellungen.txt` geprüft). Muster dafür: Atomics
+  UNTER dem MANAGER-Lock setzen, Neuzeichnen via AppReaktion.danach
+  -> fenster::alles_neu_zeichnen()
+- Toolkit-Ausbau: Button::mit_aktiv (markierte Wahl in Options-
+  Gruppen), Farbfeld- und Icon-Widgets in der App; Registry-Apps
+  "Theme wechseln"/"Skalierung" persistieren ihre Wahl jetzt auch
+- Gespeicherte UI-Skala schlägt beim Desktop-Start die Auto-Wahl
+  nach Bildschirmbreite
+
 ### Hinzugefügt (Explorer Teil 2: Dateioperationen)
 - Umbenennen mit F2 (der Auswahl-Eintrag wird zur Eingabezeile, die
   App puffert über den taste-Hook; Enter übernimmt, Esc bricht ab),

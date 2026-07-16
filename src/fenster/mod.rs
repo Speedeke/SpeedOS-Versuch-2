@@ -522,15 +522,17 @@ pub struct FensterManager {
 /// Mehr als so viele Einzel-Rechtecke pro Frame -> Vollbild-Fallback.
 const MAX_DIRTY_RECTS: usize = 16;
 
-/// Rendert den Aurora-Verlauf des aktiven Themes in den Back-Buffer
-/// und übernimmt ihn als Hintergrund-Cache (byte-identisches memcpy-
-/// Format — deshalb lebt der Cache im DoppelPuffer, nicht hier).
+/// Rendert den Desktop-Verlauf in den Back-Buffer und übernimmt ihn
+/// als Hintergrund-Cache (byte-identisches memcpy-Format — deshalb
+/// lebt der Cache im DoppelPuffer, nicht hier). Welcher Verlauf das
+/// ist, entscheidet theme::hintergrund_verlauf() (Preset-Auswahl der
+/// Einstellungen-App; Preset 0 = Theme-Aurora).
 pub(crate) fn hintergrund_in_cache_rendern(fb: &mut framebuffer::DoppelPuffer) {
-    let thema = theme::aktuell();
+    let (oben, unten) = theme::hintergrund_verlauf();
     let hoehe = fb.info().height;
     for y in 0..hoehe {
         let t = (y * 255 / hoehe.max(1)) as u8;
-        fb.zeile_fuellen(y, thema.desktop_oben.mischen(thema.desktop_unten, t));
+        fb.zeile_fuellen(y, oben.mischen(unten, t));
     }
     fb.hintergrund_uebernehmen();
 }
@@ -1871,8 +1873,10 @@ impl FensterManager {
         z.icon(systray_x, y + (metrik().taskleiste_hoehe - 16) / 2, &crate::grafik::ICON_ZAHNRAD, 1);
         z.icon(systray_x + 22, y + (metrik().taskleiste_hoehe - 16) / 2, &crate::grafik::ICON_ORDNER, 1);
 
-        let jetzt = zeit::jetzt();
-        let uhr = format!("{:02}:{:02}:{:02}", jetzt.stunde, jetzt.minute, jetzt.sekunde);
+        // Zeit + Format kommen aus den Einstellungen (UTC-Offset,
+        // 12/24h) — einstellungen ist ein Blatt-Lock, hier erlaubt.
+        let jetzt = crate::einstellungen::jetzt_lokal();
+        let uhr = crate::einstellungen::uhrzeit_text(&jetzt);
         let datum = format!("{:02}.{:02}.{}", jetzt.tag, jetzt.monat, jetzt.jahr);
         let uhr_x = breite - metrik().abstand - uhr.chars().count() as i32 * zeichen_breite;
         let datum_x = breite - metrik().abstand - datum.chars().count() as i32 * zeichen_breite;
@@ -2119,9 +2123,16 @@ pub fn desktop_starten() {
     let erster_start =
         x86_64::instructions::interrupts::without_interrupts(|| MANAGER.lock().is_none());
     if erster_start {
-        // UI-Skalierung nach Auflösung: ab 2560 breit 1.5, ab 3840
-        // 2.0 — sonst wäre die 16-px-Schrift bei 4K winzig.
-        crate::theme::skala_setzen_nach_breite(info.width);
+        // UI-Skalierung: Hat der Nutzer sie in den Einstellungen
+        // gewählt, gilt der GESPEICHERTE Wert — sonst die Auto-Wahl
+        // nach Auflösung (ab 2560 breit 1.5, ab 3840 2.0; sonst wäre
+        // die 16-px-Schrift bei 4K winzig).
+        match crate::einstellungen::hole_opt(crate::einstellungen::S_SKALA) {
+            Some(wert) => {
+                crate::theme::skala_setzen_halbe(wert.parse().unwrap_or(2));
+            }
+            None => crate::theme::skala_setzen_nach_breite(info.width),
+        }
 
         // Heap passend zur Auflösung wachsen lassen: maximierte
         // Fenster-Puffer (~3x Breite*Höhe*3 Bytes) PLUS der
@@ -2246,13 +2257,14 @@ pub fn app_starten(app: alloc::boxed::Box<dyn crate::ui::App>, breite: usize, ho
     app_fenster_oeffnen(titel, breite, hoehe, Inhalt::App(app_fenster));
 }
 
-/// Wechselt das Theme und zeichnet ALLE Fenster neu (Inhalte nutzen
-/// Theme-Farben, deshalb reicht alles_dirty allein nicht). Auch der
-/// Hintergrund-Cache trägt die Theme-Farben -> neu rendern.
-pub fn theme_wechseln() {
-    crate::theme::umschalten();
+/// Zeichnet ALLE Fenster-Inhalte neu, erneuert den Hintergrund-Cache
+/// und komponiert Vollbild — DIE Aufräum-Funktion nach jeder Optik-
+/// Änderung (Theme, Akzentfarbe, Hintergrund-Preset, Skalierung).
+/// Nimmt den MANAGER-Lock: nie unter gehaltenen Locks rufen
+/// (aus Apps immer über AppReaktion.danach).
+pub fn alles_neu_zeichnen() {
     let _ = mit_manager(|m| {
-        m.hintergrund_neu = true; // Verlauf trägt Theme-Farben
+        m.hintergrund_neu = true; // Verlauf-Cache invalidieren
         for index in 0..m.fenster.len() {
             inhalt_zeichnen(&mut m.fenster[index]);
         }
@@ -2260,18 +2272,32 @@ pub fn theme_wechseln() {
     });
 }
 
+/// Wechselt das Theme, merkt die Wahl in den Einstellungen und
+/// zeichnet ALLE Fenster neu (Inhalte nutzen Theme-Farben, deshalb
+/// reicht alles_dirty allein nicht — und der Hintergrund-Cache trägt
+/// die Theme-Farben).
+pub fn theme_wechseln() {
+    crate::theme::umschalten();
+    crate::einstellungen::setze_bool(
+        crate::einstellungen::S_THEME_HELL,
+        crate::theme::hell_aktiv(),
+    );
+    alles_neu_zeichnen();
+}
+
 /// Schaltet die UI-Skalierung zyklisch weiter (1.0 -> 1.5 -> 2.0)
 /// und zeichnet alles neu — dieselbe Mechanik wie der Theme-Wechsel.
 /// Terminal-Raster und Widget-Layouts passen sich beim Neu-Rendern
 /// automatisch an die neue metrik() an.
+/// (Die Einstellungen-App setzt die Skala DIREKT über
+/// theme::skala_setzen_halbe + alles_neu_zeichnen — siehe dort.)
 pub fn skalierung_wechseln() {
     crate::theme::skala_weiter();
-    let _ = mit_manager(|m| {
-        for index in 0..m.fenster.len() {
-            inhalt_zeichnen(&mut m.fenster[index]);
-        }
-        m.alles_dirty = true;
-    });
+    crate::einstellungen::setze_zahl(
+        crate::einstellungen::S_SKALA,
+        crate::theme::skala_halbe() as i64,
+    );
+    alles_neu_zeichnen();
     crate::serial_println!("[UI] Skalierung: {}", crate::theme::skala_name());
 }
 

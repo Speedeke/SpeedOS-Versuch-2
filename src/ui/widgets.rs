@@ -103,14 +103,29 @@ pub struct Button {
     nachricht: u32,
     hover: bool,
     gedrueckt: bool,
+    /// Dauerhaft hervorgehoben (die AKTIVE Wahl in einer Options-
+    /// Gruppe, z. B. das gewählte Theme in den Einstellungen).
+    aktiv: bool,
 }
 
 impl Button {
     pub fn neu(text: &str, nachricht: u32) -> Self {
-        Button { text: String::from(text), icon: None, nachricht, hover: false, gedrueckt: false }
+        Button {
+            text: String::from(text),
+            icon: None,
+            nachricht,
+            hover: false,
+            gedrueckt: false,
+            aktiv: false,
+        }
     }
     pub fn mit_icon(text: &str, icon: &'static Icon, nachricht: u32) -> Self {
         Button { icon: Some(icon), ..Button::neu(text, nachricht) }
+    }
+    /// Builder: als aktive Wahl markieren (Auswahl-Füllung + Akzent).
+    pub fn mit_aktiv(mut self, aktiv: bool) -> Self {
+        self.aktiv = aktiv;
+        self
     }
 }
 
@@ -125,8 +140,8 @@ impl Widget for Button {
 
     fn zeichnen(&self, z: &mut Zeichner<'_, FensterPuffer>, bereich: Rechteck) {
         let thema = theme::aktuell();
-        // Zustand -> Füllung: gedrückt (Auswahl) > hover (heller) > normal.
-        let fuellung = if self.gedrueckt {
+        // Zustand -> Füllung: gedrückt/aktiv (Auswahl) > hover > normal.
+        let fuellung = if self.gedrueckt || self.aktiv {
             thema.auswahl
         } else if self.hover {
             thema.leiste_knopf_aktiv
@@ -134,7 +149,10 @@ impl Widget for Button {
             thema.eingabefeld
         };
         z.rechteck_abgerundet(bereich, metrik().radius_klein, fuellung);
-        z.rechteck_rahmen(bereich, if self.hover { thema.akzent } else { thema.rahmen_passiv });
+        z.rechteck_rahmen(
+            bereich,
+            if self.hover || self.aktiv { thema.akzent } else { thema.rahmen_passiv },
+        );
 
         let mut text_x = bereich.x
             + (bereich.breite
@@ -330,9 +348,13 @@ impl Widget for Textfeld {
             thema.text_stark,
         );
 
-        // Cursor: blinkt über die zeit-API (500-ms-Takt); der Uhr-Task
-        // stößt das Neuzeichnen an, solange das Feld fokussiert ist.
-        if self.fokus && (crate::zeit::us_seit_boot() / 500_000).is_multiple_of(2) {
+        // Cursor: blinkt über die zeit-API; der Uhr-Task stößt das
+        // Neuzeichnen an, solange das Feld fokussiert ist. Das Tempo
+        // kommt aus den Einstellungen (Anzeige -> Cursor-Blinken).
+        if self.fokus
+            && (crate::zeit::us_seit_boot() / crate::einstellungen::cursor_blink_us())
+                .is_multiple_of(2)
+        {
             let cursor_x = bereich.x + metrik().abstand + sichtbar.chars().count() as i32 * zeichen_breite();
             z.rechteck_fuellen(
                 Rechteck::neu(cursor_x, text_y, 2, metrik().zeilen_hoehe),

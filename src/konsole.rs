@@ -354,7 +354,8 @@ pub fn cursor_pausieren() {
 /// (zeit::warte_ms) — zwischen den Blinks schläft die CPU.
 pub async fn cursor_blink_task() {
     loop {
-        crate::zeit::warte_ms(500).await;
+        // Blink-Tempo aus den Einstellungen (wie der Textfeld-Cursor).
+        crate::zeit::warte_ms(crate::einstellungen::cursor_blink_ms()).await;
         x86_64::instructions::interrupts::without_interrupts(|| {
             let mut konsole = KONSOLE.lock();
             if !konsole.cursor_aktiv {

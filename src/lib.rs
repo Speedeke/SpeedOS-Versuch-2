@@ -31,6 +31,7 @@ use core::panic::PanicInfo;
 pub mod ablage;
 pub mod allocator;
 pub mod apps;
+pub mod einstellungen;
 pub mod explorer;
 pub mod fenster;
 pub mod framebuffer;

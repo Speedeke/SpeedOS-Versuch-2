@@ -27,9 +27,19 @@
 use super::{Task, TaskId};
 use alloc::{collections::BTreeMap, sync::Arc, task::Wake, vec::Vec};
 use conquer_once::spin::OnceCell;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use core::task::{Context, Poll, Waker};
 use crossbeam_queue::ArrayQueue;
+
+/// Wie viele Tasks gerade leben — nur eine Anzeige-Statistik (die
+/// Einstellungen-App zeigt sie auf der Info-Seite), deshalb ein
+/// simples Atomic statt Zugriff auf den Executor selbst.
+static TASK_ANZAHL: AtomicUsize = AtomicUsize::new(0);
+
+/// Anzahl der aktuell lebenden Tasks.
+pub fn task_anzahl() -> usize {
+    TASK_ANZAHL.load(Ordering::Relaxed)
+}
 
 /// Standard-Kapazität der Warteschlangen (Weck- und Spawn-Queue).
 pub const STANDARD_KAPAZITAET: usize = 128;
@@ -90,6 +100,7 @@ impl Executor {
         if self.tasks.insert(task_id, task).is_some() {
             panic!("Task-ID {:?} existiert schon", task_id);
         }
+        TASK_ANZAHL.store(self.tasks.len(), Ordering::Relaxed);
         if self.task_queue.push(task_id).is_err() {
             // Queue voll: kein Panic — Notfall-Flag setzen, die
             // nächste Runde pollt dann sowieso alle Tasks.
@@ -146,6 +157,7 @@ impl Executor {
                 // Fertig! Task und seinen Waker entsorgen.
                 self.tasks.remove(&task_id);
                 self.waker_cache.remove(&task_id);
+                TASK_ANZAHL.store(self.tasks.len(), Ordering::Relaxed);
             }
             Poll::Pending => {
                 // Nichts tun: Der Task meldet sich per Waker zurück.

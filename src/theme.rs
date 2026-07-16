@@ -27,6 +27,9 @@ use noto_sans_mono_bitmap::RasterHeight;
 
 /// Alle Farben der Desktop-Oberfläche. Farbverläufe brauchen `Farbe`
 /// (RGB), alles andere ist `Rgba` (kann halbtransparent sein).
+/// Copy, weil `aktuell()` eine KOPIE mit eingesetzter Akzentfarbe
+/// liefert (siehe unten) — die Statics bleiben unverändert.
+#[derive(Clone, Copy)]
 pub struct Theme {
     /// Anzeigename (fürs Startmenü / Debug).
     pub name: &'static str,
@@ -299,6 +302,19 @@ pub fn skala_weiter() {
     SKALA_HALBE.store(neu, Ordering::Relaxed);
 }
 
+/// Setzt die Skalierung DIREKT (in Halben: 2/3/4) — für die
+/// Einstellungen-App und den Boot (gespeicherter Wert). Ungültige
+/// Werte fallen auf 1.0 zurück. Der Aufrufer muss danach alle
+/// Fenster neu zeichnen (fenster::skalierung_setzen erledigt beides).
+pub fn skala_setzen_halbe(halbe: i32) {
+    let geprueft = match halbe {
+        3 => 3,
+        4 => 4,
+        _ => 2,
+    };
+    SKALA_HALBE.store(geprueft, Ordering::Relaxed);
+}
+
 /// DIE Metrik-Quelle für allen UI-Code: die Basis, skaliert mit dem
 /// aktiven Faktor. Schriftgrößen mappen auf die vorgerasterten Fonts
 /// (16/24/32); schrift_gross ist bei 32 gedeckelt (größer liegt
@@ -338,25 +354,133 @@ pub fn metrik() -> Metrik {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Akzentfarben: wählbar UNABHÄNGIG von Hell/Dunkel. Jeder Eintrag
+// trägt zwei Werte — leuchtend fürs dunkle Theme, satter fürs helle
+// (sonst wäre z. B. Gelb auf hellem Grund unlesbar). Index 0 ist das
+// klassische Aurora-Violett und reproduziert exakt die alten Farben.
+// ---------------------------------------------------------------------------
+
+/// Eine wählbare Akzentfarbe (Einstellungen -> Personalisierung).
+pub struct Akzent {
+    pub name: &'static str,
+    /// Variante fürs dunkle Theme (leuchtend).
+    pub dunkel: Rgba,
+    /// Variante fürs helle Theme (satter, lesbar auf hellem Grund).
+    pub hell: Rgba,
+}
+
+/// Die Akzent-Palette (klein und kuratiert — kein Farbwähler).
+pub static AKZENTE: [Akzent; 6] = [
+    Akzent { name: "Violett", dunkel: Rgba::neu(0x7c, 0x3a, 0xed), hell: Rgba::neu(0x6d, 0x28, 0xd9) },
+    Akzent { name: "Cyan", dunkel: Rgba::neu(0x22, 0xd3, 0xee), hell: Rgba::neu(0x0e, 0x74, 0x90) },
+    Akzent { name: "Gruen", dunkel: Rgba::neu(0x22, 0xc5, 0x5e), hell: Rgba::neu(0x15, 0x80, 0x3d) },
+    Akzent { name: "Gelb", dunkel: Rgba::neu(0xfb, 0xbf, 0x24), hell: Rgba::neu(0xb4, 0x53, 0x09) },
+    Akzent { name: "Rot", dunkel: Rgba::neu(0xef, 0x44, 0x44), hell: Rgba::neu(0xb9, 0x1c, 0x1c) },
+    Akzent { name: "Rosa", dunkel: Rgba::neu(0xec, 0x48, 0x99), hell: Rgba::neu(0xbe, 0x18, 0x5d) },
+];
+
+/// Index in AKZENTE (0 = Aurora-Violett, der Standard).
+static AKZENT_INDEX: AtomicI32 = AtomicI32::new(0);
+
+pub fn akzent_index() -> usize {
+    let index = AKZENT_INDEX.load(Ordering::Relaxed);
+    (index.max(0) as usize).min(AKZENTE.len() - 1)
+}
+
+/// Setzt die Akzentfarbe (Index in AKZENTE; ungültig -> geklemmt).
+/// Der Aufrufer muss danach alles neu zeichnen lassen
+/// (fenster::alles_neu_zeichnen).
+pub fn akzent_setzen(index: usize) {
+    AKZENT_INDEX.store(index.min(AKZENTE.len() - 1) as i32, Ordering::Relaxed);
+}
+
+// ---------------------------------------------------------------------------
+// Desktop-Hintergrund: Verlauf-Presets. Index 0 = "Aurora (Theme)",
+// der Verlauf des aktiven Themes; alle anderen sind feste Farbpaare
+// (in Hell und Dunkel gleich). Nach dem Umschalten muss der
+// Hintergrund-Cache neu gerendert werden (fenster: hintergrund_neu).
+// ---------------------------------------------------------------------------
+
+/// Ein wählbarer Desktop-Verlauf (oben -> unten).
+pub struct HintergrundPreset {
+    pub name: &'static str,
+    pub oben: Farbe,
+    pub unten: Farbe,
+}
+
+/// Die Preset-Liste. Eintrag 0 ist nur der NAME — seine Farben kommen
+/// live aus dem aktiven Theme (hintergrund_verlauf).
+pub static HINTERGRUENDE: [HintergrundPreset; 5] = [
+    HintergrundPreset { name: "Aurora (Theme)", oben: Farbe::neu(0, 0, 0), unten: Farbe::neu(0, 0, 0) },
+    HintergrundPreset { name: "Ozean", oben: Farbe::neu(0x0a, 0x2a, 0x43), unten: Farbe::neu(0x04, 0x10, 0x1f) },
+    HintergrundPreset { name: "Sonnenuntergang", oben: Farbe::neu(0x8a, 0x2b, 0x50), unten: Farbe::neu(0x1d, 0x10, 0x2e) },
+    HintergrundPreset { name: "Wald", oben: Farbe::neu(0x11, 0x3a, 0x2b), unten: Farbe::neu(0x06, 0x14, 0x10) },
+    HintergrundPreset { name: "Graphit", oben: Farbe::neu(0x3a, 0x3f, 0x4b), unten: Farbe::neu(0x10, 0x12, 0x16) },
+];
+
+static HINTERGRUND_INDEX: AtomicI32 = AtomicI32::new(0);
+
+pub fn hintergrund_index() -> usize {
+    let index = HINTERGRUND_INDEX.load(Ordering::Relaxed);
+    (index.max(0) as usize).min(HINTERGRUENDE.len() - 1)
+}
+
+/// Wählt ein Hintergrund-Preset. Der Aufrufer muss danach den
+/// Hintergrund-Cache invalidieren (fenster::alles_neu_zeichnen setzt
+/// hintergrund_neu — sonst bliebe der alte Verlauf im Cache!).
+pub fn hintergrund_setzen(index: usize) {
+    HINTERGRUND_INDEX.store(index.min(HINTERGRUENDE.len() - 1) as i32, Ordering::Relaxed);
+}
+
+/// Der aktuell zu rendernde Desktop-Verlauf (oben, unten) — Preset 0
+/// folgt dem aktiven Theme, alle anderen sind feste Farbpaare.
+pub fn hintergrund_verlauf() -> (Farbe, Farbe) {
+    let index = hintergrund_index();
+    if index == 0 {
+        let thema = aktuell();
+        (thema.desktop_oben, thema.desktop_unten)
+    } else {
+        let preset = &HINTERGRUENDE[index];
+        (preset.oben, preset.unten)
+    }
+}
+
 /// Ist gerade das helle Theme aktiv? (AtomicBool statt Mutex: Das
 /// Theme wird mitten im Compositor unter gehaltenen Locks abgefragt —
 /// ein Lock hier würde nur neue Deadlock-Regeln erzwingen.)
 static HELL_AKTIV: AtomicBool = AtomicBool::new(false);
 
+pub fn hell_aktiv() -> bool {
+    HELL_AKTIV.load(Ordering::Relaxed)
+}
+
+/// Setzt Hell/Dunkel direkt (Boot: gespeicherter Wert; Einstellungen-
+/// App). Der Aufrufer muss danach alles neu zeichnen lassen.
+pub fn hell_setzen(hell: bool) {
+    HELL_AKTIV.store(hell, Ordering::Relaxed);
+}
+
 /// Das gerade aktive Theme — immer über DIESE Funktion holen, nie
-/// AURORA_DUNKEL direkt referenzieren!
-pub fn aktuell() -> &'static Theme {
-    if HELL_AKTIV.load(Ordering::Relaxed) {
-        &AURORA_HELL
-    } else {
-        &AURORA_DUNKEL
-    }
+/// AURORA_DUNKEL direkt referenzieren! Liefert seit der Akzent-
+/// Einstellung eine KOPIE des Basis-Themes, in der die gewählte
+/// Akzentfarbe eingesetzt ist (akzent + rahmen_aktiv) — dadurch folgt
+/// automatisch JEDE Akzent-Stelle im UI der Auswahl, ohne dass ein
+/// Aufrufer etwas ändern muss. Lock-frei wie zuvor.
+pub fn aktuell() -> Theme {
+    let hell = HELL_AKTIV.load(Ordering::Relaxed);
+    let mut thema = if hell { AURORA_HELL } else { AURORA_DUNKEL };
+    let akzent = &AKZENTE[akzent_index()];
+    let farbe = if hell { akzent.hell } else { akzent.dunkel };
+    thema.akzent = farbe;
+    thema.rahmen_aktiv = farbe;
+    thema
 }
 
 /// Wechselt zwischen Dunkel und Hell und liefert das NEUE Theme.
 /// Achtung: Der Aufrufer muss danach alle Fenster neu zeichnen lassen
 /// (fenster::theme_wechseln() erledigt beides zusammen).
-pub fn umschalten() -> &'static Theme {
+pub fn umschalten() -> Theme {
     HELL_AKTIV.fetch_xor(true, Ordering::Relaxed);
     aktuell()
 }
@@ -387,5 +511,50 @@ mod tests {
             AURORA_DUNKEL.terminal_hintergrund,
             AURORA_HELL.terminal_hintergrund
         );
+    }
+
+    /// Die Akzentwahl überlebt den Hell/Dunkel-Wechsel (unabhängig!)
+    /// und liefert je Theme die passende Farbvariante; Index 0 ist
+    /// exakt das alte Aurora-Violett.
+    #[test_case]
+    fn test_akzent_unabhaengig_von_hell_dunkel() {
+        let hell_vorher = hell_aktiv();
+        hell_setzen(false);
+        assert_eq!(aktuell().akzent, AURORA_DUNKEL.akzent); // Standard
+
+        akzent_setzen(2); // Grün
+        assert_eq!(aktuell().akzent, AKZENTE[2].dunkel);
+        assert_eq!(aktuell().rahmen_aktiv, AKZENTE[2].dunkel);
+        hell_setzen(true); // Wechsel ändert die WAHL nicht ...
+        assert_eq!(akzent_index(), 2);
+        assert_eq!(aktuell().akzent, AKZENTE[2].hell); // ... nur die Variante
+
+        // Ungültiger Index wird geklemmt statt zu panicken:
+        akzent_setzen(999);
+        assert_eq!(akzent_index(), AKZENTE.len() - 1);
+
+        akzent_setzen(0);
+        hell_setzen(hell_vorher);
+    }
+
+    /// Hintergrund-Presets: 0 folgt dem Theme, feste Presets liefern
+    /// ihre eigenen Farben — in Hell und Dunkel identisch.
+    #[test_case]
+    fn test_hintergrund_presets() {
+        let hell_vorher = hell_aktiv();
+        hell_setzen(false);
+        hintergrund_setzen(0);
+        assert_eq!(hintergrund_verlauf(), (AURORA_DUNKEL.desktop_oben, AURORA_DUNKEL.desktop_unten));
+        hell_setzen(true);
+        assert_eq!(hintergrund_verlauf(), (AURORA_HELL.desktop_oben, AURORA_HELL.desktop_unten));
+
+        hintergrund_setzen(1); // Ozean — themeunabhängig
+        let ozean = hintergrund_verlauf();
+        hell_setzen(false);
+        assert_eq!(hintergrund_verlauf(), ozean);
+        assert_eq!(ozean.0, HINTERGRUENDE[1].oben);
+
+        hintergrund_setzen(0);
+        hell_setzen(hell_vorher);
     }
 }

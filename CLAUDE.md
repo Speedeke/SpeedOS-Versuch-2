@@ -262,6 +262,32 @@
   auf UiEreignis::Rechtsklick (ScrollListe::mit_rechtsklick);
   AppReaktion::danach ist eine Box<dyn FnOnce> (Aktion MIT Daten,
   z. B. Betrachter-Pfad) -> NachLock::Einmal.
+- **Einstellungen (Juli 2026):** `src/einstellungen.rs` = Store + App.
+  (1) STORE: /system/einstellungen.txt im VFS (Schlüssel=Wert;
+  parsen/serialisieren rein + getestet), typisierter Zugriff
+  (hole_/setze_zahl/bool/text — setze_* speichert SOFORT). Der
+  SPEICHER-Mutex ist ein BLATT-Lock wie die Ablage (unter dem
+  MANAGER-Lock erlaubt); main.rs lädt nach fs::init und wendet auf
+  die theme-Atomics an. API-Naht für Serie 4 (Disk-FS = nur VFS
+  tauschen). (2) APP: Kategorien-ScrollListe links, Seiten rechts.
+  DAS MUSTER für sofort wirkende Optik-Optionen: lock-freies Atomic
+  UNTER dem MANAGER-Lock setzen (theme::hell_setzen/akzent_setzen/
+  hintergrund_setzen/skala_setzen_halbe — sonst markiert der direkt
+  folgende Neu-Aufbau den alten Zustand!), setze_* persistieren,
+  Neuzeichnen via AppReaktion.danach -> fenster::alles_neu_zeichnen()
+  (hintergrund_neu + alle Inhalte + alles_dirty). NEUE Theme-
+  Fähigkeiten: theme::aktuell() liefert eine KOPIE mit eingesetzter
+  Akzentfarbe (Palette AKZENTE, je Eintrag Hell-/Dunkel-Variante,
+  patcht akzent + rahmen_aktiv); Desktop-Verlauf über theme::
+  hintergrund_verlauf() (HINTERGRUENDE, Preset 0 = Theme-Aurora).
+  Systray-Uhr: einstellungen::jetzt_lokal() + uhrzeit_text()
+  (UTC-Offset = reine ANZEIGE-Verschiebung; die RTC liefert in QEMU
+  die Host-LOKALZEIT, -rtc base=localtime). Cursor-Blinktempo:
+  cursor_blink_ms/us, live gelesen von Textfeld + Konsolen-Task.
+  Info-Seite: Auflösung wird beim App-Start GECACHT (mit_framebuffer
+  unter dem MANAGER-Lock wäre die falsche Lock-Ordnung!); Task-Zahl
+  als Atomic im Executor. Boot-Skala: gespeicherter Wert schlägt die
+  Auto-Wahl nach Breite (desktop_starten).
 - **Explorer & App-Muster (Juli 2026):** `src/explorer.rs` = die
   Blaupause für Trait-Apps: Die App hält ZUSTAND (Pfad, Verlauf,
   Auswahl, aufgeklappte Baum-Ordner) plus ABGELEITETE Listen
