@@ -5,6 +5,27 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### Hinzugefügt (Explorer — die erste echte App auf dem Toolkit)
+- src/explorer.rs: ExplorerApp (ui::App) mit Werkzeugleiste
+  (Zurück/Vor/Hoch + klickbare Breadcrumbs + KlickFlaeche für den
+  Eingabemodus), Ordnerbaum-Spalte (aufklappbar ab /, Klick
+  navigiert), Dateiliste (Icons nach Typ, Größen als B/KiB/MiB,
+  Ordner-zuerst-Sortierung) und Statusleiste (Eintragszahl,
+  Auswahl-Info, Fehlermeldungen)
+- Navigation: Doppelklick/Enter öffnet Ordner, Backspace/^-Button =
+  hoch, Zurück/Vor-Verlauf wie im Browser (Vorwärts-Historie wird
+  beim Abbiegen gekappt), Adressleiste per Klick tippbar (Enter
+  navigiert, Esc bricht ab); mehrere Explorer-Fenster laufen als
+  eigene App-Instanzen unabhängig — alles per QMP verifiziert
+- Toolkit-Ausbau dafür: ScrollListe mit Index-kodierten Nachrichten
+  (BASIS+Index — Apps erfahren, WELCHER Eintrag), Fokus +
+  Pfeiltasten/Enter-Navigation, Auswahl-Erhalt über Neu-Aufbauten
+  (Scroll als Cell, auswahl_sichtbar), konfigurierbarem Layout;
+  BoxContainer::mit_flex; UiFenster::fokus_initial;
+  App::taste-Hook (App-Shortcuts/Eingabemodi VOR den Widgets)
+- 4 neue Unit-Tests: Breadcrumb-Zerlegung + Elternpfad,
+  Größen-Formatierung, Ordner-zuerst-Sortierung, Browser-Verlauf
+
 ### Hinzugefügt (UI-Skalierung + Dirty-Rect-Compositing — die 4K-Baustellen)
 - UI-Skalierung 1.0/1.5/2.0 (in Halben, soft-float-frei): metrik()
   liefert die skalierte Metrik, Schrift mappt auf die vorgerasterten

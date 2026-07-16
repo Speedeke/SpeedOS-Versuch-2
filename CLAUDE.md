@@ -249,6 +249,18 @@
   wird nach draußen gereicht). Der PANIC-HANDLER druckt ZUERST roh
   seriell (println! würde im Desktop-Modus via Terminal-Umleitung
   den MANAGER-Lock brauchen -> Deadlock bei Panik unterm Lock).
+- **Explorer & App-Muster (Juli 2026):** `src/explorer.rs` = die
+  Blaupause für Trait-Apps: Die App hält ZUSTAND (Pfad, Verlauf,
+  Auswahl, aufgeklappte Baum-Ordner) plus ABGELEITETE Listen
+  (neu_laden nach jeder Navigation); aufbau() baut die Widgets rein
+  daraus. WELCHER Listeneintrag gemeint ist, steckt in der Nachricht:
+  ScrollListe::mit_index_nachrichten kodiert BASIS+Index (Basen weit
+  auseinander legen!). Auswahl überlebt Neu-Aufbauten via
+  mit_auswahl + auswahl_sichtbar (Scroll ist eine Cell — zeichnen ist
+  &self). Eingabemodi (Adresszeile) laufen über den App::taste-Hook
+  (VOR den Widgets, App puffert selbst); fokus_initial gibt der
+  ersten fokussierbaren Liste die Pfeiltasten. Mehrere Fenster einer
+  App = mehrere App-Instanzen (app_starten baut immer neu).
 - **Terminal-Fenster / Konsole-in-Fenster (Juli 2026):** SpeedOS bootet
   in den Desktop (main.rs ruft desktop_starten VOR dem Executor; die
   Shell druckt ihr Banner dann ins Terminal). Im Desktop-Modus leitet

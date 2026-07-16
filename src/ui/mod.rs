@@ -222,16 +222,27 @@ pub struct BoxContainer {
     kinder: Vec<Box<dyn Widget>>,
     /// Über welchem Kind schwebt der Cursor? (für MausRein/MausRaus)
     hover_kind: Option<usize>,
+    /// Flex-Faktor des Containers SELBST im Eltern-Layout (0 = fest —
+    /// z. B. die Explorer-Mittelzeile dehnt sich mit flex 1).
+    flex: i32,
 }
 
 /// Vertikale Box (Kinder untereinander).
 pub fn vbox(kinder: Vec<Box<dyn Widget>>) -> BoxContainer {
-    BoxContainer { richtung: Richtung::Vertikal, kinder, hover_kind: None }
+    BoxContainer { richtung: Richtung::Vertikal, kinder, hover_kind: None, flex: 0 }
 }
 
 /// Horizontale Box (Kinder nebeneinander).
 pub fn hbox(kinder: Vec<Box<dyn Widget>>) -> BoxContainer {
-    BoxContainer { richtung: Richtung::Horizontal, kinder, hover_kind: None }
+    BoxContainer { richtung: Richtung::Horizontal, kinder, hover_kind: None, flex: 0 }
+}
+
+impl BoxContainer {
+    /// Builder: Der Container dehnt sich im Eltern-Layout.
+    pub fn mit_flex(mut self, flex: i32) -> Self {
+        self.flex = flex;
+        self
+    }
 }
 
 impl BoxContainer {
@@ -263,6 +274,10 @@ impl BoxContainer {
 }
 
 impl Widget for BoxContainer {
+    fn flex(&self) -> i32 {
+        self.flex
+    }
+
     fn wunschgroesse(&self) -> (i32, i32) {
         let mut haupt = 0;
         let mut quer = 0;
@@ -509,6 +524,15 @@ impl UiFenster {
 
     /// Braucht das Fenster periodisches Neuzeichnen? (blinkender
     /// Textfeld-Cursor — der Uhr-Task stößt es an)
+    /// Setzt den Fokus aufs erste fokussierbare Widget (falls noch
+    /// keins fokussiert ist) — z. B. die Dateiliste des Explorers,
+    /// damit Pfeiltasten sofort funktionieren.
+    pub fn fokus_initial(&mut self) {
+        if !self.wurzel.hat_fokus() {
+            self.wurzel.fokus_weiter();
+        }
+    }
+
     pub fn blinkt(&self) -> bool {
         self.wurzel.hat_fokus()
     }

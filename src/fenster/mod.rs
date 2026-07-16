@@ -1350,8 +1350,23 @@ impl FensterManager {
             let Fenster { inhalt, puffer, dirty, inhalt_neu, .. } = &mut self.fenster[index];
             match inhalt {
                 // Widget-Fenster: Tab-Fokuskette + Tasten ans
-                // fokussierte Widget (macht das UiFenster).
+                // fokussierte Widget (macht das UiFenster). Trait-Apps
+                // bekommen die Taste ZUERST angeboten (App-Shortcuts,
+                // Eingabemodi wie die Explorer-Adresszeile).
                 Inhalt::Ui(_) | Inhalt::App(_) => {
+                    if let Inhalt::App(app_fenster) = inhalt {
+                        if let Some(app_reaktion) = app_fenster.app.taste(taste) {
+                            if app_reaktion.neu_aufbauen {
+                                app_fenster.neu_aufbauen();
+                                *inhalt_neu = true;
+                                *dirty = true;
+                            }
+                            return match app_reaktion.danach {
+                                Some(aktion) => NachLock::Ausfuehren(aktion),
+                                None => NachLock::Keine,
+                            };
+                        }
+                    }
                     let reaktion = match inhalt {
                         Inhalt::Ui(ui) => ui.taste(taste, puffer),
                         Inhalt::App(app_fenster) => app_fenster.ui.taste(taste, puffer),

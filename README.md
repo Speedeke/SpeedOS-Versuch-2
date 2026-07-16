@@ -16,6 +16,10 @@ Startknopf/Fenster-Knöpfen/Uhr, Startmenü mit App-Registry und Live-Suche.*
 *Dasselbe System nach einem Klick auf "Theme wechseln": Aurora Hell — alle UI-Farben
 kommen aus dem zentralen Theme-Modul, nur das Terminal bleibt bewusst dunkel.*
 
+![Explorer](docs/screenshots/explorer.png)
+*Der Explorer — die erste echte App auf dem Toolkit: Ordnerbaum, Dateiliste,
+Breadcrumbs, Zurück/Vor-Verlauf, tippbare Adressleiste, Tastatur-Navigation.*
+
 ![Widget-Galerie](docs/screenshots/widget-galerie.png)
 *Das UI-Toolkit (ui-Modul): Buttons, Checkbox, Textfeld (ZeilenEditor + blinkender
 Cursor), ScrollListe mit Scrollbalken — das Fundament für Explorer & Co.*

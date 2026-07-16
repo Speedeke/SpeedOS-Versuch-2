@@ -32,8 +32,9 @@ pub fn alle_apps() -> &'static [AppEintrag] {
     &APPS
 }
 
-static APPS: [AppEintrag; 8] = [
+static APPS: [AppEintrag; 9] = [
     AppEintrag { name: "Terminal", icon: &grafik::ICON_TERMINAL, start: terminal_starten },
+    AppEintrag { name: "Explorer", icon: &grafik::ICON_ORDNER, start: explorer_starten },
     AppEintrag { name: "Widget-Galerie", icon: &grafik::ICON_ZAHNRAD, start: galerie_starten },
     AppEintrag { name: "Uhr", icon: &grafik::ICON_UHR, start: uhr_starten },
     AppEintrag { name: "Tastatur-Echo", icon: &grafik::ICON_TASTATUR, start: tastatur_starten },
@@ -54,6 +55,17 @@ fn terminal_starten() {
 
 fn uhr_starten() {
     fenster::app_fenster_oeffnen("Uhr", 420, 150, Inhalt::Uhr);
+}
+
+/// Der Explorer (src/explorer.rs) — die erste echte Trait-App.
+/// Jeder Start = eine EIGENE Instanz mit eigenem Zustand, deshalb
+/// funktionieren mehrere Explorer-Fenster unabhängig.
+fn explorer_starten() {
+    fenster::app_starten(
+        alloc::boxed::Box::new(crate::explorer::ExplorerApp::neu()),
+        560,
+        400,
+    );
 }
 
 // ---------------------------------------------------------------------------

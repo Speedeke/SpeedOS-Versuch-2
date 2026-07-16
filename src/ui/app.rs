@@ -64,6 +64,15 @@ pub trait App: Send {
     fn tick(&mut self) -> bool {
         false
     }
+
+    /// Tasten-Hook VOR dem Widget-Baum: Some = die App hat die Taste
+    /// selbst verarbeitet (App-Shortcuts wie Backspace = "hoch" im
+    /// Explorer, Eingabemodi), None = normal an die Widgets.
+    /// Läuft wie nachricht() unter dem MANAGER-Lock (gleiche Regeln).
+    fn taste(&mut self, taste: pc_keyboard::DecodedKey) -> Option<AppReaktion> {
+        let _ = taste;
+        None
+    }
 }
 
 /// App + Widget-Baum als Fenster-Inhalt (`Inhalt::App`).
@@ -77,12 +86,17 @@ impl AppFenster {
         // Nachricht-Handler des UiFensters bleibt ungenutzt (Apps
         // bekommen ihre Nachrichten über App::nachricht) — ein
         // No-op-fn erfüllt die Schnittstelle.
-        let ui = UiFenster::neu(app.aufbau(), |_| {}, app.icon());
+        let mut ui = UiFenster::neu(app.aufbau(), |_| {}, app.icon());
+        // Erstes fokussierbares Widget fokussieren (Pfeiltasten
+        // funktionieren dann sofort, ohne Tab).
+        ui.fokus_initial();
         AppFenster { app, ui }
     }
 
-    /// Baut den Widget-Baum aus dem App-Zustand neu.
+    /// Baut den Widget-Baum aus dem App-Zustand neu (und stellt den
+    /// Initial-Fokus wieder her — der alte Baum ist weg).
     pub fn neu_aufbauen(&mut self) {
         self.ui.wurzel_setzen(self.app.aufbau());
+        self.ui.fokus_initial();
     }
 }

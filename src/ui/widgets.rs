@@ -433,17 +433,95 @@ pub struct ListenEintrag {
 pub struct ScrollListe {
     pub eintraege: Vec<ListenEintrag>,
     pub auswahl: Option<usize>,
-    scroll: i32,
-    /// Nachricht bei Auswahl-Klick bzw. Doppelklick.
+    /// Cell statt i32: zeichnen(&self) darf die Auswahl in den
+    /// Sichtbereich scrollen (auswahl_sichtbar), ohne &mut zu brauchen.
+    scroll: core::cell::Cell<i32>,
+    /// Nachricht bei Auswahl-Klick bzw. Doppelklick/Enter.
     nachricht_auswahl: u32,
     nachricht_doppelklick: u32,
+    /// Nachrichten als BASIS + Eintrag-Index kodieren? (Explorer & Co.
+    /// erfahren so, WELCHER Eintrag gemeint ist.)
+    index_kodierung: bool,
+    /// Kann die Liste den Tastatur-Fokus halten? (Pfeile/Enter)
+    fokus: bool,
+    fokussierbar: bool,
+    /// Beim Zeichnen die Auswahl in den Sichtbereich holen (für
+    /// Apps, die die Liste nach jeder Nachricht neu aufbauen).
+    pub auswahl_sichtbar: bool,
+    /// Flex-Faktor im Layout (Standard 1: nimmt den Restplatz).
+    flex: i32,
+    /// Fester Breiten-Wunsch (z. B. schmale Ordnerbaum-Spalte).
+    wunsch_breite: i32,
     /// Wird der Scrollbalken gerade gezogen? (Anker: y-Versatz im Griff)
     balken_griff: Option<i32>,
 }
 
 impl ScrollListe {
     pub fn neu(eintraege: Vec<ListenEintrag>, nachricht_auswahl: u32, nachricht_doppelklick: u32) -> Self {
-        ScrollListe { eintraege, auswahl: None, scroll: 0, nachricht_auswahl, nachricht_doppelklick, balken_griff: None }
+        ScrollListe {
+            eintraege,
+            auswahl: None,
+            scroll: core::cell::Cell::new(0),
+            nachricht_auswahl,
+            nachricht_doppelklick,
+            index_kodierung: false,
+            fokus: false,
+            fokussierbar: false,
+            auswahl_sichtbar: false,
+            flex: 1,
+            wunsch_breite: 160,
+            balken_griff: None,
+        }
+    }
+
+    /// Liste mit Index-Kodierung: Nachrichten sind BASIS + Index —
+    /// die Basen müssen weiter auseinander liegen als die Listenlänge!
+    pub fn mit_index_nachrichten(
+        eintraege: Vec<ListenEintrag>,
+        auswahl_basis: u32,
+        doppelklick_basis: u32,
+    ) -> Self {
+        ScrollListe {
+            index_kodierung: true,
+            fokussierbar: true,
+            ..ScrollListe::neu(eintraege, auswahl_basis, doppelklick_basis)
+        }
+    }
+
+    /// Builder: Auswahl vorbelegen (Zustand der App).
+    pub fn mit_auswahl(mut self, auswahl: Option<usize>) -> Self {
+        self.auswahl = auswahl.filter(|&i| i < self.eintraege.len());
+        self.auswahl_sichtbar = true;
+        self
+    }
+
+    /// Builder: Layout-Verhalten (flex 0 = feste Breite).
+    pub fn mit_layout(mut self, wunsch_breite: i32, flex: i32) -> Self {
+        self.wunsch_breite = wunsch_breite;
+        self.flex = flex;
+        self
+    }
+
+    /// Builder: Fokus direkt setzen (z. B. Dateiliste beim Öffnen).
+    pub fn mit_fokus(mut self, fokus: bool) -> Self {
+        self.fokus = fokus && self.fokussierbar;
+        self
+    }
+
+    /// Die (ggf. index-kodierte) Nachricht für einen Eintrag.
+    fn auswahl_nachricht(&self, index: usize) -> u32 {
+        if self.index_kodierung {
+            self.nachricht_auswahl + index as u32
+        } else {
+            self.nachricht_auswahl
+        }
+    }
+    fn doppelklick_nachricht(&self, index: usize) -> u32 {
+        if self.index_kodierung {
+            self.nachricht_doppelklick + index as u32
+        } else {
+            self.nachricht_doppelklick
+        }
     }
 
     fn inhalt_hoehe(&self) -> i32 {
@@ -458,7 +536,7 @@ impl ScrollListe {
         }
         let hoehe = (bereich.hoehe * bereich.hoehe / inhalt).max(24);
         let weg = bereich.hoehe - hoehe;
-        let y = bereich.y + weg * self.scroll / (inhalt - bereich.hoehe);
+        let y = bereich.y + weg * self.scroll.get() / (inhalt - bereich.hoehe);
         Some(Rechteck::neu(
             bereich.x + bereich.breite - metrik().scrollbalken_breite,
             y,
@@ -493,17 +571,17 @@ impl ScrollListe {
         // In den Sichtbereich holen:
         let oben = neu * metrik().listen_eintrag_hoehe;
         let unten = oben + metrik().listen_eintrag_hoehe;
-        if oben < self.scroll {
-            self.scroll = oben;
-        } else if unten > self.scroll + sicht_hoehe {
-            self.scroll = unten - sicht_hoehe;
+        if oben < self.scroll.get() {
+            self.scroll.set(oben);
+        } else if unten > self.scroll.get() + sicht_hoehe {
+            self.scroll.set(unten - sicht_hoehe);
         }
     }
 
     /// Setzt neue Einträge (Live-Filter) und beginnt oben.
     pub fn eintraege_setzen(&mut self, eintraege: Vec<ListenEintrag>) {
         self.eintraege = eintraege;
-        self.scroll = 0;
+        self.scroll.set(0);
         self.auswahl = if self.eintraege.is_empty() { None } else { Some(0) };
     }
 
@@ -511,36 +589,67 @@ impl ScrollListe {
         if !bereich.enthaelt(x, y) || x >= bereich.x + bereich.breite - metrik().scrollbalken_breite {
             return None;
         }
-        let index = ((y - bereich.y + self.scroll) / metrik().listen_eintrag_hoehe) as usize;
+        let index = ((y - bereich.y + self.scroll.get()) / metrik().listen_eintrag_hoehe) as usize;
         (index < self.eintraege.len()).then_some(index)
     }
 }
 
 impl Widget for ScrollListe {
     fn wunschgroesse(&self) -> (i32, i32) {
-        (160, 3 * metrik().listen_eintrag_hoehe)
+        (self.wunsch_breite, 3 * metrik().listen_eintrag_hoehe)
     }
 
     fn flex(&self) -> i32 {
-        1 // die Liste nimmt den übrigen Fensterplatz
+        self.flex
+    }
+
+    fn hat_fokus(&self) -> bool {
+        self.fokus
+    }
+
+    fn fokus_weiter(&mut self) -> bool {
+        if !self.fokussierbar {
+            return false;
+        }
+        // Blatt-Regel: nehmen wenn frei, abgeben wenn gehalten.
+        self.fokus = !self.fokus;
+        self.fokus
+    }
+
+    fn fokus_entfernen(&mut self) {
+        self.fokus = false;
     }
 
     fn zeichnen(&self, z: &mut Zeichner<'_, FensterPuffer>, bereich: Rechteck) {
         let thema = theme::aktuell();
+        // Auswahl in den Sichtbereich holen (Cell — zeichnen ist
+        // &self): für Apps, die die Liste nach jeder Nachricht neu
+        // aufbauen und die Auswahl als Zustand mitgeben.
+        if self.auswahl_sichtbar {
+            if let Some(index) = self.auswahl {
+                let oben = index as i32 * metrik().listen_eintrag_hoehe;
+                let unten = oben + metrik().listen_eintrag_hoehe;
+                if oben < self.scroll.get() {
+                    self.scroll.set(oben);
+                } else if unten > self.scroll.get() + bereich.hoehe {
+                    self.scroll.set(unten - bereich.hoehe);
+                }
+            }
+        }
         z.rechteck_fuellen(bereich, thema.eingabefeld);
-        z.rechteck_rahmen(bereich, thema.rahmen_passiv);
+        z.rechteck_rahmen(bereich, if self.fokus { thema.akzent } else { thema.rahmen_passiv });
 
         // Einträge — GECLIPPT auf den Listenbereich (Teilzeilen am Rand):
         z.clip_setzen(Some(Rechteck::neu(bereich.x + 1, bereich.y + 1, bereich.breite - 2, bereich.hoehe - 2)));
         let (erster, letzter) = sichtbare_eintraege(
-            self.scroll,
+            self.scroll.get(),
             bereich.hoehe,
             metrik().listen_eintrag_hoehe,
             self.eintraege.len(),
         );
         for index in erster..letzter {
             let eintrag = &self.eintraege[index];
-            let y = bereich.y + index as i32 * metrik().listen_eintrag_hoehe - self.scroll;
+            let y = bereich.y + index as i32 * metrik().listen_eintrag_hoehe - self.scroll.get();
             let zeile = Rechteck::neu(
                 bereich.x + 2,
                 y,
@@ -584,11 +693,11 @@ impl Widget for ScrollListe {
         match ereignis {
             UiEreignis::Scroll { delta, x, y } if bereich.enthaelt(*x, *y) => {
                 // Rad hoch (delta > 0) = Inhalt nach oben scrollen.
-                self.scroll = scroll_klemmen(
-                    self.scroll - *delta as i32 * 3 * metrik().listen_eintrag_hoehe / 2,
+                self.scroll.set(scroll_klemmen(
+                    self.scroll.get() - *delta as i32 * 3 * metrik().listen_eintrag_hoehe / 2,
                     self.inhalt_hoehe(),
                     bereich.hoehe,
-                );
+                ));
                 UiReaktion::neu_zeichnen()
             }
             UiEreignis::Klick { x, y } => {
@@ -600,30 +709,56 @@ impl Widget for ScrollListe {
                     // Klick auf die Balken-Spur: Seite springen.
                     if *x >= griff.x && bereich.enthaelt(*x, *y) {
                         let richtung = if *y < griff.y { -1 } else { 1 };
-                        self.scroll = scroll_klemmen(
-                            self.scroll + richtung * bereich.hoehe,
+                        self.scroll.set(scroll_klemmen(
+                            self.scroll.get() + richtung * bereich.hoehe,
                             self.inhalt_hoehe(),
                             bereich.hoehe,
-                        );
+                        ));
                         return UiReaktion::neu_zeichnen();
                     }
                 }
                 if let Some(index) = self.eintrag_bei(bereich, *x, *y) {
                     self.auswahl = Some(index);
-                    return UiReaktion::nachricht(self.nachricht_auswahl);
+                    if self.fokussierbar {
+                        self.fokus = true; // Klick fokussiert die Liste
+                    }
+                    return UiReaktion::nachricht(self.auswahl_nachricht(index));
                 }
                 UiReaktion::ignoriert()
             }
             UiEreignis::Doppelklick { x, y } => {
-                if self.eintrag_bei(bereich, *x, *y).is_some() {
-                    UiReaktion::nachricht(self.nachricht_doppelklick)
+                if let Some(index) = self.eintrag_bei(bereich, *x, *y) {
+                    UiReaktion::nachricht(self.doppelklick_nachricht(index))
                 } else {
                     UiReaktion::ignoriert()
                 }
             }
+            // Tastatur (nur mit Fokus): Pfeile bewegen die Auswahl,
+            // Enter wirkt wie ein Doppelklick auf den Eintrag.
+            UiEreignis::Taste(taste) if self.fokus => match taste {
+                DecodedKey::RawKey(KeyCode::ArrowUp) => {
+                    self.auswahl_bewegen(-1, bereich.hoehe);
+                    match self.auswahl {
+                        Some(index) => UiReaktion::nachricht(self.auswahl_nachricht(index)),
+                        None => UiReaktion::neu_zeichnen(),
+                    }
+                }
+                DecodedKey::RawKey(KeyCode::ArrowDown) => {
+                    self.auswahl_bewegen(1, bereich.hoehe);
+                    match self.auswahl {
+                        Some(index) => UiReaktion::nachricht(self.auswahl_nachricht(index)),
+                        None => UiReaktion::neu_zeichnen(),
+                    }
+                }
+                DecodedKey::Unicode('\n') | DecodedKey::Unicode('\r') => match self.auswahl {
+                    Some(index) => UiReaktion::nachricht(self.doppelklick_nachricht(index)),
+                    None => UiReaktion::verbraucht(),
+                },
+                _ => UiReaktion::ignoriert(),
+            },
             UiEreignis::Bewegt { x: _, y } => {
                 if let Some(griff_versatz) = self.balken_griff {
-                    self.scroll = self.scroll_aus_griff(bereich, *y - griff_versatz);
+                    self.scroll.set(self.scroll_aus_griff(bereich, *y - griff_versatz));
                     return UiReaktion::neu_zeichnen();
                 }
                 UiReaktion::ignoriert()
@@ -688,7 +823,7 @@ mod tests {
         // Rad nach unten (delta -1) scrollt; derselbe Klickpunkt
         // trifft jetzt einen späteren Eintrag:
         liste.ereignis(&UiEreignis::Scroll { delta: -1, x: 10, y: 30 }, bereich);
-        assert!(liste.scroll > 0);
+        assert!(liste.scroll.get() > 0);
         liste.ereignis(&UiEreignis::Klick { x: 10, y: 30 }, bereich);
         assert!(liste.auswahl > Some(1));
 

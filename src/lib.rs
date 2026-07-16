@@ -30,6 +30,7 @@ use core::panic::PanicInfo;
 // (Mikrokernel-Prinzip).
 pub mod allocator;
 pub mod apps;
+pub mod explorer;
 pub mod fenster;
 pub mod framebuffer;
 pub mod fs;
