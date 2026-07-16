@@ -39,10 +39,101 @@ const N_ZURUECK: u32 = 1;
 const N_VOR: u32 = 2;
 const N_HOCH: u32 = 3;
 const N_ADRESSE: u32 = 4; // Klick auf den freien Adressleisten-Bereich
+const N_RECHTS_LEER: u32 = 5; // Rechtsklick auf freie Listenfläche
+const N_UMBENENNEN: u32 = 6; // F2 / Kontextmenü (wirkt auf Auswahl)
+const N_KOPIEREN: u32 = 7;
+const N_AUSSCHNEIDEN: u32 = 8;
+const N_LOESCHEN: u32 = 9;
+const N_EINFUEGEN: u32 = 10;
+const N_NEU_ORDNER: u32 = 11;
+const N_NEU_DATEI: u32 = 12;
+const N_AKTUALISIEREN: u32 = 13;
+const N_WIEDERHERSTELLEN: u32 = 14;
+const N_ENDGUELTIG: u32 = 15;
+const N_OEFFNEN: u32 = 16; // Kontextmenü "Oeffnen" (wirkt auf Auswahl)
 const N_BREADCRUMB: u32 = 100; // + Segment-Index
 const N_LISTE_AUSWAHL: u32 = 1000; // + Eintrag-Index
 const N_LISTE_OEFFNEN: u32 = 100_000; // + Eintrag-Index (Doppelklick/Enter)
 const N_BAUM: u32 = 200_000; // + Baumzeilen-Index
+const N_RECHTSKLICK: u32 = 300_000; // + Eintrag-Index (Kontextmenü)
+
+/// Der Papierkorb-Ordner im VFS.
+pub const PAPIERKORB: &str = "/papierkorb";
+
+// ---------------------------------------------------------------------------
+// Papierkorb — Entwurfsentscheidung: Der Ursprungspfad wird in einer
+// METADATEN-DATEI gemerkt (`<name>.herkunft` neben dem Eintrag im
+// Papierkorb) statt im Dateinamen kodiert. Gründe: (1) das VFS kann
+// sie mit normalen Mitteln lesen/schreiben (kein Namens-Parser),
+// (2) der angezeigte Name bleibt der echte Name, (3) die Ansicht
+// filtert `.herkunft` schlicht aus. Preis: zwei Einträge pro Objekt —
+// für ein Lern-OS die klarste Lösung.
+// ---------------------------------------------------------------------------
+
+const HERKUNFT_ENDUNG: &str = ".herkunft";
+
+/// Findet einen freien Namen: "wunsch", sonst "wunsch (2)", ... —
+/// reine Funktion (Namenskonflikt-Regel fürs Einfügen/Papierkorb).
+pub fn eindeutiger_name(vorhandene: &[String], wunsch: &str) -> String {
+    if !vorhandene.iter().any(|n| n == wunsch) {
+        return String::from(wunsch);
+    }
+    let mut nummer = 2;
+    loop {
+        let kandidat = format!("{} ({})", wunsch, nummer);
+        if !vorhandene.iter().any(|n| n == &kandidat) {
+            return kandidat;
+        }
+        nummer += 1;
+    }
+}
+
+/// Die Namen in einem Ordner (leer bei Fehler).
+fn namen_in(pfad: &str) -> Vec<String> {
+    fs::mit_fs(|f| f.liste(pfad))
+        .map(|liste| liste.into_iter().map(|e| e.name).collect())
+        .unwrap_or_default()
+}
+
+/// Verschiebt einen Pfad in den Papierkorb und merkt die Herkunft
+/// (Ursprungs-ORDNER) in der Metadaten-Datei. Liefert den Namen im
+/// Papierkorb (bei Konflikt mit " (2)"-Suffix).
+pub fn in_papierkorb(pfad: &str) -> Result<String, fs::FsFehler> {
+    let _ = fs::mit_fs(|f| f.mkdir(PAPIERKORB)); // existiert ggf. schon
+    let name = pfad.rsplit('/').next().unwrap_or(pfad);
+    let korb_name = eindeutiger_name(&namen_in(PAPIERKORB), name);
+    let ziel = fs::pfad_anhaengen(PAPIERKORB, &korb_name);
+    fs::verschieben_rekursiv(pfad, &ziel)?;
+    let herkunft = eltern_pfad(pfad);
+    fs::mit_fs(|f| {
+        f.schreiben(&format!("{}{}", ziel, HERKUNFT_ENDUNG), herkunft.as_bytes())
+    })?;
+    Ok(korb_name)
+}
+
+/// Stellt einen Papierkorb-Eintrag an seinem Ursprungsort wieder her
+/// (Konflikt -> " (2)"). Liefert den Zielpfad.
+pub fn papierkorb_wiederherstellen(korb_name: &str) -> Result<String, fs::FsFehler> {
+    let quelle = fs::pfad_anhaengen(PAPIERKORB, korb_name);
+    let herkunft_datei = format!("{}{}", quelle, HERKUNFT_ENDUNG);
+    // Herkunft lesen (fehlt sie: zurück nach /):
+    let herkunft = fs::mit_fs(|f| f.lesen(&herkunft_datei))
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_else(|_| String::from("/"));
+    let ziel_name = eindeutiger_name(&namen_in(&herkunft), korb_name);
+    let ziel = fs::pfad_anhaengen(&herkunft, &ziel_name);
+    fs::verschieben_rekursiv(&quelle, &ziel)?;
+    let _ = fs::mit_fs(|f| f.loeschen(&herkunft_datei));
+    Ok(ziel)
+}
+
+/// Löscht einen Papierkorb-Eintrag ENDGÜLTIG (samt Metadaten).
+pub fn papierkorb_endgueltig(korb_name: &str) -> Result<(), fs::FsFehler> {
+    let pfad = fs::pfad_anhaengen(PAPIERKORB, korb_name);
+    fs::loeschen_rekursiv(&pfad)?;
+    let _ = fs::mit_fs(|f| f.loeschen(&format!("{}{}", pfad, HERKUNFT_ENDUNG)));
+    Ok(())
+}
 
 /// Ein Eintrag der Dateiliste (aus dem VFS geladen und sortiert).
 #[derive(Clone)]
@@ -195,6 +286,9 @@ pub struct ExplorerApp {
     /// Adress-Eingabemodus (App puffert die Tasten selbst).
     adress_modus: bool,
     adress_puffer: String,
+    /// F2-Umbenennen: Some(Puffer) = der Auswahl-Eintrag wird gerade
+    /// umbenannt (Anzeige als Eingabezeile in der Liste).
+    umbenennen: Option<String>,
     /// Abgeleiteter Zustand (neu_laden):
     eintraege: Vec<DateiEintrag>,
     baum_zeilen: Vec<BaumZeile>,
@@ -209,6 +303,7 @@ impl ExplorerApp {
             auswahl: None,
             adress_modus: false,
             adress_puffer: String::new(),
+            umbenennen: None,
             eintraege: Vec::new(),
             baum_zeilen: Vec::new(),
             fehler: None,
@@ -231,6 +326,10 @@ impl ExplorerApp {
             Ok(liste) => {
                 self.eintraege = liste
                     .into_iter()
+                    // Im Papierkorb die .herkunft-Metadaten ausblenden:
+                    .filter(|e| {
+                        !(pfad == PAPIERKORB && e.name.ends_with(HERKUNFT_ENDUNG))
+                    })
                     .map(|e| DateiEintrag { name: e.name, typ: e.typ, groesse: e.groesse })
                     .collect();
                 sortieren(&mut self.eintraege);
@@ -307,6 +406,128 @@ impl ExplorerApp {
             NodeTyp::Datei => &crate::grafik::ICON_DATEI,
         }
     }
+
+    fn im_papierkorb(&self) -> bool {
+        self.pfad() == PAPIERKORB
+    }
+
+    /// Voller Pfad des ausgewählten Eintrags.
+    fn auswahl_pfad(&self) -> Option<String> {
+        let eintrag = self.eintraege.get(self.auswahl?)?;
+        Some(fs::pfad_anhaengen(self.pfad(), &eintrag.name))
+    }
+
+    fn fehler_setzen(&mut self, ergebnis: Result<(), fs::FsFehler>) {
+        if let Err(f) = ergebnis {
+            self.fehler = Some(String::from(f.meldung()));
+        }
+    }
+
+    /// Entf: außerhalb des Papierkorbs -> hinein verschieben; im
+    /// Papierkorb -> endgültig löschen.
+    fn loeschen_auswahl(&mut self) {
+        let (pfad, name) = match (self.auswahl_pfad(), self.auswahl) {
+            (Some(pfad), Some(index)) => (pfad, self.eintraege[index].name.clone()),
+            _ => return,
+        };
+        let ergebnis = if self.im_papierkorb() {
+            papierkorb_endgueltig(&name)
+        } else {
+            in_papierkorb(&pfad).map(|_| ())
+        };
+        self.fehler_setzen(ergebnis);
+        self.auswahl = None;
+        self.neu_laden();
+    }
+
+    /// Strg+V / Kontextmenü "Einfügen": aus der globalen Ablage in
+    /// den aktuellen Ordner (Konflikt -> " (2)"); Ausschneiden löscht
+    /// danach die Quelle und leert die Ablage.
+    fn einfuegen(&mut self) {
+        let ablage = match crate::ablage::holen() {
+            Some(ablage) => ablage,
+            None => return,
+        };
+        let name = ablage.pfad.rsplit('/').next().unwrap_or(&ablage.pfad);
+        let ziel_name = eindeutiger_name(&namen_in(self.pfad()), name);
+        let ziel = fs::pfad_anhaengen(self.pfad(), &ziel_name);
+        let ergebnis = fs::kopieren_rekursiv(&ablage.pfad, &ziel).and_then(|()| {
+            if ablage.ausschneiden {
+                crate::ablage::leeren();
+                fs::loeschen_rekursiv(&ablage.pfad)
+            } else {
+                Ok(())
+            }
+        });
+        self.fehler_setzen(ergebnis);
+        self.neu_laden();
+    }
+
+    /// Neu-Ordner/-Datei: mit eindeutigem Namen anlegen und sofort in
+    /// den Umbenennen-Modus springen (wie bei den "Großen").
+    fn neu_anlegen(&mut self, typ: NodeTyp) {
+        let wunsch = match typ {
+            NodeTyp::Verzeichnis => "Neuer Ordner",
+            NodeTyp::Datei => "Neue Datei.txt",
+        };
+        let name = eindeutiger_name(&namen_in(self.pfad()), wunsch);
+        let pfad = fs::pfad_anhaengen(self.pfad(), &name);
+        let ergebnis = fs::mit_fs(|f| match typ {
+            NodeTyp::Verzeichnis => f.mkdir(&pfad),
+            NodeTyp::Datei => f.schreiben(&pfad, b""),
+        });
+        self.fehler_setzen(ergebnis);
+        self.neu_laden();
+        self.auswahl = self.eintraege.iter().position(|e| e.name == name);
+        if self.auswahl.is_some() {
+            self.umbenennen = Some(name);
+        }
+    }
+
+    /// F2-Enter: Auswahl auf den getippten Namen umbenennen.
+    fn umbenennen_ausfuehren(&mut self) {
+        let (neuer_name, index) = match (self.umbenennen.take(), self.auswahl) {
+            (Some(name), Some(index)) if !name.is_empty() => (name, index),
+            _ => return,
+        };
+        let alter_name = self.eintraege[index].name.clone();
+        if neuer_name == alter_name {
+            return;
+        }
+        let quelle = fs::pfad_anhaengen(self.pfad(), &alter_name);
+        let ziel_name = eindeutiger_name(&namen_in(self.pfad()), &neuer_name);
+        let ziel = fs::pfad_anhaengen(self.pfad(), &ziel_name);
+        let ergebnis = fs::verschieben_rekursiv(&quelle, &ziel);
+        self.fehler_setzen(ergebnis);
+        self.neu_laden();
+        self.auswahl = self.eintraege.iter().position(|e| e.name == ziel_name);
+    }
+
+    /// Doppelklick/Enter/Kontextmenü-Öffnen auf einen Eintrag.
+    fn eintrag_oeffnen(&mut self, index: usize) -> AppReaktion {
+        let eintrag = match self.eintraege.get(index) {
+            Some(eintrag) => eintrag,
+            None => return AppReaktion::neu_aufbauen(),
+        };
+        let pfad = fs::pfad_anhaengen(self.pfad(), &eintrag.name);
+        match eintrag.typ {
+            NodeTyp::Verzeichnis => {
+                self.navigieren(&pfad);
+                AppReaktion::neu_aufbauen()
+            }
+            NodeTyp::Datei => {
+                // Betrachter öffnen — NACH dem Lock (danach trägt den
+                // Pfad per move in die Box, siehe AppReaktion-Doku):
+                AppReaktion::danach(move || {
+                    crate::fenster::app_starten(
+                        alloc::boxed::Box::new(BetrachterApp::neu(&pfad)),
+                        540,
+                        380,
+                    );
+                })
+            }
+        }
+    }
 }
 
 impl App for ExplorerApp {
@@ -324,7 +545,14 @@ impl App for ExplorerApp {
             Box::new(Button::neu("<", N_ZURUECK)),
             Box::new(Button::neu(">", N_VOR)),
             Box::new(Button::neu("^", N_HOCH)),
+            Box::new(Button::neu("+O", N_NEU_ORDNER)),
+            Box::new(Button::neu("+D", N_NEU_DATEI)),
+            Box::new(Button::neu("@", N_AKTUALISIEREN)),
         ];
+        if self.im_papierkorb() {
+            leiste.push(Box::new(Button::neu("Wiederherstellen", N_WIEDERHERSTELLEN)));
+            leiste.push(Box::new(Button::neu("Endg. loeschen", N_ENDGUELTIG)));
+        }
         if self.adress_modus {
             leiste.push(Box::new(Label::neu(&format!("> {}_", self.adress_puffer))));
             leiste.push(Box::new(Fueller));
@@ -359,17 +587,27 @@ impl App for ExplorerApp {
         let listen_eintraege = self
             .eintraege
             .iter()
-            .map(|e| ListenEintrag {
+            .enumerate()
+            .map(|(i, e)| ListenEintrag {
                 icon: Some(Self::eintrag_icon(e.typ)),
-                text: match e.typ {
-                    NodeTyp::Verzeichnis => e.name.clone(),
-                    NodeTyp::Datei => format!("{}  ({})", e.name, groesse_formatieren(e.groesse)),
+                // Im F2-Modus wird der Auswahl-Eintrag zur Eingabezeile:
+                text: match (&self.umbenennen, self.auswahl) {
+                    (Some(puffer), Some(auswahl)) if i == auswahl => {
+                        format!("> {}_", puffer)
+                    }
+                    _ => match e.typ {
+                        NodeTyp::Verzeichnis => e.name.clone(),
+                        NodeTyp::Datei => {
+                            format!("{}  ({})", e.name, groesse_formatieren(e.groesse))
+                        }
+                    },
                 },
             })
             .collect();
         let liste = ScrollListe::mit_index_nachrichten(listen_eintraege, N_LISTE_AUSWAHL, N_LISTE_OEFFNEN)
+            .mit_rechtsklick(N_RECHTSKLICK, N_RECHTS_LEER)
             .mit_auswahl(self.auswahl)
-            .mit_fokus(!self.adress_modus);
+            .mit_fokus(!self.adress_modus && self.umbenennen.is_none());
 
         // --- Statusleiste ---
         let status = match (&self.fehler, self.auswahl) {
@@ -405,6 +643,68 @@ impl App for ExplorerApp {
 
     fn nachricht(&mut self, id: u32) -> AppReaktion {
         match id {
+            // --- Operationen (wirken auf die Auswahl) ---
+            N_UMBENENNEN => {
+                if let Some(index) = self.auswahl {
+                    self.umbenennen = Some(self.eintraege[index].name.clone());
+                }
+            }
+            N_KOPIEREN | N_AUSSCHNEIDEN => {
+                if let Some(pfad) = self.auswahl_pfad() {
+                    crate::ablage::setzen(&pfad, id == N_AUSSCHNEIDEN);
+                }
+            }
+            N_LOESCHEN => self.loeschen_auswahl(),
+            N_EINFUEGEN => self.einfuegen(),
+            N_NEU_ORDNER => self.neu_anlegen(NodeTyp::Verzeichnis),
+            N_NEU_DATEI => self.neu_anlegen(NodeTyp::Datei),
+            N_AKTUALISIEREN => self.neu_laden(),
+            N_WIEDERHERSTELLEN => {
+                if let Some(index) = self.auswahl {
+                    let name = self.eintraege[index].name.clone();
+                    let ergebnis = papierkorb_wiederherstellen(&name).map(|_| ());
+                    self.fehler_setzen(ergebnis);
+                    self.auswahl = None;
+                    self.neu_laden();
+                }
+            }
+            N_ENDGUELTIG => {
+                if let Some(index) = self.auswahl {
+                    let name = self.eintraege[index].name.clone();
+                    let ergebnis = papierkorb_endgueltig(&name);
+                    self.fehler_setzen(ergebnis);
+                    self.auswahl = None;
+                    self.neu_laden();
+                }
+            }
+            N_OEFFNEN => {
+                if let Some(index) = self.auswahl {
+                    return self.eintrag_oeffnen(index);
+                }
+            }
+            // --- Kontextmenüs (Rechtsklick) ---
+            N_RECHTS_LEER => {
+                return AppReaktion::menue(vec![
+                    (String::from("Einfuegen"), N_EINFUEGEN),
+                    (String::from("Neuer Ordner"), N_NEU_ORDNER),
+                    (String::from("Neue Datei"), N_NEU_DATEI),
+                    (String::from("Aktualisieren"), N_AKTUALISIEREN),
+                ]);
+            }
+            id if id >= N_RECHTSKLICK => {
+                self.auswahl = Some((id - N_RECHTSKLICK) as usize);
+                let mut eintraege = vec![
+                    (String::from("Oeffnen"), N_OEFFNEN),
+                    (String::from("Umbenennen (F2)"), N_UMBENENNEN),
+                    (String::from("Kopieren (Strg+C)"), N_KOPIEREN),
+                    (String::from("Ausschneiden (Strg+X)"), N_AUSSCHNEIDEN),
+                    (String::from("Loeschen (Entf)"), N_LOESCHEN),
+                ];
+                if self.im_papierkorb() {
+                    eintraege.push((String::from("Wiederherstellen"), N_WIEDERHERSTELLEN));
+                }
+                return AppReaktion::menue(eintraege);
+            }
             N_ZURUECK => {
                 if self.verlauf.zurueck().is_some() {
                     self.auswahl = None;
@@ -436,20 +736,9 @@ impl App for ExplorerApp {
                 self.auswahl = Some((id - N_LISTE_AUSWAHL) as usize);
             }
             id if (N_LISTE_OEFFNEN..N_BAUM).contains(&id) => {
-                let index = (id - N_LISTE_OEFFNEN) as usize;
-                if let Some(eintrag) = self.eintraege.get(index) {
-                    if eintrag.typ == NodeTyp::Verzeichnis {
-                        let ziel = if self.pfad() == "/" {
-                            format!("/{}", eintrag.name)
-                        } else {
-                            format!("{}/{}", self.pfad(), eintrag.name)
-                        };
-                        self.navigieren(&ziel);
-                    }
-                    // Dateien öffnen kommt in Teil 2.
-                }
+                return self.eintrag_oeffnen((id - N_LISTE_OEFFNEN) as usize);
             }
-            id if id >= N_BAUM => {
+            id if (N_BAUM..N_RECHTSKLICK).contains(&id) => {
                 let index = (id - N_BAUM) as usize;
                 if let Some(zeile) = self.baum_zeilen.get(index) {
                     let pfad = zeile.pfad.clone();
@@ -469,8 +758,32 @@ impl App for ExplorerApp {
         AppReaktion::neu_aufbauen()
     }
 
-    /// App-Shortcuts + Adress-Eingabemodus (siehe Kopfkommentar).
+    /// App-Shortcuts + Eingabemodi (siehe Kopfkommentar).
     fn taste(&mut self, taste: DecodedKey) -> Option<AppReaktion> {
+        // F2-Umbenennen-Modus: die App puffert die Zeichen selbst.
+        if self.umbenennen.is_some() {
+            match taste {
+                DecodedKey::Unicode('\n') | DecodedKey::Unicode('\r') => {
+                    self.umbenennen_ausfuehren();
+                }
+                DecodedKey::Unicode('\u{1b}') => self.umbenennen = None,
+                DecodedKey::Unicode('\u{8}') | DecodedKey::Unicode('\u{7f}') => {
+                    if let Some(puffer) = &mut self.umbenennen {
+                        puffer.pop();
+                    }
+                }
+                DecodedKey::Unicode(zeichen) if zeichen >= ' ' => {
+                    if let Some(puffer) = &mut self.umbenennen {
+                        if puffer.chars().count() < 40 {
+                            puffer.push(zeichen);
+                        }
+                    }
+                }
+                _ => return Some(AppReaktion::keine()),
+            }
+            return Some(AppReaktion::neu_aufbauen());
+        }
+
         if self.adress_modus {
             match taste {
                 DecodedKey::Unicode('\n') | DecodedKey::Unicode('\r') => {
@@ -491,13 +804,79 @@ impl App for ExplorerApp {
             }
             return Some(AppReaktion::neu_aufbauen());
         }
-        // Backspace = einen Ordner hoch (klassischer Explorer-Shortcut).
-        if matches!(taste, DecodedKey::Unicode('\u{8}') | DecodedKey::Unicode('\u{7f}')) {
-            let eltern = eltern_pfad(self.pfad());
-            self.navigieren(&eltern);
-            return Some(AppReaktion::neu_aufbauen());
+        // App-Shortcuts (Kürzel dank HandleControl::MapLettersToUnicode
+        // als Steuerzeichen: Strg+C = U+0003, X = U+0018, V = U+0016).
+        match taste {
+            // Backspace = einen Ordner hoch (klassischer Shortcut).
+            DecodedKey::Unicode('\u{8}') | DecodedKey::Unicode('\u{7f}') => {
+                let eltern = eltern_pfad(self.pfad());
+                self.navigieren(&eltern);
+                Some(AppReaktion::neu_aufbauen())
+            }
+            DecodedKey::RawKey(pc_keyboard::KeyCode::F2) => {
+                Some(self.nachricht(N_UMBENENNEN))
+            }
+            DecodedKey::RawKey(pc_keyboard::KeyCode::Delete) => {
+                Some(self.nachricht(N_LOESCHEN))
+            }
+            DecodedKey::Unicode('\u{3}') => Some(self.nachricht(N_KOPIEREN)),
+            DecodedKey::Unicode('\u{18}') => Some(self.nachricht(N_AUSSCHNEIDEN)),
+            DecodedKey::Unicode('\u{16}') => Some(self.nachricht(N_EINFUEGEN)),
+            // Alles andere an die Widgets (Pfeile/Enter -> Dateiliste).
+            _ => None,
         }
-        None // alles andere an die Widgets (Pfeile/Enter -> Dateiliste)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Der minimale Text-Betrachter (Doppelklick auf eine Datei) — der
+// echte Editor kommt später; hier reicht eine ScrollListe mit Zeilen.
+// ---------------------------------------------------------------------------
+
+pub struct BetrachterApp {
+    pfad: String,
+    zeilen: Vec<String>,
+}
+
+impl BetrachterApp {
+    /// Liest die Datei EINMAL (läuft beim App-Start, außerhalb des
+    /// MANAGER-Locks — die danach-Aktion des Explorers ruft uns).
+    pub fn neu(pfad: &str) -> Self {
+        let zeilen = match fs::mit_fs(|f| f.lesen(pfad)) {
+            Ok(bytes) => {
+                let text = String::from_utf8_lossy(&bytes).into_owned();
+                let mut zeilen: Vec<String> = text.lines().map(String::from).collect();
+                if zeilen.is_empty() {
+                    zeilen.push(String::from("(leere Datei)"));
+                }
+                zeilen
+            }
+            Err(f) => vec![format!("Fehler beim Lesen: {}", f.meldung())],
+        };
+        BetrachterApp { pfad: String::from(pfad), zeilen }
+    }
+}
+
+impl App for BetrachterApp {
+    fn name(&self) -> &'static str {
+        "Betrachter"
+    }
+
+    fn icon(&self) -> &'static Icon {
+        &crate::grafik::ICON_DATEI
+    }
+
+    fn aufbau(&self) -> Box<dyn Widget> {
+        let eintraege = self
+            .zeilen
+            .iter()
+            .map(|zeile| ListenEintrag { icon: None, text: zeile.clone() })
+            .collect();
+        Box::new(vbox(vec![
+            Box::new(Label::sekundaer(&self.pfad)) as Box<dyn Widget>,
+            Box::new(ScrollListe::neu(eintraege, 0, 0)),
+            Box::new(Label::sekundaer(&format!("{} Zeilen (nur Lesen)", self.zeilen.len()))),
+        ]))
     }
 }
 
@@ -544,6 +923,67 @@ mod tests {
         let namen: Vec<&str> = eintraege.iter().map(|e| e.name.as_str()).collect();
         // Ordner zuerst (anton < Beta, case-insensitiv), dann Dateien:
         assert_eq!(namen, vec!["anton", "Beta", "alpha.txt", "zebra.txt"]);
+    }
+
+    /// Namenskonflikte: frei -> unverändert, belegt -> " (2)", " (3)".
+    #[test_case]
+    fn test_eindeutiger_name() {
+        let keine: Vec<String> = Vec::new();
+        assert_eq!(eindeutiger_name(&keine, "test.txt"), "test.txt");
+        let belegt = vec![String::from("test.txt"), String::from("test.txt (2)")];
+        assert_eq!(eindeutiger_name(&belegt, "test.txt"), "test.txt (3)");
+        assert_eq!(eindeutiger_name(&belegt, "anders"), "anders");
+    }
+
+    /// Rekursives Kopieren: Ordner mit Unterordner + Dateien landet
+    /// vollständig am Ziel (läuft gegen das echte Test-VFS).
+    #[test_case]
+    fn test_kopieren_rekursiv() {
+        let _ = fs::mit_fs(|f| f.mkdir("/kopiertest"));
+        let _ = fs::mit_fs(|f| f.mkdir("/kopiertest/unten"));
+        fs::mit_fs(|f| f.schreiben("/kopiertest/a.txt", b"A")).unwrap();
+        fs::mit_fs(|f| f.schreiben("/kopiertest/unten/b.txt", b"BB")).unwrap();
+
+        fs::kopieren_rekursiv("/kopiertest", "/kopie").unwrap();
+        assert_eq!(fs::mit_fs(|f| f.lesen("/kopie/a.txt")).unwrap(), b"A");
+        assert_eq!(fs::mit_fs(|f| f.lesen("/kopie/unten/b.txt")).unwrap(), b"BB");
+        // Quelle unangetastet:
+        assert!(fs::mit_fs(|f| f.lesen("/kopiertest/a.txt")).is_ok());
+
+        // Aufräumen (rekursives Löschen gleich mitgetestet):
+        fs::loeschen_rekursiv("/kopie").unwrap();
+        fs::loeschen_rekursiv("/kopiertest").unwrap();
+        assert!(fs::mit_fs(|f| f.node_typ("/kopie")).is_err());
+    }
+
+    /// Papierkorb-Roundtrip: löschen merkt die Herkunft, Wieder-
+    /// herstellen bringt die Datei an den Ursprungsort zurück,
+    /// Endgültig-Löschen räumt samt Metadaten auf.
+    #[test_case]
+    fn test_papierkorb_roundtrip() {
+        let _ = fs::mit_fs(|f| f.mkdir("/korbtest"));
+        fs::mit_fs(|f| f.schreiben("/korbtest/opfer.txt", b"weg?")).unwrap();
+
+        // In den Papierkorb (Herkunft = /korbtest):
+        let korb_name = in_papierkorb("/korbtest/opfer.txt").unwrap();
+        assert!(fs::mit_fs(|f| f.node_typ("/korbtest/opfer.txt")).is_err());
+        let korb_pfad = fs::pfad_anhaengen(PAPIERKORB, &korb_name);
+        assert_eq!(fs::mit_fs(|f| f.lesen(&korb_pfad)).unwrap(), b"weg?");
+        let herkunft = fs::mit_fs(|f| f.lesen(&format!("{}{}", korb_pfad, HERKUNFT_ENDUNG))).unwrap();
+        assert_eq!(herkunft, b"/korbtest");
+
+        // Wiederherstellen -> zurück am Ursprungsort, Metadaten weg:
+        let ziel = papierkorb_wiederherstellen(&korb_name).unwrap();
+        assert_eq!(ziel, "/korbtest/opfer.txt");
+        assert_eq!(fs::mit_fs(|f| f.lesen(&ziel)).unwrap(), b"weg?");
+        assert!(fs::mit_fs(|f| f.node_typ(&korb_pfad)).is_err());
+
+        // Nochmal löschen + endgültig:
+        let korb_name = in_papierkorb("/korbtest/opfer.txt").unwrap();
+        papierkorb_endgueltig(&korb_name).unwrap();
+        assert!(fs::mit_fs(|f| f.node_typ(&fs::pfad_anhaengen(PAPIERKORB, &korb_name))).is_err());
+
+        fs::loeschen_rekursiv("/korbtest").unwrap();
     }
 
     #[test_case]

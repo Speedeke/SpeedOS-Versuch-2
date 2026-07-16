@@ -147,6 +147,57 @@ pub fn verschieben(quelle: &str, ziel: &str) -> FsErgebnis<()> {
     })
 }
 
+/// Kopiert einen Pfad REKURSIV (Datei: 1:1; Ordner: mkdir + alle
+/// Kinder). WICHTIG (Deadlock-Regel): Jede Ebene schließt ihr
+/// liste() ab, BEVOR sie absteigt — mit_fs nie verschachteln.
+pub fn kopieren_rekursiv(quelle: &str, ziel: &str) -> FsErgebnis<()> {
+    match mit_fs(|fs| fs.node_typ(quelle))? {
+        NodeTyp::Datei => mit_fs(|fs| {
+            let inhalt = fs.lesen(quelle)?;
+            fs.schreiben(ziel, &inhalt)
+        }),
+        NodeTyp::Verzeichnis => {
+            mit_fs(|fs| fs.mkdir(ziel))?;
+            let kinder: alloc::vec::Vec<String> =
+                mit_fs(|fs| fs.liste(quelle))?.into_iter().map(|e| e.name).collect();
+            for kind in kinder {
+                let kind_quelle = pfad_anhaengen(quelle, &kind);
+                let kind_ziel = pfad_anhaengen(ziel, &kind);
+                kopieren_rekursiv(&kind_quelle, &kind_ziel)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Löscht einen Pfad REKURSIV (Ordner samt Inhalt, Kinder zuerst).
+pub fn loeschen_rekursiv(pfad: &str) -> FsErgebnis<()> {
+    if mit_fs(|fs| fs.node_typ(pfad))? == NodeTyp::Verzeichnis {
+        let kinder: alloc::vec::Vec<String> =
+            mit_fs(|fs| fs.liste(pfad))?.into_iter().map(|e| e.name).collect();
+        for kind in kinder {
+            loeschen_rekursiv(&pfad_anhaengen(pfad, &kind))?;
+        }
+    }
+    mit_fs(|fs| fs.loeschen(pfad))
+}
+
+/// Verschiebt REKURSIV: kopieren + Quelle löschen (auch Ordner —
+/// das einfache verschieben() kann nur Dateien).
+pub fn verschieben_rekursiv(quelle: &str, ziel: &str) -> FsErgebnis<()> {
+    kopieren_rekursiv(quelle, ziel)?;
+    loeschen_rekursiv(quelle)
+}
+
+/// Hängt einen Namen an einen absoluten Pfad ("/": kein Doppel-Slash).
+pub fn pfad_anhaengen(basis: &str, name: &str) -> String {
+    if basis == "/" {
+        format!("/{}", name)
+    } else {
+        format!("{}/{}", basis, name)
+    }
+}
+
 /// Hilfsfunktion für copy/move: Zeigt das Ziel auf ein Verzeichnis,
 /// wird der Dateiname der Quelle angehängt.
 fn ziel_pfad_bestimmen(fs: &mut dyn FileSystem, quelle: &str, ziel: &str) -> String {

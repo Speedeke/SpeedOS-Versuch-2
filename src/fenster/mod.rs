@@ -132,8 +132,11 @@ pub enum Inhalt {
 /// KONSOLE-vor-MANAGER-Lock-Ordnung).
 pub enum NachLock {
     Keine,
-    /// App-Start oder App-"danach"-Aktion (siehe ui::AppReaktion).
+    /// App-Start aus der Registry (zustandslose fn).
     Ausfuehren(fn()),
+    /// App-"danach"-Aktion MIT Daten (ui::AppReaktion::danach) —
+    /// z. B. "öffne den Betrachter für DIESEN Pfad".
+    Einmal(alloc::boxed::Box<dyn FnOnce() + Send>),
     Nachricht(crate::ui::NachrichtHandler, u32),
 }
 
@@ -142,43 +145,8 @@ fn nach_lock_ausfuehren(nach: NachLock) {
     match nach {
         NachLock::Keine => {}
         NachLock::Ausfuehren(aktion) => aktion(),
+        NachLock::Einmal(aktion) => aktion(),
         NachLock::Nachricht(handler, id) => handler(id),
-    }
-}
-
-/// Verarbeitet die Widget-Reaktion eines Ui-/App-Fensterinhalts:
-/// dirty-Flags setzen und die Nachricht zustellen — bei Ui-Inhalten
-/// nach draußen (fn(u32)-Handler), bei Trait-Apps direkt an
-/// App::nachricht (läuft unter dem Lock, siehe ui/app.rs).
-fn ui_reaktion_verarbeiten(
-    inhalt: &mut Inhalt,
-    dirty: &mut bool,
-    inhalt_neu: &mut bool,
-    reaktion: crate::ui::UiReaktion,
-) -> NachLock {
-    if reaktion.neu_zeichnen {
-        *inhalt_neu = true;
-        *dirty = true;
-    }
-    let id = match reaktion.nachricht {
-        Some(id) => id,
-        None => return NachLock::Keine,
-    };
-    match inhalt {
-        Inhalt::Ui(ui) => NachLock::Nachricht(ui.handler(), id),
-        Inhalt::App(app_fenster) => {
-            let app_reaktion = app_fenster.app.nachricht(id);
-            if app_reaktion.neu_aufbauen {
-                app_fenster.neu_aufbauen();
-                *inhalt_neu = true;
-                *dirty = true;
-            }
-            match app_reaktion.danach {
-                Some(aktion) => NachLock::Ausfuehren(aktion),
-                None => NachLock::Keine,
-            }
-        }
-        _ => NachLock::Keine,
     }
 }
 
@@ -336,6 +304,70 @@ impl Switcher {
     }
 }
 
+/// Das GENERISCHE Kontextmenü-Overlay (Rechtsklick): eine Liste von
+/// (Beschriftung, Nachricht-ID)-Einträgen, gezeichnet in einen
+/// Offscreen-Puffer (dasselbe Muster wie Startmenü/Switcher). Heute
+/// füllen es Trait-Apps (AppReaktion::menue); Taskleiste und Desktop
+/// können später dasselbe Overlay mit eigenem Empfänger nutzen —
+/// dafür ist der Empfänger als FensterId (statt App-Referenz) gelöst.
+struct KontextMenue {
+    eintraege: Vec<(String, u32)>,
+    /// Wer bekommt die Eintrag-Nachricht? (App-Fenster)
+    empfaenger: FensterId,
+    x: i32,
+    y: i32,
+    puffer: FensterPuffer,
+}
+
+impl KontextMenue {
+    fn neu(empfaenger: FensterId, eintraege: Vec<(String, u32)>, x: i32, y: i32) -> Self {
+        let zeichen = get_raster_width(FontWeight::Regular, metrik().schrift_ui) as i32;
+        let laengste = eintraege.iter().map(|(t, _)| t.chars().count()).max().unwrap_or(4) as i32;
+        let breite = (laengste * zeichen + 4 * metrik().abstand).max(120);
+        let hoehe = eintraege.len().max(1) as i32 * metrik().listen_eintrag_hoehe + 2;
+        let mut menue = KontextMenue {
+            eintraege,
+            empfaenger,
+            x,
+            y,
+            puffer: FensterPuffer::neu(breite as usize, hoehe as usize, theme::aktuell().inhalt_hintergrund),
+        };
+        menue.zeichnen();
+        menue
+    }
+
+    fn rechteck(&self) -> Rechteck {
+        Rechteck::neu(self.x, self.y, self.puffer.breite as i32, self.puffer.hoehe as i32)
+    }
+
+    fn zeichnen(&mut self) {
+        let thema = theme::aktuell();
+        let (breite, hoehe) = (self.puffer.breite as i32, self.puffer.hoehe as i32);
+        let mut z = Zeichner::neu(&mut self.puffer);
+        z.rechteck_fuellen(Rechteck::neu(0, 0, breite, hoehe), thema.flaeche);
+        for (i, (text, _)) in self.eintraege.iter().enumerate() {
+            let y = 1 + i as i32 * metrik().listen_eintrag_hoehe;
+            z.text(
+                2 * metrik().abstand,
+                y + (metrik().listen_eintrag_hoehe - metrik().zeilen_hoehe) / 2,
+                text,
+                metrik().schrift_ui,
+                FontWeight::Regular,
+                thema.text_normal,
+            );
+        }
+    }
+
+    /// Nachricht-ID des Eintrags an der Bildschirmposition.
+    fn eintrag_bei(&self, px: i32, py: i32) -> Option<u32> {
+        if !self.rechteck().enthaelt(px, py) {
+            return None;
+        }
+        let zeile = ((py - self.y - 1) / metrik().listen_eintrag_hoehe) as usize;
+        self.eintraege.get(zeile).map(|(_, id)| *id)
+    }
+}
+
 // Die Widget-Nachrichten des Startmenüs (u32-IDs, siehe ui-Modul).
 const MENUE_ENTER: u32 = 1;
 const MENUE_SUCHE_GEAENDERT: u32 = 2;
@@ -467,6 +499,7 @@ pub struct FensterManager {
     snap_hinweis: i8,
     switcher: Option<Switcher>,
     start_menue: Option<StartMenue>,
+    kontext_menue: Option<KontextMenue>,
     alles_dirty: bool,
     bildschirm_breite: i32,
     bildschirm_hoehe: i32,
@@ -511,6 +544,7 @@ impl FensterManager {
             snap_hinweis: 0,
             switcher: None,
             start_menue: None,
+            kontext_menue: None,
             alles_dirty: true,
             bildschirm_breite,
             bildschirm_hoehe,
@@ -843,6 +877,67 @@ impl FensterManager {
         }
     }
 
+    // ----- Kontextmenü (generisches Rechtsklick-Overlay) -----
+
+    /// Öffnet das Kontextmenü an der Maus-Position (aufs Bild geklemmt).
+    fn kontextmenue_oeffnen(&mut self, empfaenger: FensterId, eintraege: Vec<(String, u32)>) {
+        if eintraege.is_empty() {
+            return;
+        }
+        let (mx, my) = maus::position();
+        let menue = KontextMenue::neu(empfaenger, eintraege, 0, 0);
+        let breite = menue.puffer.breite as i32;
+        let hoehe = menue.puffer.hoehe as i32;
+        let mut menue = menue;
+        menue.x = mx.clamp(0, self.bildschirm_breite - breite);
+        menue.y = my.clamp(0, self.bildschirm_hoehe - hoehe);
+        let rect = menue.rechteck();
+        self.kontext_menue = Some(menue);
+        // Fläche inkl. Schatten-Versatz melden:
+        self.dirty_melden(Rechteck::neu(
+            rect.x,
+            rect.y,
+            rect.breite + metrik().abstand,
+            rect.hoehe + metrik().abstand,
+        ));
+    }
+
+    fn kontextmenue_schliessen(&mut self) {
+        if let Some(menue) = self.kontext_menue.take() {
+            let rect = menue.rechteck();
+            self.dirty_melden(Rechteck::neu(
+                rect.x,
+                rect.y,
+                rect.breite + metrik().abstand,
+                rect.hoehe + metrik().abstand,
+            ));
+        }
+    }
+
+    /// Klick bei offenem Kontextmenü: Eintrag -> Nachricht an den
+    /// Empfänger (App); daneben -> nur schließen.
+    fn kontextmenue_klick(&mut self, px: i32, py: i32) -> NachLock {
+        let (empfaenger, id) = match &self.kontext_menue {
+            Some(menue) => (menue.empfaenger, menue.eintrag_bei(px, py)),
+            None => return NachLock::Keine,
+        };
+        self.kontextmenue_schliessen();
+        let id = match id {
+            Some(id) => id,
+            None => return NachLock::Keine,
+        };
+        match self.index_von(empfaenger) {
+            Some(index) => {
+                let app_reaktion = match &mut self.fenster[index].inhalt {
+                    Inhalt::App(app_fenster) => app_fenster.app.nachricht(id),
+                    _ => return NachLock::Keine,
+                };
+                self.app_reaktion(index, app_reaktion)
+            }
+            None => NachLock::Keine,
+        }
+    }
+
     // ----- Startmenü -----
 
     /// Öffnet/schließt das Startmenü (Startknopf oder Super-Taste).
@@ -1006,6 +1101,17 @@ impl FensterManager {
     /// Nachricht) — der Aufrufer MUSS sie erst nach dem Loslassen des
     /// MANAGER-Locks ausführen (Deadlock-Regel).
     pub fn maus_event(&mut self, event: &MausEvent, px: i32, py: i32) -> NachLock {
+        // Ein offenes Kontextmenü fängt Klicks ab (liegt ganz oben):
+        if self.kontext_menue.is_some() {
+            match event {
+                MausEvent::Gedrueckt(MausTaste::Links) => return self.kontextmenue_klick(px, py),
+                MausEvent::Gedrueckt(_) => {
+                    self.kontextmenue_schliessen();
+                    return NachLock::Keine;
+                }
+                _ => return NachLock::Keine,
+            }
+        }
         // Ein offenes Startmenü fängt ALLE Maus-Ereignisse ab
         // (liegt zuoberst) — das Widget-Routing übernimmt den Rest.
         if self.start_menue.is_some() {
@@ -1013,6 +1119,7 @@ impl FensterManager {
         }
         match event {
             MausEvent::Gedrueckt(MausTaste::Links) => self.maus_gedrueckt(px, py),
+            MausEvent::Gedrueckt(MausTaste::Rechts) => self.rechtsklick(px, py),
             MausEvent::Losgelassen(MausTaste::Links) => self.maus_losgelassen(px, py),
             MausEvent::Bewegt { x, y } => {
                 self.maus_bewegt(*x, *y);
@@ -1028,13 +1135,73 @@ impl FensterManager {
     /// Reicht ein Maus-Ereignis an einen Ui-Fensterinhalt weiter und
     /// übersetzt die Widget-Reaktion in dirty-Flags + NachLock.
     fn ui_maus(&mut self, index: usize, ereignis: crate::ui::UiEreignis) -> NachLock {
-        let Fenster { inhalt, puffer, dirty, inhalt_neu, .. } = &mut self.fenster[index];
+        let Fenster { inhalt, puffer, .. } = &mut self.fenster[index];
         let reaktion = match inhalt {
             Inhalt::Ui(ui) => ui.maus(ereignis, puffer),
             Inhalt::App(app_fenster) => app_fenster.ui.maus(ereignis, puffer),
             _ => return NachLock::Keine,
         };
-        ui_reaktion_verarbeiten(inhalt, dirty, inhalt_neu, reaktion)
+        self.ui_reaktion(index, reaktion)
+    }
+
+    /// Verarbeitet die Widget-Reaktion eines Ui-/App-Fensterinhalts:
+    /// dirty-Flags setzen und die Nachricht zustellen — bei Ui-
+    /// Inhalten nach draußen (fn(u32)-Handler), bei Trait-Apps direkt
+    /// an App::nachricht (unter dem Lock, Regeln siehe ui/app.rs).
+    fn ui_reaktion(&mut self, index: usize, reaktion: crate::ui::UiReaktion) -> NachLock {
+        if reaktion.neu_zeichnen {
+            self.fenster[index].inhalt_neu = true;
+            self.fenster[index].dirty = true;
+        }
+        let id = match reaktion.nachricht {
+            Some(id) => id,
+            None => return NachLock::Keine,
+        };
+        let app_reaktion = match &mut self.fenster[index].inhalt {
+            Inhalt::Ui(ui) => return NachLock::Nachricht(ui.handler(), id),
+            Inhalt::App(app_fenster) => app_fenster.app.nachricht(id),
+            _ => return NachLock::Keine,
+        };
+        self.app_reaktion(index, app_reaktion)
+    }
+
+    /// Setzt eine AppReaktion um: Baum neu aufbauen, Kontextmenü am
+    /// Cursor öffnen, danach-Aktion als NachLock nach draußen.
+    fn app_reaktion(&mut self, index: usize, app_reaktion: crate::ui::AppReaktion) -> NachLock {
+        if app_reaktion.neu_aufbauen {
+            if let Inhalt::App(app_fenster) = &mut self.fenster[index].inhalt {
+                app_fenster.neu_aufbauen();
+            }
+            self.fenster[index].inhalt_neu = true;
+            self.fenster[index].dirty = true;
+        }
+        if let Some(eintraege) = app_reaktion.kontextmenue {
+            let fenster_id = self.fenster[index].id;
+            self.kontextmenue_oeffnen(fenster_id, eintraege);
+        }
+        match app_reaktion.danach {
+            Some(aktion) => NachLock::Einmal(aktion),
+            None => NachLock::Keine,
+        }
+    }
+
+    /// Rechtsklick: fokussiert das Fenster und reicht das Ereignis
+    /// (in Inhalts-Koordinaten) an den Ui-/App-Inhalt — Widgets wie
+    /// die ScrollListe machen daraus Kontextmenü-Nachrichten.
+    fn rechtsklick(&mut self, px: i32, py: i32) -> NachLock {
+        if py >= self.taskleiste_y() {
+            return NachLock::Keine; // Taskleisten-Kontextmenü: später
+        }
+        let id = match self.fenster_unter(px, py) {
+            Some(id) => id,
+            None => return NachLock::Keine, // Desktop-Kontextmenü: später
+        };
+        self.fokussieren_und_heben(id);
+        let index = self.fenster.len() - 1;
+        if let Some((lx, ly)) = self.fenster[index].lokal(px, py) {
+            return self.ui_maus(index, crate::ui::UiEreignis::Rechtsklick { x: lx, y: ly });
+        }
+        NachLock::Keine
     }
 
     /// Scrollrad: geht an den Ui-Inhalt unter dem Cursor.
@@ -1347,50 +1514,46 @@ impl FensterManager {
             None => return NachLock::Keine,
         };
         if let Some(index) = self.index_von(fokus) {
-            let Fenster { inhalt, puffer, dirty, inhalt_neu, .. } = &mut self.fenster[index];
-            match inhalt {
-                // Widget-Fenster: Tab-Fokuskette + Tasten ans
-                // fokussierte Widget (macht das UiFenster). Trait-Apps
-                // bekommen die Taste ZUERST angeboten (App-Shortcuts,
-                // Eingabemodi wie die Explorer-Adresszeile).
-                Inhalt::Ui(_) | Inhalt::App(_) => {
-                    if let Inhalt::App(app_fenster) = inhalt {
-                        if let Some(app_reaktion) = app_fenster.app.taste(taste) {
-                            if app_reaktion.neu_aufbauen {
-                                app_fenster.neu_aufbauen();
-                                *inhalt_neu = true;
-                                *dirty = true;
-                            }
-                            return match app_reaktion.danach {
-                                Some(aktion) => NachLock::Ausfuehren(aktion),
-                                None => NachLock::Keine,
-                            };
+            // Trait-Apps bekommen die Taste ZUERST angeboten
+            // (App-Shortcuts, Eingabemodi wie die Explorer-Adresszeile):
+            let hook = match &mut self.fenster[index].inhalt {
+                Inhalt::App(app_fenster) => app_fenster.app.taste(taste),
+                _ => None,
+            };
+            if let Some(app_reaktion) = hook {
+                return self.app_reaktion(index, app_reaktion);
+            }
+
+            // Widget-Fenster: Tab-Fokuskette + Tasten ans fokussierte
+            // Widget (macht das UiFenster). (Eigener Block, damit die
+            // Fenster-Leihe VOR ui_reaktion endet.)
+            let widget_reaktion = {
+                let Fenster { inhalt, puffer, .. } = &mut self.fenster[index];
+                match inhalt {
+                    Inhalt::Ui(ui) => Some(ui.taste(taste, puffer)),
+                    Inhalt::App(app_fenster) => Some(app_fenster.ui.taste(taste, puffer)),
+                    _ => None,
+                }
+            };
+            if let Some(reaktion) = widget_reaktion {
+                return self.ui_reaktion(index, reaktion);
+            }
+
+            if let Inhalt::TastaturEcho { text } = &mut self.fenster[index].inhalt {
+                match taste {
+                    DecodedKey::Unicode('\u{8}') | DecodedKey::Unicode('\u{7f}') => {
+                        text.pop();
+                    }
+                    DecodedKey::Unicode('\n') | DecodedKey::Unicode('\r') => text.clear(),
+                    DecodedKey::Unicode(c) if c >= ' ' => {
+                        if text.chars().count() < 40 {
+                            text.push(c);
                         }
                     }
-                    let reaktion = match inhalt {
-                        Inhalt::Ui(ui) => ui.taste(taste, puffer),
-                        Inhalt::App(app_fenster) => app_fenster.ui.taste(taste, puffer),
-                        _ => unreachable!(),
-                    };
-                    return ui_reaktion_verarbeiten(inhalt, dirty, inhalt_neu, reaktion);
+                    _ => return NachLock::Keine,
                 }
-                Inhalt::TastaturEcho { text } => {
-                    match taste {
-                        DecodedKey::Unicode('\u{8}') | DecodedKey::Unicode('\u{7f}') => {
-                            text.pop();
-                        }
-                        DecodedKey::Unicode('\n') | DecodedKey::Unicode('\r') => text.clear(),
-                        DecodedKey::Unicode(c) if c >= ' ' => {
-                            if text.chars().count() < 40 {
-                                text.push(c);
-                            }
-                        }
-                        _ => return NachLock::Keine,
-                    }
-                    *inhalt_neu = true;
-                    *dirty = true;
-                }
-                _ => {}
+                self.fenster[index].inhalt_neu = true;
+                self.fenster[index].dirty = true;
             }
         }
         NachLock::Keine
@@ -1598,6 +1761,17 @@ impl FensterManager {
             let panel = self.menue_panel_rechteck();
             z.rechteck_fuellen(
                 Rechteck::neu(panel.x + metrik().abstand, panel.y + metrik().abstand, panel.breite, panel.hoehe),
+                thema.schatten,
+            );
+            z.puffer_blit(panel.x, panel.y, menue.puffer.breite, &menue.puffer.pixel);
+            z.rechteck_rahmen(panel, thema.akzent);
+        }
+
+        // 5b. Kontextmenü (Rechtsklick-Overlay, über allem außer Alt+Tab):
+        if let Some(menue) = &self.kontext_menue {
+            let panel = menue.rechteck();
+            z.rechteck_fuellen(
+                Rechteck::neu(panel.x + metrik().abstand / 2, panel.y + metrik().abstand / 2, panel.breite, panel.hoehe),
                 thema.schatten,
             );
             z.puffer_blit(panel.x, panel.y, menue.puffer.breite, &menue.puffer.pixel);

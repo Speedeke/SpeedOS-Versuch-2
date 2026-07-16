@@ -115,10 +115,14 @@ impl KeyStream {
     pub fn new() -> Self {
         KeyStream {
             scancodes: ScancodeStream::new(),
+            // MapLettersToUnicode: Strg+Buchstabe wird zum Steuer-
+            // zeichen (Strg+C = U+0003, X = U+0018, V = U+0016) —
+            // so erkennen Apps die Kürzel; normale Eingaben (>= ' ')
+            // sind davon unberührt.
             keyboard: Keyboard::new(
                 ScancodeSet1::new(),
                 layouts::De105Key,
-                HandleControl::Ignore,
+                HandleControl::MapLettersToUnicode,
             ),
             alt_gedrueckt: false,
         }

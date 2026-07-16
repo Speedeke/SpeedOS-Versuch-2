@@ -55,6 +55,8 @@ pub type NachrichtHandler = fn(u32);
 pub enum UiEreignis {
     /// Linke Maustaste gedrückt.
     Klick { x: i32, y: i32 },
+    /// Rechte Maustaste gedrückt (Kontextmenü-Anlass).
+    Rechtsklick { x: i32, y: i32 },
     /// Zweiter Klick kurz nach dem ersten an (fast) derselben Stelle —
     /// erkennt das UiFenster über die zeit-API.
     Doppelklick { x: i32, y: i32 },
@@ -82,6 +84,7 @@ impl UiEreignis {
     pub fn position(&self) -> Option<(i32, i32)> {
         match self {
             UiEreignis::Klick { x, y }
+            | UiEreignis::Rechtsklick { x, y }
             | UiEreignis::Doppelklick { x, y }
             | UiEreignis::Losgelassen { x, y }
             | UiEreignis::Bewegt { x, y }
@@ -335,6 +338,7 @@ impl Widget for BoxContainer {
                 reaktion
             }
             UiEreignis::Klick { x, y }
+            | UiEreignis::Rechtsklick { x, y }
             | UiEreignis::Doppelklick { x, y }
             | UiEreignis::Losgelassen { x, y }
             | UiEreignis::Scroll { x, y, .. } => match self.kind_bei(&bereiche, *x, *y) {

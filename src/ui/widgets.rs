@@ -448,6 +448,10 @@ pub struct ScrollListe {
     /// Beim Zeichnen die Auswahl in den Sichtbereich holen (für
     /// Apps, die die Liste nach jeder Nachricht neu aufbauen).
     pub auswahl_sichtbar: bool,
+    /// Rechtsklick-Nachrichten: (Basis + Index) auf Einträgen,
+    /// feste Nachricht auf der freien Fläche (Kontextmenüs).
+    rechtsklick_basis: Option<u32>,
+    rechtsklick_leer: Option<u32>,
     /// Flex-Faktor im Layout (Standard 1: nimmt den Restplatz).
     flex: i32,
     /// Fester Breiten-Wunsch (z. B. schmale Ordnerbaum-Spalte).
@@ -468,6 +472,8 @@ impl ScrollListe {
             fokus: false,
             fokussierbar: false,
             auswahl_sichtbar: false,
+            rechtsklick_basis: None,
+            rechtsklick_leer: None,
             flex: 1,
             wunsch_breite: 160,
             balken_griff: None,
@@ -499,6 +505,14 @@ impl ScrollListe {
     pub fn mit_layout(mut self, wunsch_breite: i32, flex: i32) -> Self {
         self.wunsch_breite = wunsch_breite;
         self.flex = flex;
+        self
+    }
+
+    /// Builder: Rechtsklick-Nachrichten (Eintrag: Basis + Index,
+    /// freie Fläche: feste ID) — für Kontextmenüs.
+    pub fn mit_rechtsklick(mut self, eintrag_basis: u32, leer: u32) -> Self {
+        self.rechtsklick_basis = Some(eintrag_basis);
+        self.rechtsklick_leer = Some(leer);
         self
     }
 
@@ -732,6 +746,21 @@ impl Widget for ScrollListe {
                 } else {
                     UiReaktion::ignoriert()
                 }
+            }
+            // Rechtsklick: Eintrag auswählen + Kontext-Nachricht;
+            // freie Fläche innerhalb der Liste: Leer-Nachricht.
+            UiEreignis::Rechtsklick { x, y } => {
+                if let Some(index) = self.eintrag_bei(bereich, *x, *y) {
+                    if let Some(basis) = self.rechtsklick_basis {
+                        self.auswahl = Some(index);
+                        return UiReaktion::nachricht(basis + index as u32);
+                    }
+                } else if bereich.enthaelt(*x, *y) {
+                    if let Some(leer) = self.rechtsklick_leer {
+                        return UiReaktion::nachricht(leer);
+                    }
+                }
+                UiReaktion::ignoriert()
             }
             // Tastatur (nur mit Fokus): Pfeile bewegen die Auswahl,
             // Enter wirkt wie ein Doppelklick auf den Eintrag.

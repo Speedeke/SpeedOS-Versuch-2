@@ -32,16 +32,29 @@ pub struct AppReaktion {
     /// (aufbau() wird gerufen; Widget-Zustände gehen dabei verloren).
     pub neu_aufbauen: bool,
     /// Wird NACH dem Loslassen des MANAGER-Locks ausgeführt
-    /// (Fenster öffnen, drucken, ... — siehe Lock-Regel oben).
-    pub danach: Option<fn()>,
+    /// (Fenster öffnen, drucken, ...). Box<dyn FnOnce> statt fn():
+    /// Die Aktion darf Daten mitnehmen (move) — z. B. den Pfad der
+    /// Datei, die der Betrachter öffnen soll.
+    pub danach: Option<alloc::boxed::Box<dyn FnOnce() + Send>>,
+    /// Kontextmenü am Maus-Cursor öffnen: (Beschriftung, Nachricht-ID).
+    /// Der Klick auf einen Eintrag landet wieder in App::nachricht.
+    pub kontextmenue: Option<alloc::vec::Vec<(alloc::string::String, u32)>>,
 }
 
 impl AppReaktion {
     pub const fn keine() -> Self {
-        AppReaktion { neu_aufbauen: false, danach: None }
+        AppReaktion { neu_aufbauen: false, danach: None, kontextmenue: None }
     }
     pub const fn neu_aufbauen() -> Self {
-        AppReaktion { neu_aufbauen: true, danach: None }
+        AppReaktion { neu_aufbauen: true, danach: None, kontextmenue: None }
+    }
+    /// Aktion nach dem Lock (mit Daten — siehe Feld-Doku).
+    pub fn danach(aktion: impl FnOnce() + Send + 'static) -> Self {
+        AppReaktion { neu_aufbauen: false, danach: Some(alloc::boxed::Box::new(aktion)), kontextmenue: None }
+    }
+    /// Kontextmenü öffnen.
+    pub fn menue(eintraege: alloc::vec::Vec<(alloc::string::String, u32)>) -> Self {
+        AppReaktion { neu_aufbauen: false, danach: None, kontextmenue: Some(eintraege) }
     }
 }
 

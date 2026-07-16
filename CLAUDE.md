@@ -249,6 +249,19 @@
   wird nach draußen gereicht). Der PANIC-HANDLER druckt ZUERST roh
   seriell (println! würde im Desktop-Modus via Terminal-Umleitung
   den MANAGER-Lock brauchen -> Deadlock bei Panik unterm Lock).
+- **Dateioperationen & Kontextmenü (Juli 2026):** Rekursives
+  Kopieren/Löschen/Verschieben lebt in fs/mod.rs (liste() IMMER vor
+  dem Abstieg abschließen — mit_fs nie verschachteln). Papierkorb =
+  /papierkorb; Ursprung steht in einer METADATEN-Datei
+  (<name>.herkunft — kein Namens-Parser, Ansicht filtert sie aus).
+  Ablage (`src/ablage.rs`) = globaler Blatt-Lock (darf unter dem
+  MANAGER-Lock genutzt werden) — Strg+C/X/V fensterübergreifend;
+  KeyStream dekodiert mit MapLettersToUnicode (Strg+C = U+0003).
+  Kontextmenü = GENERISCHES Manager-Overlay (Offscreen + Blit;
+  Empfänger als FensterId): Apps liefern es via AppReaktion::menue
+  auf UiEreignis::Rechtsklick (ScrollListe::mit_rechtsklick);
+  AppReaktion::danach ist eine Box<dyn FnOnce> (Aktion MIT Daten,
+  z. B. Betrachter-Pfad) -> NachLock::Einmal.
 - **Explorer & App-Muster (Juli 2026):** `src/explorer.rs` = die
   Blaupause für Trait-Apps: Die App hält ZUSTAND (Pfad, Verlauf,
   Auswahl, aufgeklappte Baum-Ordner) plus ABGELEITETE Listen

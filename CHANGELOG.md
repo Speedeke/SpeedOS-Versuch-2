@@ -5,6 +5,43 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### Hinzugefügt (Explorer Teil 2: Dateioperationen)
+- Umbenennen mit F2 (der Auswahl-Eintrag wird zur Eingabezeile, die
+  App puffert über den taste-Hook; Enter übernimmt, Esc bricht ab),
+  Neu-Ordner/Neu-Datei (Werkzeugleiste + Kontextmenü; legt mit
+  eindeutigem Namen an und springt direkt in den Umbenennen-Modus),
+  Entf verschiebt in den Papierkorb
+- Papierkorb /papierkorb: Der Ursprungs-Ordner wird in einer
+  METADATEN-Datei (<name>.herkunft) gemerkt — begründet im Code:
+  normale VFS-Zugriffe statt Namens-Parser, echter Anzeigename,
+  die Ansicht filtert die Metadaten einfach aus. Papierkorb-Ansicht
+  mit Wiederherstellen (Konflikt -> " (2)") und Endgültig-Löschen;
+  Entf im Papierkorb löscht endgültig
+- Kopieren/Ausschneiden/Einfügen mit Strg+C/X/V — die Ablage ist
+  ein GLOBALER Zustand (src/ablage.rs, Grundstein der System-
+  Zwischenablage): funktioniert innerhalb eines und zwischen zwei
+  Explorer-Fenstern. Rekursives Kopieren/Löschen/Verschieben von
+  Ordnern als fs-Helfer (Deadlock-Regel: liste() vor dem Abstieg
+  abschließen); Namenskonflikt hängt automatisch " (2)" an.
+  Strg-Erkennung: KeyStream dekodiert mit MapLettersToUnicode
+  (Strg+C = U+0003 usw.)
+- GENERISCHES Kontextmenü-Overlay im Fenster-Manager (Offscreen-
+  Puffer + Blit wie Startmenü/Switcher; Empfänger = FensterId,
+  Taskleiste/Desktop können es später nutzen): Rechtsklick auf
+  Eintrag (Öffnen/Umbenennen/Kopieren/Ausschneiden/Löschen, im
+  Papierkorb + Wiederherstellen) und auf freie Fläche (Einfügen/
+  Neu/Aktualisieren). Neu dafür: UiEreignis::Rechtsklick,
+  ScrollListe::mit_rechtsklick, AppReaktion::menue sowie
+  AppReaktion::danach als Box<dyn FnOnce> (Aktionen MIT Daten,
+  NachLock::Einmal)
+- Aktualisieren-Button (@): Shell und Explorer sehen dasselbe VFS —
+  write /test.txt im Terminal, @ im Explorer, Datei ist da
+- Doppelklick auf Datei öffnet den minimalen Betrachter
+  (BetrachterApp: Pfad, Zeilen-ScrollListe, nur Lesen)
+- Unit-Tests: eindeutiger_name, rekursives Kopieren/Löschen (echtes
+  Test-VFS), Papierkorb-Roundtrip (Herkunft-Metadaten,
+  Wiederherstellen, Endgültig)
+
 ### Hinzugefügt (Explorer — die erste echte App auf dem Toolkit)
 - src/explorer.rs: ExplorerApp (ui::App) mit Werkzeugleiste
   (Zurück/Vor/Hoch + klickbare Breadcrumbs + KlickFlaeche für den
