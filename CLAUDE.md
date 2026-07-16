@@ -200,9 +200,11 @@
   darüber; Klicks prüfen dieselbe Reihenfolge (Menü -> Leiste ->
   Fenster). Fenster-Knöpfe sind nach FensterId (= Erstellungsreihen-
   folge) sortiert, damit sie beim Fokuswechsel nicht springen; Klick =
-  Fokus/Minimieren-Toggle. Uhr+Datum leitet `zeit::datum_nach` aus den
-  Ticks ab (fester Boot-Zeitpunkt als Platzhalter — RTC/CMOS-Kalibrierung
-  ist bekanntes TODO); neu komponiert wird nur beim Sekundenwechsel.
+  Fokus/Minimieren-Toggle. Uhr+Datum kommen aus `einstellungen::
+  jetzt_lokal()`/`uhrzeit_text()` (echte RTC+TSC-Zeit via zeit::jetzt(),
+  plus Anzeige-Offset und 12/24h aus den Einstellungen — der frühere
+  Tick-Platzhalter ist Geschichte); neu komponiert wird nur beim
+  Sekundenwechsel.
 - **App-Registry & App-Trait (Juli 2026):** `src/apps.rs` — jeder
   Registry-Eintrag (`AppEintrag`) = Name + Icon + `start: fn()`.
   NEUE Apps implementieren `ui::App` (name/icon/aufbau/nachricht/tick)

@@ -20,6 +20,15 @@ kommen aus dem zentralen Theme-Modul, nur das Terminal bleibt bewusst dunkel.*
 *Der Explorer — die erste echte App auf dem Toolkit: Ordnerbaum, Dateiliste,
 Breadcrumbs, Zurück/Vor-Verlauf, tippbare Adressleiste, Tastatur-Navigation.*
 
+![Einstellungen](docs/screenshots/einstellungen.png)
+*Die Einstellungen-App: Theme, Akzentfarbe (unabhängig von Hell/Dunkel) und
+Desktop-Verläufe, UI-Skalierung, Uhr-Format — alles wirkt sofort und wird
+persistent in /system/einstellungen.txt gespeichert.*
+
+![Einstellungen angewendet](docs/screenshots/einstellungen-hell.png)
+*Drei Klicks später: Aurora Hell + grüner Akzent + Ozean-Hintergrund —
+die Wahl überlebt das Schließen der App.*
+
 ![Widget-Galerie](docs/screenshots/widget-galerie.png)
 *Das UI-Toolkit (ui-Modul): Buttons, Checkbox, Textfeld (ZeilenEditor + blinkender
 Cursor), ScrollListe mit Scrollbalken — das Fundament für Explorer & Co.*
@@ -61,13 +70,22 @@ Cursor), ScrollListe mit Scrollbalken — das Fundament für Explorer & Co.*
   läuft im Desktop als Terminal-FENSTER (Ausgabe-Umleitung in ein
   unit-getestetes Text-Raster), auf Wunsch (ESC) auch im Vollbild
 - **Desktop:** Fenster-Manager + Compositor (private Fenster-Puffer,
-  Dirty-Flags), Theme-System (Aurora Dunkel/Hell, zur Laufzeit
-  umschaltbar — keine hartcodierten UI-Farben), Taskleiste
-  (Startknopf, Fenster-Knöpfe, Uhr+Datum aus Ticks), Startmenü mit
-  App-Registry und Live-Suche (Super-Taste), PS/2-Maus, Snap, Alt+Tab
+  Dirty-Rects), Theme-System (Aurora Dunkel/Hell — keine hartcodierten
+  UI-Farben), Taskleiste (Startknopf, Fenster-Knöpfe, echte RTC-Uhr),
+  Startmenü mit App-Registry und Live-Suche (Super-Taste), PS/2-Maus,
+  Snap, Alt+Tab, UI-Skalierung 1.0/1.5/2.0
+- **UI-Toolkit + Apps:** retained Widget-Baum (`src/ui/`) mit Buttons,
+  Textfeld, ScrollListe & Co. — darauf laufen der Explorer (Navigation,
+  Dateioperationen, Papierkorb, Kontextmenüs, Strg+C/X/V) und die
+  Einstellungen-App (Theme/Akzent/Hintergrund, Skalierung,
+  Cursor-Blinken, Uhr-Format/-Offset, System-Info)
+- **Einstellungs-Persistenz:** typisierter Schlüssel=Wert-Store, der
+  sofort nach /system/einstellungen.txt schreibt und beim Boot lädt —
+  die API-Naht, über die später das Disk-Dateisystem echte
+  Neustart-Persistenz liefert
 - **Dateisystem:** RAM-Dateisystem hinter einer VFS-Abstraktion
   (Trait `FileSystem`) — vorbereitet für FAT32/Disk-Dateisysteme
-- **Tests:** 60+ Unit-/Integrationstests, die als eigene Mini-Kernel
+- **Tests:** 100+ Unit-/Integrationstests, die als eigene Mini-Kernel
   in QEMU booten (inkl. Frame-Zeit-Messung, Speicherleck-Test und
   Clipping-Prüfung der Grafik-Schnellpfade)
 
@@ -133,22 +151,32 @@ cargo test --features fixed-block-allocator   # Frei-Listen fester Größen
 
 ```
 src/
-├── main.rs          Kernel-Einstieg: Init-Reihenfolge, Framebuffer, Shell
+├── main.rs          Kernel-Einstieg: Init-Reihenfolge, Desktop, Executor
 ├── lib.rs           Kern-Bibliothek: init(), Test-Framework, print-Makros
 ├── framebuffer.rs   Double Buffering, Font-Rendering, Boot-Screen
 ├── konsole.rs       FramebufferKonsole: Raster, Farben, Blink-Cursor
+├── grafik.rs        Zeichner: Primitive, Clipping, Alpha, Icons
+├── theme.rs         Themes (Dunkel/Hell), Akzent-Palette, Metrik, Skala
+├── fenster/         Fenster-Manager, Compositor, Taskleiste, Terminal
+├── ui/              Widget-Toolkit: Widget-Trait, Layout, App-Trait
+├── apps.rs          App-Registry (Startmenü-Einträge)
+├── explorer.rs      Explorer-App: Navigation, Dateioperationen, Papierkorb
+├── einstellungen.rs Einstellungs-Store (VFS-persistent) + Einstellungen-App
+├── ablage.rs        Globale Zwischenablage (Strg+C/X/V)
+├── maus.rs          PS/2-Maus: Init, Paket-Parsing, Cursor-Overlay
 ├── serial.rs        Serielle Ausgabe (COM1), parallel zum Bildschirm
 ├── gdt.rs           GDT/TSS + Notfall-Stack für Double Faults
 ├── interrupts.rs    IDT, Exceptions, PIC/PIT/LAPIC, Timer & Tastatur
 ├── memory.rs        Paging: globale API + Bitmap-Frame-Allocator
 ├── allocator.rs     Kernel-Heap (+ allocator/{bump,fixed_size_block}.rs)
-├── zeit.rs          Zeit-API (ticks, ms_seit_boot)
+├── zeit.rs          Zeit-API: TSC-Mikrosekunden, warte_ms, Datum
+├── rtc.rs           CMOS-Echtzeituhr (einmaliges Lesen beim Boot)
 ├── task/            Async-Multitasking: Task, Executor, Tastatur-Stream
 ├── shell/           SpeedShell: ZeilenEditor + Befehls-Registry
 └── fs/              VFS-Trait + RamFs
 boot/                Host-Runner: baut das UEFI-Disk-Image, startet QEMU
 tests/               Integrationstests (booten einzeln in QEMU)
-docs/                Migrationsplan bootloader 0.9 -> 0.11
+docs/                Migrationsplan bootloader 0.9 -> 0.11, Screenshots
 ```
 
 ## Roadmap (Kurzfassung)
@@ -163,7 +191,13 @@ docs/                Migrationsplan bootloader 0.9 -> 0.11
       Laufzeit umschaltbar), Taskleiste mit Startknopf/Fenster-Knöpfen/
       Uhr+Datum, Startmenü mit App-Registry und Live-Suche (Super-Taste),
       SpeedShell als Terminal-Fenster — SpeedOS bootet in den Desktop
-- [ ] **Persistenz:** Block-Device-Treiber + Disk-Dateisystem (VFS ist bereit)
+- [x] **Echte Zeit + 4K:** TSC-Zeitquelle (µs-genau), RTC-Uhrzeit,
+      Auflösungswahl bis 4K, UI-Skalierung, Dirty-Rect-Compositing
+- [x] **UI-Toolkit + erste Apps:** retained Widget-Baum, Explorer
+      (Dateioperationen, Papierkorb, Kontextmenüs, Zwischenablage),
+      Einstellungen-App mit persistentem Einstellungs-Store (VFS)
+- [ ] **Persistenz:** Block-Device-Treiber + Disk-Dateisystem (VFS und
+      Einstellungs-Store sind bereit)
 - [ ] **User Space:** Ring-3-Prozesse, Syscalls, präemptiver Scheduler
 - [ ] Ferner: eigene Programme laden (ELF), Netzwerk, Sound
 

@@ -120,7 +120,9 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
   Fassung als Farbe-Array war LANGSAMER als der Gradient — Lehre:
   Cache immer im Zielformat)
 - Messwerte (Berichts-Test, drei Szenarien, warm):
+
   | Szenario     | 720p vorher | 720p nachher | 4K vorher | 4K nachher |
+  |--------------|-------------|--------------|-----------|------------|
   | Vollbild     | ~1,2 ms     | ~1,1 ms      | ~9,3 ms   | ~9,3 ms    |
   | Uhr-Tick     | = Vollbild  | 0,25 ms      | = Vollbild| 0,31 ms    |
   | Fenster-Drag | = Vollbild  | 0,37 ms      | = Vollbild| 0,41 ms    |
