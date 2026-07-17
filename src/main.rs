@@ -106,8 +106,31 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     //    Compositor, Maus & Co. laufen als kooperative Tasks.
     //    Jeder Task bekommt einen NAMEN (und die Fenster-Welt ihre
     //    Art) — so sind sie im Task-Manager erkennbar.
+    //    SEIT DEN TERMINAL-SITZUNGEN: Der Eingabe-Router ist der
+    //    einzige KeyStream-Leser; pro Terminal-Fenster läuft ein
+    //    eigener Shell-Task. desktop_starten hat das Boot-Terminal
+    //    samt Sitzung angelegt (= Haupt-Terminal); ohne Desktop
+    //    (kein Framebuffer) bekommt die Vollbild-Konsole eine
+    //    fensterlose Haupt-Sitzung.
+    let boot_sitzung = {
+        let haupt = shell::sitzung::haupt();
+        if haupt != 0 {
+            haupt
+        } else {
+            let id = shell::sitzung::neu_registrieren();
+            shell::sitzung::haupt_setzen(id);
+            id
+        }
+    };
     let mut executor = Executor::new();
-    executor.spawn(Task::new("SpeedShell (Terminal)", shell::run()).mit_art(TaskArt::Fenster));
+    executor.spawn(Task::new("Eingabe-Router", shell::eingabe_router()));
+    executor.spawn(
+        Task::new(
+            alloc::format!("Shell-Sitzung {}", boot_sitzung),
+            shell::sitzung_laufen(boot_sitzung, true),
+        )
+        .mit_art(TaskArt::Fenster),
+    );
     executor.spawn(Task::new("Konsolen-Cursor", konsole::cursor_blink_task()));
     executor.spawn(Task::new("PS/2-Maus", speed_os::maus::maus_task()));
     executor.spawn(

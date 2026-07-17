@@ -257,12 +257,29 @@ pub fn _print(args: fmt::Arguments) {
     x86_64::instructions::interrupts::without_interrupts(|| {
         let mut zustand = KONSOLE.lock();
         // Desktop-Modus: Der Bildschirm gehört dem Compositor! Die
-        // Ausgabe geht ins Terminal-FENSTER (mit den aktuellen
-        // Konsolen-Farben) statt in den Bildschirm-Back-Buffer.
-        // Existiert kein Terminal, bleibt nur die serielle Ausgabe.
+        // Ausgabe geht ins Terminal-Fenster ihrer SITZUNG — Shell-
+        // Ausgaben in ihr eigenes Fenster (ausgabe_setzen im
+        // Shell-Task), Kernel-Log ins Haupt-Terminal. Ist KEIN
+        // Terminal offen, wird Kernel-Log GEPUFFERT (und beim
+        // nächsten Terminal-Öffnen nachgereicht); Ausgaben einer
+        // geschlossenen Shell-Sitzung verfallen dagegen bewusst.
         // (Lock-Ordnung: KONSOLE -> MANAGER, siehe Deadlock-Regeln.)
         if crate::fenster::desktop_aktiv() {
-            crate::fenster::terminal_schreiben(args, zustand.vordergrund, zustand.hintergrund);
+            let ziel = crate::shell::sitzung::ausgabe_ziel();
+            let geschrieben = ziel != 0
+                && crate::fenster::terminal_schreiben(
+                    ziel,
+                    args,
+                    zustand.vordergrund,
+                    zustand.hintergrund,
+                );
+            if !geschrieben && crate::shell::sitzung::ausgabe_ist_kernel_log() {
+                crate::shell::sitzung::log_puffern(
+                    alloc::format!("{}", args),
+                    zustand.vordergrund,
+                    zustand.hintergrund,
+                );
+            }
             return;
         }
         framebuffer::mit_framebuffer(|fb| {
@@ -308,9 +325,10 @@ pub fn set_color(foreground: Color, background: Color) {
 
 /// Leert den Bildschirm (und das serielle Terminal per ANSI).
 pub fn clear_screen() {
-    // Desktop-Modus: Der clear-Befehl leert das Terminal-FENSTER.
+    // Desktop-Modus: Der clear-Befehl leert das Terminal-Fenster
+    // SEINER Sitzung (bzw. das Haupt-Terminal beim Kernel-Log).
     if crate::fenster::desktop_aktiv() {
-        crate::fenster::terminal_leeren();
+        crate::fenster::terminal_leeren(crate::shell::sitzung::ausgabe_ziel());
         serial_print!("\x1b[2J\x1b[H");
         return;
     }

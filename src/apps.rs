@@ -32,9 +32,10 @@ pub fn alle_apps() -> &'static [AppEintrag] {
     &APPS
 }
 
-static APPS: [AppEintrag; 11] = [
+static APPS: [AppEintrag; 12] = [
     AppEintrag { name: "Terminal", icon: &grafik::ICON_TERMINAL, start: terminal_starten },
     AppEintrag { name: "Explorer", icon: &grafik::ICON_ORDNER, start: explorer_starten },
+    AppEintrag { name: "SpeedText", icon: &grafik::ICON_DATEI, start: crate::speedtext::starten },
     AppEintrag { name: "Einstellungen", icon: &grafik::ICON_ZAHNRAD, start: crate::einstellungen::starten },
     AppEintrag { name: "Task-Manager", icon: &grafik::ICON_TASKS, start: crate::taskmanager::starten },
     AppEintrag { name: "Widget-Galerie", icon: &grafik::ICON_ZAHNRAD, start: galerie_starten },
@@ -47,11 +48,17 @@ static APPS: [AppEintrag; 11] = [
 ];
 
 fn terminal_starten() {
-    // Öffnet die SpeedShell als Fenster (oder holt sie nach vorn).
-    // Bei einem FRISCHEN Fenster den Prompt nachholen — die Shell
-    // wartet gerade auf Tasten und würde sonst keinen zeigen.
-    if fenster::terminal_oeffnen() {
-        crate::shell::prompt_nachholen();
+    // Öffnet ein NEUES Terminal-Fenster mit eigener Shell-Sitzung
+    // (das Ein-Terminal-Limit ist Geschichte) und spawnt deren
+    // Shell-Task — er druckt selbst Willkommenszeile + Prompt.
+    if let Some(sitzung) = fenster::terminal_oeffnen() {
+        let _ = crate::task::spawn(
+            crate::task::Task::new(
+                alloc::format!("Shell-Sitzung {}", sitzung),
+                crate::shell::sitzung_laufen(sitzung, false),
+            )
+            .mit_art(crate::task::TaskArt::Fenster),
+        );
     }
 }
 

@@ -309,11 +309,7 @@ impl EinstellungenApp {
     /// eigenen Baum neu bauen UND (nach dem Lock!) alle Fenster,
     /// Hintergrund-Cache und Taskleiste neu zeichnen lassen.
     fn desktop_neu_zeichnen() -> AppReaktion {
-        AppReaktion {
-            neu_aufbauen: true,
-            danach: Some(Box::new(crate::fenster::alles_neu_zeichnen)),
-            kontextmenue: None,
-        }
+        AppReaktion::neu_aufbauen().mit_danach(crate::fenster::alles_neu_zeichnen)
     }
 
     // ----- Die vier Inhaltsseiten (rein aus dem Zustand gebaut) -----

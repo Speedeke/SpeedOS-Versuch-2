@@ -39,22 +39,44 @@ pub struct AppReaktion {
     /// Kontextmenü am Maus-Cursor öffnen: (Beschriftung, Nachricht-ID).
     /// Der Klick auf einen Eintrag landet wieder in App::nachricht.
     pub kontextmenue: Option<alloc::vec::Vec<(alloc::string::String, u32)>>,
+    /// Neuer Fenster-Titel (SpeedText: "name.txt *" bei Änderungen).
+    pub titel: Option<alloc::string::String>,
+    /// Das Fenster nach dieser Reaktion SCHLIESSEN (die App hat z. B.
+    /// im Nachfrage-Dialog "Verwerfen" bestätigt bekommen).
+    pub schliessen: bool,
 }
 
 impl AppReaktion {
-    pub const fn keine() -> Self {
-        AppReaktion { neu_aufbauen: false, danach: None, kontextmenue: None }
+    pub fn keine() -> Self {
+        AppReaktion::default()
     }
-    pub const fn neu_aufbauen() -> Self {
-        AppReaktion { neu_aufbauen: true, danach: None, kontextmenue: None }
+    pub fn neu_aufbauen() -> Self {
+        AppReaktion { neu_aufbauen: true, ..AppReaktion::default() }
     }
     /// Aktion nach dem Lock (mit Daten — siehe Feld-Doku).
     pub fn danach(aktion: impl FnOnce() + Send + 'static) -> Self {
-        AppReaktion { neu_aufbauen: false, danach: Some(alloc::boxed::Box::new(aktion)), kontextmenue: None }
+        AppReaktion {
+            danach: Some(alloc::boxed::Box::new(aktion)),
+            ..AppReaktion::default()
+        }
     }
     /// Kontextmenü öffnen.
     pub fn menue(eintraege: alloc::vec::Vec<(alloc::string::String, u32)>) -> Self {
-        AppReaktion { neu_aufbauen: false, danach: None, kontextmenue: Some(eintraege) }
+        AppReaktion { kontextmenue: Some(eintraege), ..AppReaktion::default() }
+    }
+    /// Fenster schließen (Baum wird vorher nicht mehr gebraucht).
+    pub fn schliessen() -> Self {
+        AppReaktion { schliessen: true, ..AppReaktion::default() }
+    }
+    /// Builder: zusätzlich eine danach-Aktion mitgeben.
+    pub fn mit_danach(mut self, aktion: impl FnOnce() + Send + 'static) -> Self {
+        self.danach = Some(alloc::boxed::Box::new(aktion));
+        self
+    }
+    /// Builder: zusätzlich den Fenster-Titel aktualisieren.
+    pub fn mit_titel(mut self, titel: alloc::string::String) -> Self {
+        self.titel = Some(titel);
+        self
     }
 }
 
@@ -84,6 +106,22 @@ pub trait App: Send {
     /// Läuft wie nachricht() unter dem MANAGER-Lock (gleiche Regeln).
     fn taste(&mut self, taste: pc_keyboard::DecodedKey) -> Option<AppReaktion> {
         let _ = taste;
+        None
+    }
+
+    /// Der Fenster-Titel beim Start (Standard: der App-Name).
+    /// Später ändern: AppReaktion.titel / mit_titel.
+    fn fenster_titel(&self) -> alloc::string::String {
+        alloc::string::String::from(self.name())
+    }
+
+    /// Der Nutzer will das Fenster schließen (X-Knopf). None = sofort
+    /// schließen (Standard); Some(reaktion) = NICHT schließen, die
+    /// Reaktion umsetzen — z. B. den Nachfrage-Dialog für
+    /// ungespeicherte Änderungen aufbauen (SpeedText). Die App
+    /// schließt dann später selbst über AppReaktion.schliessen.
+    /// Läuft wie nachricht() unter dem MANAGER-Lock (gleiche Regeln).
+    fn schliessen_abfragen(&mut self) -> Option<AppReaktion> {
         None
     }
 }

@@ -31,6 +31,8 @@
 // als NachLock-Wert nach draußen.
 
 pub mod app;
+pub mod dialog;
+pub mod texteditor;
 pub mod widgets;
 
 pub use app::{App, AppFenster, AppReaktion};

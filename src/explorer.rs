@@ -516,14 +516,12 @@ impl ExplorerApp {
                 AppReaktion::neu_aufbauen()
             }
             NodeTyp::Datei => {
-                // Betrachter öffnen — NACH dem Lock (danach trägt den
-                // Pfad per move in die Box, siehe AppReaktion-Doku):
+                // SpeedText öffnen — NACH dem Lock (danach trägt den
+                // Pfad per move in die Box, siehe AppReaktion-Doku).
+                // Der frühere Nur-Lese-Betrachter ist Geschichte:
+                // Doppelklick auf eine Datei heißt jetzt BEARBEITEN.
                 AppReaktion::danach(move || {
-                    crate::fenster::app_starten(
-                        alloc::boxed::Box::new(BetrachterApp::neu(&pfad)),
-                        540,
-                        380,
-                    );
+                    crate::speedtext::starten_mit(&pfad);
                 })
             }
         }
@@ -825,58 +823,6 @@ impl App for ExplorerApp {
             // Alles andere an die Widgets (Pfeile/Enter -> Dateiliste).
             _ => None,
         }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Der minimale Text-Betrachter (Doppelklick auf eine Datei) — der
-// echte Editor kommt später; hier reicht eine ScrollListe mit Zeilen.
-// ---------------------------------------------------------------------------
-
-pub struct BetrachterApp {
-    pfad: String,
-    zeilen: Vec<String>,
-}
-
-impl BetrachterApp {
-    /// Liest die Datei EINMAL (läuft beim App-Start, außerhalb des
-    /// MANAGER-Locks — die danach-Aktion des Explorers ruft uns).
-    pub fn neu(pfad: &str) -> Self {
-        let zeilen = match fs::mit_fs(|f| f.lesen(pfad)) {
-            Ok(bytes) => {
-                let text = String::from_utf8_lossy(&bytes).into_owned();
-                let mut zeilen: Vec<String> = text.lines().map(String::from).collect();
-                if zeilen.is_empty() {
-                    zeilen.push(String::from("(leere Datei)"));
-                }
-                zeilen
-            }
-            Err(f) => vec![format!("Fehler beim Lesen: {}", f.meldung())],
-        };
-        BetrachterApp { pfad: String::from(pfad), zeilen }
-    }
-}
-
-impl App for BetrachterApp {
-    fn name(&self) -> &'static str {
-        "Betrachter"
-    }
-
-    fn icon(&self) -> &'static Icon {
-        &crate::grafik::ICON_DATEI
-    }
-
-    fn aufbau(&self) -> Box<dyn Widget> {
-        let eintraege = self
-            .zeilen
-            .iter()
-            .map(|zeile| ListenEintrag { icon: None, text: zeile.clone() })
-            .collect();
-        Box::new(vbox(vec![
-            Box::new(Label::sekundaer(&self.pfad)) as Box<dyn Widget>,
-            Box::new(ScrollListe::neu(eintraege, 0, 0)),
-            Box::new(Label::sekundaer(&format!("{} Zeilen (nur Lesen)", self.zeilen.len()))),
-        ]))
     }
 }
 

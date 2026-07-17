@@ -34,6 +34,16 @@ die Wahl überlebt das Schließen der App.*
 mit 60-Sekunden-Graph, Heap-Belegung und alle Executor-Tasks mit Namen,
 Laufzeit und Polls/s — Demo-Tasks lassen sich kooperativ beenden.*
 
+![Terminal-Sitzungen](docs/screenshots/terminals.png)
+*Das Ein-Terminal-Limit ist Geschichte: Jedes Terminal-Fenster ist eine eigene
+Shell-SITZUNG mit eigenem Task — hier läuft `dir` in Terminal 2, während
+Terminal 1 unberührt dahinter wartet.*
+
+![SpeedText](docs/screenshots/speedtext.png)
+*SpeedText, der Texteditor: Zeilennummern, Cursor-Navigation, Statuszeile
+(Zeile:Spalte, Zeichen, Änderungs-Status), Titel-Stern bei ungespeicherten
+Änderungen, Datei-Dialoge und Schließen-Nachfrage — alles übers VFS.*
+
 ![Widget-Galerie](docs/screenshots/widget-galerie.png)
 *Das UI-Toolkit (ui-Modul): Buttons, Checkbox, Textfeld (ZeilenEditor + blinkender
 Cursor), ScrollListe mit Scrollbalken — das Fundament für Explorer & Co.*
@@ -83,9 +93,14 @@ Cursor), ScrollListe mit Scrollbalken — das Fundament für Explorer & Co.*
   Textfeld, ScrollListe & Co. — darauf laufen der Explorer (Navigation,
   Dateioperationen, Papierkorb, Kontextmenüs, Strg+C/X/V), die
   Einstellungen-App (Theme/Akzent/Hintergrund, Skalierung,
-  Cursor-Blinken, Uhr-Format/-Offset, System-Info) und der
+  Cursor-Blinken, Uhr-Format/-Offset, System-Info), der
   Task-Manager (benannte Executor-Tasks, echte CPU-Auslastung per
-  TSC mit Live-Graph, Heap-Anzeige, kooperatives Task-Beenden)
+  TSC mit Live-Graph, Heap-Anzeige, kooperatives Task-Beenden) und
+  SpeedText (mehrzeiliger Editor mit Zeilennummern, Datei-Dialogen
+  und Schließen-Nachfrage)
+- **Terminal-Sitzungen:** beliebig viele Terminal-Fenster, jedes mit
+  eigenem Shell-Task; Kernel-Log geht ans Haupt-Terminal (gepuffert,
+  wenn keins offen ist)
 - **Einstellungs-Persistenz:** typisierter Schlüssel=Wert-Store, der
   sofort nach /system/einstellungen.txt schreibt und beim Boot lädt —
   die API-Naht, über die später das Disk-Dateisystem echte
@@ -170,6 +185,7 @@ src/
 ├── explorer.rs      Explorer-App: Navigation, Dateioperationen, Papierkorb
 ├── einstellungen.rs Einstellungs-Store (VFS-persistent) + Einstellungen-App
 ├── taskmanager.rs   Task-Manager-App: CPU-Graph, Task-Tabelle, Beenden
+├── speedtext.rs     SpeedText-Editor: Datei-Dialoge, Schließen-Nachfrage
 ├── ablage.rs        Globale Zwischenablage (Strg+C/X/V)
 ├── maus.rs          PS/2-Maus: Init, Paket-Parsing, Cursor-Overlay
 ├── serial.rs        Serielle Ausgabe (COM1), parallel zum Bildschirm
@@ -180,7 +196,7 @@ src/
 ├── zeit.rs          Zeit-API: TSC-Mikrosekunden, warte_ms, Datum
 ├── rtc.rs           CMOS-Echtzeituhr (einmaliges Lesen beim Boot)
 ├── task/            Async-Multitasking: Task, Executor, Tastatur-Stream
-├── shell/           SpeedShell: ZeilenEditor + Befehls-Registry
+├── shell/           SpeedShell: Sitzungen, ZeilenEditor, Befehls-Registry
 └── fs/              VFS-Trait + RamFs
 boot/                Host-Runner: baut das UEFI-Disk-Image, startet QEMU
 tests/               Integrationstests (booten einzeln in QEMU)
@@ -204,7 +220,8 @@ docs/                Migrationsplan bootloader 0.9 -> 0.11, Screenshots
 - [x] **UI-Toolkit + erste Apps:** retained Widget-Baum, Explorer
       (Dateioperationen, Papierkorb, Kontextmenüs, Zwischenablage),
       Einstellungen-App mit persistentem Einstellungs-Store (VFS),
-      Task-Manager (benannte Tasks, CPU-Metrik, kooperatives Beenden)
+      Task-Manager (benannte Tasks, CPU-Metrik, kooperatives Beenden),
+      SpeedText-Editor + Terminal-Sitzungen (eine Shell pro Fenster)
 - [ ] **Persistenz:** Block-Device-Treiber + Disk-Dateisystem (VFS und
       Einstellungs-Store sind bereit)
 - [ ] **User Space:** Ring-3-Prozesse, Syscalls, präemptiver Scheduler

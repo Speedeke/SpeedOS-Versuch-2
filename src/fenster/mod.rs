@@ -112,8 +112,11 @@ impl Zeichenflaeche for FensterPuffer {
 
 /// Die Inhalte, die ein Fenster darstellen kann.
 pub enum Inhalt {
-    /// Die SpeedShell als Fenster (konsole::_print leitet hierher um).
-    Terminal(terminal::Terminal),
+    /// Eine SpeedShell-SITZUNG als Fenster: Das Raster plus die
+    /// Sitzungs-Id (shell::sitzung) — konsole::_print leitet die
+    /// Ausgabe der passenden Sitzung hierher um, der Eingabe-Router
+    /// wirft Tasten in die Sitzungs-Queue des fokussierten Terminals.
+    Terminal { term: terminal::Terminal, sitzung: u64 },
     /// Ein nackter Widget-Baum mit fn(u32)-Handler (zustandslose
     /// Fälle); zustandsbehaftete Apps nehmen Inhalt::App.
     Ui(crate::ui::UiFenster),
@@ -791,21 +794,18 @@ impl FensterManager {
     // ----- Terminal (die SpeedShell als Fenster) -----
 
     /// Index des (einzigen) Terminal-Fensters.
-    fn terminal_index(&self) -> Option<usize> {
-        self.fenster
-            .iter()
-            .position(|f| matches!(f.inhalt, Inhalt::Terminal(_)))
+    /// Der Fenster-Index eines Terminals nach Sitzungs-Id.
+    fn terminal_index(&self, sitzung: u64) -> Option<usize> {
+        self.fenster.iter().position(
+            |f| matches!(f.inhalt, Inhalt::Terminal { sitzung: s, .. } if s == sitzung),
+        )
     }
 
-    /// Öffnet das Terminal-Fenster oder holt ein vorhandenes nach
-    /// vorn. Liefert true, wenn es NEU erstellt wurde.
-    fn terminal_oeffnen(&mut self) -> bool {
-        if let Some(index) = self.terminal_index() {
-            let id = self.fenster[index].id;
-            self.fenster[index].minimiert = false;
-            self.fokussieren_und_heben(id);
-            return false;
-        }
+    /// Öffnet ein NEUES Terminal-Fenster mit eigener Shell-Sitzung
+    /// (das Ein-Terminal-Limit ist Geschichte) und liefert die
+    /// Sitzungs-Id. Das erste Terminal wird HAUPT-Terminal
+    /// (Kernel-Log-Ziel) und bekommt den gepufferten Log nachgereicht.
+    fn terminal_oeffnen(&mut self) -> u64 {
         // Wunschgröße: 80x24 Zellen — auf kleinen Schirmen weniger.
         let zeichen_breite = get_raster_width(FontWeight::Regular, metrik().schrift_ui);
         let breite = (80 * zeichen_breite)
@@ -814,27 +814,55 @@ impl FensterManager {
         let hoehe = (24 * metrik().zeilen_hoehe as usize)
             .min((self.bildschirm_hoehe as usize).saturating_sub(160))
             .max(metrik().min_fenster_hoehe);
-        let x = (self.bildschirm_breite - breite as i32) / 2;
-        let y = ((self.taskleiste_y() - metrik().titel_hoehe - hoehe as i32) / 2).max(20);
+        // Weitere Terminals leicht versetzt (Kaskade), damit sie
+        // nicht deckungsgleich übereinander liegen.
+        let versatz = (self.fenster.len() as i32 % 5) * 40;
+        let x = ((self.bildschirm_breite - breite as i32) / 2 + versatz)
+            .min(self.bildschirm_breite - breite as i32);
+        let y = (((self.taskleiste_y() - metrik().titel_hoehe - hoehe as i32) / 2).max(20)
+            + versatz)
+            .min(self.taskleiste_y() - metrik().titel_hoehe - hoehe as i32);
         let term = terminal::Terminal::neu(
             breite / zeichen_breite,
             hoehe / metrik().zeilen_hoehe as usize,
             theme::aktuell().terminal_hintergrund,
         );
-        self.fenster_erstellen("Terminal", x, y, breite, hoehe, Inhalt::Terminal(term));
-        true
+        let sitzung = crate::shell::sitzung::neu_registrieren();
+        self.fenster_erstellen(
+            &format!("Terminal {}", sitzung),
+            x,
+            y,
+            breite,
+            hoehe,
+            Inhalt::Terminal { term, sitzung },
+        );
+        // Das erste offene Terminal wird Kernel-Log-Ziel — und holt
+        // den in terminalloser Zeit gepufferten Log nach.
+        if crate::shell::sitzung::haupt() == 0 {
+            crate::shell::sitzung::haupt_setzen(sitzung);
+            for (text, vg, hg) in crate::shell::sitzung::log_abholen() {
+                let _ = self.terminal_schreiben(sitzung, format_args!("{}", text), vg, hg);
+            }
+        }
+        sitzung
     }
 
-    /// Schreibt formatierten Text ins Terminal-Fenster (Umleitung von
-    /// konsole::_print im Desktop-Modus). false = kein Terminal offen.
-    /// Rendert NICHT sofort — nur inhalt_neu setzen, der Compositor
-    /// bündelt das Rendern pro Frame.
-    fn terminal_schreiben(&mut self, args: core::fmt::Arguments, vg: Farbe, hg: Farbe) -> bool {
-        let index = match self.terminal_index() {
+    /// Schreibt formatierten Text ins Terminal-Fenster der Sitzung
+    /// (Umleitung von konsole::_print im Desktop-Modus). false =
+    /// kein Terminal dieser Sitzung offen. Rendert NICHT sofort —
+    /// nur inhalt_neu setzen, der Compositor bündelt pro Frame.
+    fn terminal_schreiben(
+        &mut self,
+        sitzung: u64,
+        args: core::fmt::Arguments,
+        vg: Farbe,
+        hg: Farbe,
+    ) -> bool {
+        let index = match self.terminal_index(sitzung) {
             Some(index) => index,
             None => return false,
         };
-        if let Inhalt::Terminal(term) = &mut self.fenster[index].inhalt {
+        if let Inhalt::Terminal { term, .. } = &mut self.fenster[index].inhalt {
             struct TerminalZeichner<'a> {
                 term: &'a mut terminal::Terminal,
                 vg: Farbe,
@@ -856,10 +884,10 @@ impl FensterManager {
         true
     }
 
-    /// Leert das Terminal-Raster (clear-Befehl im Desktop-Modus).
-    fn terminal_leeren(&mut self) {
-        if let Some(index) = self.terminal_index() {
-            if let Inhalt::Terminal(term) = &mut self.fenster[index].inhalt {
+    /// Leert das Terminal-Raster einer Sitzung (clear-Befehl).
+    fn terminal_leeren(&mut self, sitzung: u64) {
+        if let Some(index) = self.terminal_index(sitzung) {
+            if let Inhalt::Terminal { term, .. } = &mut self.fenster[index].inhalt {
                 term.leeren();
             }
             self.fenster[index].inhalt_neu = true;
@@ -1167,8 +1195,10 @@ impl FensterManager {
         self.app_reaktion(index, app_reaktion)
     }
 
-    /// Setzt eine AppReaktion um: Baum neu aufbauen, Kontextmenü am
-    /// Cursor öffnen, danach-Aktion als NachLock nach draußen.
+    /// Setzt eine AppReaktion um: Baum neu aufbauen, Fenster-Titel
+    /// aktualisieren (SpeedText: "name.txt *"), Kontextmenü am Cursor
+    /// öffnen, Fenster auf App-Wunsch schließen (Nachfrage-Dialog:
+    /// "Verwerfen"), danach-Aktion als NachLock nach draußen.
     fn app_reaktion(&mut self, index: usize, app_reaktion: crate::ui::AppReaktion) -> NachLock {
         if app_reaktion.neu_aufbauen {
             if let Inhalt::App(app_fenster) = &mut self.fenster[index].inhalt {
@@ -1177,14 +1207,25 @@ impl FensterManager {
             self.fenster[index].inhalt_neu = true;
             self.fenster[index].dirty = true;
         }
+        if let Some(titel) = app_reaktion.titel {
+            if self.fenster[index].titel != titel {
+                self.fenster[index].titel = titel;
+                // Die Titelleiste malt der Compositor — Fläche melden:
+                self.fenster[index].dirty = true;
+            }
+        }
         if let Some(eintraege) = app_reaktion.kontextmenue {
             let fenster_id = self.fenster[index].id;
             self.kontextmenue_oeffnen(fenster_id, eintraege);
         }
-        match app_reaktion.danach {
+        let nach = match app_reaktion.danach {
             Some(aktion) => NachLock::Einmal(aktion),
             None => NachLock::Keine,
+        };
+        if app_reaktion.schliessen {
+            self.fenster_schliessen(index);
         }
+        nach
     }
 
     /// Rechtsklick: fokussiert das Fenster und reicht das Ereignis
@@ -1237,8 +1278,7 @@ impl FensterManager {
 
         if self.fenster[index].in_titelzeile(px, py) {
             if let Some(knopf) = self.fenster[index].knopf_bei(px, py) {
-                self.knopf_aktion(id, knopf);
-                return NachLock::Keine;
+                return self.knopf_aktion(id, knopf);
             }
             // Maximiertes Fenster beim Ziehen wiederherstellen:
             if self.fenster[index].vorher.is_some() {
@@ -1420,7 +1460,7 @@ impl FensterManager {
         }
     }
 
-    fn knopf_aktion(&mut self, id: FensterId, knopf: Knopf) {
+    fn knopf_aktion(&mut self, id: FensterId, knopf: Knopf) -> NachLock {
         match knopf {
             Knopf::Minimieren => {
                 if let Some(index) = self.index_von(id) {
@@ -1442,14 +1482,50 @@ impl FensterManager {
             }
             Knopf::Schliessen => {
                 if let Some(index) = self.index_von(id) {
-                    // Fenster (und sein Puffer-Vec) wird hier gedroppt —
-                    // der Heap-Speicher geht sauber zurück.
-                    self.fenster.remove(index);
+                    // Trait-Apps dürfen das Schließen ABFANGEN
+                    // (ungespeicherte Änderungen -> Nachfrage-Dialog):
+                    // Some(reaktion) = nicht schließen, Reaktion
+                    // umsetzen (die App schließt später selbst über
+                    // AppReaktion.schliessen).
+                    let hook = match &mut self.fenster[index].inhalt {
+                        Inhalt::App(app_fenster) => app_fenster.app.schliessen_abfragen(),
+                        _ => None,
+                    };
+                    match hook {
+                        Some(reaktion) => return self.app_reaktion(index, reaktion),
+                        None => self.fenster_schliessen(index),
+                    }
                 }
-                self.fokus_neu_bestimmen();
-                self.alles_dirty = true;
             }
         }
+        NachLock::Keine
+    }
+
+    /// Schließt ein Fenster ENDGÜLTIG: Terminal-Fenster tragen ihre
+    /// Shell-Sitzung aus (der Shell-Task endet beim nächsten
+    /// Aufwachen sauber; das Haupt-Terminal vererbt seine Rolle an
+    /// das nächste offene Terminal). Fenster + Puffer-Vec werden
+    /// gedroppt — der Heap-Speicher geht sauber zurück.
+    fn fenster_schliessen(&mut self, index: usize) {
+        if let Inhalt::Terminal { sitzung, .. } = self.fenster[index].inhalt {
+            crate::shell::sitzung::austragen(sitzung);
+            self.fenster.remove(index);
+            // Haupt-Terminal geschlossen? Erstes verbliebenes
+            // Terminal übernimmt das Kernel-Log.
+            if crate::shell::sitzung::haupt() == 0 {
+                let nachfolger = self.fenster.iter().find_map(|f| match f.inhalt {
+                    Inhalt::Terminal { sitzung, .. } => Some(sitzung),
+                    _ => None,
+                });
+                if let Some(sitzung) = nachfolger {
+                    crate::shell::sitzung::haupt_setzen(sitzung);
+                }
+            }
+        } else {
+            self.fenster.remove(index);
+        }
+        self.fokus_neu_bestimmen();
+        self.alles_dirty = true;
     }
 
     fn maximieren(&mut self, id: FensterId) {
@@ -1968,7 +2044,7 @@ fn fenster_komponieren<F: Zeichenflaeche>(z: &mut Zeichner<'_, F>, fenster: &Fen
 /// Taskleiste und Alt+Tab zeigen dasselbe).
 fn inhalt_icon(inhalt: &Inhalt) -> &'static crate::grafik::Icon {
     match inhalt {
-        Inhalt::Terminal(_) => &crate::grafik::ICON_TERMINAL,
+        Inhalt::Terminal { .. } => &crate::grafik::ICON_TERMINAL,
         Inhalt::Ui(ui) => ui.icon,
         Inhalt::App(app_fenster) => app_fenster.ui.icon,
         Inhalt::Uhr => &crate::grafik::ICON_UHR,
@@ -2044,7 +2120,7 @@ fn inhalt_zeichnen(fenster: &mut Fenster) {
     // Terminal: Rastergröße an die Fenstergröße anpassen, dann rendern.
     // (&mut fenster.inhalt und &mut fenster.puffer sind verschiedene
     // Felder — der Borrow-Checker erlaubt beides gleichzeitig.)
-    if let Inhalt::Terminal(term) = &mut fenster.inhalt {
+    if let Inhalt::Terminal { term, .. } = &mut fenster.inhalt {
         let zeichen_breite = get_raster_width(FontWeight::Regular, metrik().schrift_ui);
         let spalten = (fenster.puffer.breite / zeichen_breite).max(1);
         let zeilen = (fenster.puffer.hoehe / metrik().zeilen_hoehe as usize).max(1);
@@ -2064,7 +2140,7 @@ fn inhalt_zeichnen(fenster: &mut Fenster) {
 
     match &fenster.inhalt {
         // Oben schon behandelt (frühe returns):
-        Inhalt::Terminal(_) | Inhalt::Ui(_) | Inhalt::App(_) => {}
+        Inhalt::Terminal { .. } | Inhalt::Ui(_) | Inhalt::App(_) => {}
         Inhalt::Uhr => {
             let ticks = zeit::ticks();
             let ms = zeit::ms_seit_boot();
@@ -2201,41 +2277,39 @@ pub fn startmenue_taste(taste: DecodedKey) {
     nach_lock_ausfuehren(nach);
 }
 
-// ----- Terminal (die SpeedShell als Fenster) -----
+// ----- Terminal (SpeedShell-Sitzungen als Fenster) -----
 
-/// Öffnet das Terminal-Fenster (oder holt es nach vorn).
-/// Liefert true, wenn es NEU erstellt wurde — dann sollte der
-/// Aufrufer per shell::prompt_nachholen() einen Prompt hineindrucken.
-pub fn terminal_oeffnen() -> bool {
-    mit_manager(|m| m.terminal_oeffnen()).unwrap_or(false)
+/// Öffnet ein NEUES Terminal-Fenster mit eigener Shell-Sitzung und
+/// liefert deren Id (None = Desktop läuft nicht). Der Aufrufer
+/// spawnt dann den Shell-Task (shell::sitzung_laufen) — siehe
+/// apps::terminal_starten.
+pub fn terminal_oeffnen() -> Option<u64> {
+    mit_manager(|m| m.terminal_oeffnen())
 }
 
-/// Existiert (irgendwo, auch minimiert) ein Terminal-Fenster?
-pub fn terminal_vorhanden() -> bool {
-    mit_manager(|m| m.terminal_index().is_some()).unwrap_or(false)
-}
-
-/// Ist das fokussierte Fenster das Terminal? Dann verarbeitet die
-/// Shell Tasten selbst (ZeilenEditor), statt sie ans Fenster zu geben.
-pub fn terminal_fokussiert() -> bool {
+/// Die Sitzungs-Id des fokussierten Terminal-Fensters (None = kein
+/// Terminal fokussiert). Der Eingabe-Router wirft die Tasten dann in
+/// genau diese Sitzungs-Queue.
+pub fn terminal_fokus_sitzung() -> Option<u64> {
     mit_manager(|m| {
-        m.fokus
-            .and_then(|id| m.index_von(id))
-            .map(|i| matches!(m.fenster[i].inhalt, Inhalt::Terminal(_)) && !m.fenster[i].minimiert)
-            .unwrap_or(false)
+        m.fokus.and_then(|id| m.index_von(id)).and_then(|i| match m.fenster[i].inhalt {
+            Inhalt::Terminal { sitzung, .. } if !m.fenster[i].minimiert => Some(sitzung),
+            _ => None,
+        })
     })
-    .unwrap_or(false)
+    .flatten()
 }
 
 /// Umleitung von konsole::_print im Desktop-Modus: formatierten Text
-/// ins Terminal-Fenster schreiben. false = kein Terminal offen.
-pub fn terminal_schreiben(args: core::fmt::Arguments, vg: Farbe, hg: Farbe) -> bool {
-    mit_manager(|m| m.terminal_schreiben(args, vg, hg)).unwrap_or(false)
+/// ins Terminal-Fenster der SITZUNG schreiben. false = kein Terminal
+/// dieser Sitzung offen (Aufrufer puffert Kernel-Log dann selbst).
+pub fn terminal_schreiben(sitzung: u64, args: core::fmt::Arguments, vg: Farbe, hg: Farbe) -> bool {
+    mit_manager(|m| m.terminal_schreiben(sitzung, args, vg, hg)).unwrap_or(false)
 }
 
-/// Leert das Terminal (clear-Befehl im Desktop-Modus).
-pub fn terminal_leeren() {
-    let _ = mit_manager(|m| m.terminal_leeren());
+/// Leert das Terminal der Sitzung (clear-Befehl im Desktop-Modus).
+pub fn terminal_leeren(sitzung: u64) {
+    let _ = mit_manager(|m| m.terminal_leeren(sitzung));
 }
 
 // ----- Schnittstelle für die App-Registry (apps.rs) -----
@@ -2253,8 +2327,8 @@ pub fn app_fenster_oeffnen(titel: &str, breite: usize, hoehe: usize, inhalt: Inh
 /// App-Registry zum App-Trait: Titel und Icon liefert die App selbst.
 pub fn app_starten(app: alloc::boxed::Box<dyn crate::ui::App>, breite: usize, hoehe: usize) {
     let app_fenster = crate::ui::AppFenster::neu(app);
-    let titel = app_fenster.app.name();
-    app_fenster_oeffnen(titel, breite, hoehe, Inhalt::App(app_fenster));
+    let titel = app_fenster.app.fenster_titel();
+    app_fenster_oeffnen(&titel, breite, hoehe, Inhalt::App(app_fenster));
 }
 
 /// Zeichnet ALLE Fenster-Inhalte neu, erneuert den Hintergrund-Cache
@@ -2633,11 +2707,11 @@ mod tests {
 
         let runde = |manager: &mut FensterManager| {
             let id = manager.fenster_erstellen("Leck-Test", 50, 50, 300, 200, Inhalt::Uhr);
-            manager.knopf_aktion(id, Knopf::Schliessen);
-            manager.terminal_oeffnen();
-            let terminal_id = manager.fenster[manager.terminal_index().unwrap()].id;
-            manager.terminal_schreiben(format_args!("ein paar Zeichen\n"), Farbe::neu(1, 1, 1), Farbe::neu(0, 0, 0));
-            manager.knopf_aktion(terminal_id, Knopf::Schliessen);
+            let _ = manager.knopf_aktion(id, Knopf::Schliessen);
+            let sitzung = manager.terminal_oeffnen();
+            let terminal_id = manager.fenster[manager.terminal_index(sitzung).unwrap()].id;
+            manager.terminal_schreiben(sitzung, format_args!("ein paar Zeichen\n"), Farbe::neu(1, 1, 1), Farbe::neu(0, 0, 0));
+            let _ = manager.knopf_aktion(terminal_id, Knopf::Schliessen);
         };
 
         // Aufwärmen: Vec-Kapazitäten, Allocator-Blocklisten usw.
@@ -2773,20 +2847,27 @@ mod tests {
         });
     }
 
-    /// Terminal: einmal öffnen, danach nur noch fokussieren; Schreiben
-    /// landet im Raster, inhalte_rendern setzt das Render-Flag zurück.
+    /// Terminal-SITZUNGEN: Jedes Öffnen erzeugt ein eigenes Fenster
+    /// mit eigener Sitzung; Schreiben landet im Raster der RICHTIGEN
+    /// Sitzung; Schließen trägt die Sitzung aus (beendet-Flag) und
+    /// vererbt die Haupt-Rolle ans verbliebene Terminal.
     #[test_case]
-    fn test_terminal_oeffnen_und_schreiben() {
+    fn test_terminal_sitzungen_unabhaengig() {
+        let haupt_vorher = crate::shell::sitzung::haupt();
+        crate::shell::sitzung::haupt_setzen(0);
         let mut manager = FensterManager::neu(1000, 800);
-        assert!(manager.terminal_oeffnen()); // neu erstellt
-        assert!(!manager.terminal_oeffnen()); // schon da -> nur fokussiert
-        let index = manager.terminal_index().unwrap();
+        let erste = manager.terminal_oeffnen();
+        let zweite = manager.terminal_oeffnen();
+        assert_ne!(erste, zweite); // ZWEI unabhängige Sitzungen
+        assert_eq!(crate::shell::sitzung::haupt(), erste); // erstes = Haupt
 
         let vg = Farbe::neu(200, 200, 200);
         let hg = Farbe::neu(0, 0, 0);
-        assert!(manager.terminal_schreiben(format_args!("hi"), vg, hg));
-        if let Inhalt::Terminal(term) = &manager.fenster[index].inhalt {
-            assert_eq!(term.zelle(0, 0).zeichen, 'h');
+        assert!(manager.terminal_schreiben(erste, format_args!("hi"), vg, hg));
+        assert!(manager.terminal_schreiben(zweite, format_args!("du"), vg, hg));
+        let index = manager.terminal_index(erste).unwrap();
+        if let Inhalt::Terminal { term, .. } = &manager.fenster[index].inhalt {
+            assert_eq!(term.zelle(0, 0).zeichen, 'h'); // NICHT 'd'
             assert_eq!(term.zelle(1, 0).zeichen, 'i');
         } else {
             panic!("Terminal-Fenster hat keinen Terminal-Inhalt");
@@ -2795,9 +2876,21 @@ mod tests {
         manager.inhalte_rendern();
         assert!(!manager.fenster[index].inhalt_neu);
 
-        // Ohne Terminal schlägt das Schreiben "sauber" fehl:
-        let mut leer = FensterManager::neu(1000, 800);
-        assert!(!leer.terminal_schreiben(format_args!("x"), vg, hg));
+        // Haupt-Terminal schließen: Sitzung wird beendet, das zweite
+        // Terminal erbt die Haupt-Rolle (Kernel-Log-Ziel).
+        let sitzung_eins = crate::shell::sitzung::holen(erste).unwrap();
+        let index = manager.terminal_index(erste).unwrap();
+        manager.fenster_schliessen(index);
+        assert!(sitzung_eins.ist_beendet());
+        assert!(crate::shell::sitzung::holen(erste).is_none());
+        assert_eq!(crate::shell::sitzung::haupt(), zweite);
+        // Schreiben an die tote Sitzung schlägt "sauber" fehl:
+        assert!(!manager.terminal_schreiben(erste, format_args!("x"), vg, hg));
+
+        // Aufräumen (globale Sitzungs-Registry nicht vermüllen):
+        let index = manager.terminal_index(zweite).unwrap();
+        manager.fenster_schliessen(index);
+        crate::shell::sitzung::haupt_setzen(haupt_vorher);
     }
 
     /// Startmenü (Widget-Verbund): Suchtext filtert live, Enter

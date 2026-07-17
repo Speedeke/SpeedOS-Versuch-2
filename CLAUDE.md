@@ -302,20 +302,42 @@
   (VOR den Widgets, App puffert selbst); fokus_initial gibt der
   ersten fokussierbaren Liste die Pfeiltasten. Mehrere Fenster einer
   App = mehrere App-Instanzen (app_starten baut immer neu).
-- **Terminal-Fenster / Konsole-in-Fenster (Juli 2026):** SpeedOS bootet
-  in den Desktop (main.rs ruft desktop_starten VOR dem Executor; die
-  Shell druckt ihr Banner dann ins Terminal). Im Desktop-Modus leitet
-  `konsole::_print` JEDE print!-Ausgabe ins Terminal-Fenster um
-  (`fenster/terminal.rs` = reines, unit-getestetes Text-Raster mit
-  Zellen/Cursor/Scrolling; Resize behält die UNTEREN Zeilen). Die
-  serielle Doppel-Ausgabe bleibt unberührt. Gerendert wird GEBÜNDELT:
-  terminal_schreiben setzt nur `inhalt_neu`, der Compositor ruft einmal
-  pro Frame `inhalte_rendern()`. Tastatur-Routing: Ist das Terminal
-  fokussiert, verarbeitet die Shell die Taste SELBST (ZeilenEditor),
-  sonst geht sie ans Fenster; Startmenü-Tasten davor. clear leert das
-  Raster, der Konsolen-Cursor bleibt im Desktop-Modus aus (Terminal
-  zeichnet seinen eigenen). `shell::prompt_nachholen()` (cwd-Spiegel)
-  druckt den Prompt, wenn die Terminal-App ein frisches Fenster öffnet.
+- **Terminal-SITZUNGEN (Juli 2026, löst das Ein-Terminal-Limit ab):**
+  `shell/sitzung.rs`. Jedes Terminal-Fenster = eigene Sitzungs-Id +
+  EIGENER Shell-Task (shell::sitzung_laufen; apps::terminal_starten
+  spawnt ihn nach fenster::terminal_oeffnen() -> Option<Sitzungs-Id>).
+  Der EINGABE-ROUTER (shell::eingabe_router, einziger KeyStream-
+  Leser) routet: Startmenü/ESC wie gehabt, sonst Tasten in die
+  lock-freie Queue der fokussierten Sitzung (terminal_fokus_sitzung);
+  im Vollbild-Modus an die HAUPT-Sitzung. AUSGABE: Der Shell-Task
+  legt AUSGABE_SITZUNG um jede synchrone Verarbeitung (KEIN await
+  dazwischen — deshalb race-frei); konsole::_print schreibt an
+  ausgabe_ziel() (Ausgabe-Sitzung, sonst Haupt-Terminal = Kernel-
+  Log). Ohne offenes Terminal wird Kernel-Log GEPUFFERT und beim
+  nächsten terminal_oeffnen nachgereicht; Ausgaben toter Sitzungen
+  verfallen. SCHLIESSEN: fenster_schliessen trägt die Sitzung aus
+  (beendet-Flag + Waker) -> naechste_taste liefert None -> Task endet
+  sauber; das Haupt-Terminal vererbt seine Rolle ans nächste.
+  `fenster/terminal.rs` bleibt das reine Text-Raster; gerendert wird
+  weiter GEBÜNDELT (inhalt_neu + inhalte_rendern pro Frame).
+  prompt_nachholen() nutzt nur noch der Vollbild-Pfad (ESC/Demo-Ende,
+  cwd-Spiegel der Haupt-Sitzung).
+- **SpeedText & Dialog-Bausteine (Juli 2026):** `src/speedtext.rs` +
+  `ui/texteditor.rs` + `ui/dialog.rs`. Der TextPuffer ist ein
+  Zeilen-Vec (BEWUSST kein Rope — KiB-Dateien, Begründung im Code)
+  mit Zeichen-Spalten (chars, nie Bytes!); das Editor-Widget teilt
+  ihn per Arc<Mutex> (Blatt-Lock) mit der App, damit der Text die
+  ständigen Neu-Aufbauten (Statuszeile!) überlebt — DAS Muster für
+  großen, heißen Widget-Zustand. Dialoge ERSETZEN den Fenster-Inhalt
+  über App-Zustand (kein Overlay): dialog::bestaetigung() = generische
+  Frage+Knöpfe; dialog::DateiDialog = Zustands-Baustein (Ordner-Liste
+  + selbst gepufferte Pfad-Eingabe via App::taste-Hook, Nachrichten
+  in einem Id-Fenster ab Basis, DIALOG_ID_BREITE). Neue App-Trait-
+  Fähigkeiten: fenster_titel() (Start-Titel), AppReaktion.titel
+  (Titel ändern -> "name.txt *"), AppReaktion.schliessen (Fenster
+  aus der App schließen) und App::schliessen_abfragen() (X-Knopf
+  abfangen -> Nachfrage-Dialog; None = sofort zu). Explorer-
+  Doppelklick auf Dateien öffnet SpeedText (Betrachter entfernt).
 - **Deadlock-Regeln:** (1) Ausgabe-Locks (WRITER, SERIAL1) werden nur mit
   deaktivierten Interrupts gehalten (`without_interrupts` in den _print-
   Funktionen). (2) Interrupt-Handler sind minimal: nie blockieren, nie

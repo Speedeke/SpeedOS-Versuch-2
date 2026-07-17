@@ -5,6 +5,46 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### Hinzugefügt (Terminal-Sitzungen + SpeedText — die letzte App der Serie)
+- TERMINAL-SITZUNGEN (das Ein-Terminal-Limit fällt): Jedes
+  Terminal-Fenster trägt eine Sitzungs-Id, pro Sitzung läuft ein
+  EIGENER Shell-Task (shell/sitzung.rs). Der neue Eingabe-Router ist
+  der einzige KeyStream-Leser und wirft Tasten in die Queue der
+  fokussierten Sitzung (lock-freie Queue + AtomicWaker); die
+  _print-Umleitung wurde zum Sitzungs-Konzept: Jede Shell schreibt
+  in IHR Fenster (AUSGABE_SITZUNG um die synchrone Verarbeitung —
+  race-frei, weil kooperativ ohne await dazwischen), Kernel-Log geht
+  ans designierte HAUPT-Terminal und wird GEPUFFERT, wenn keins
+  offen ist (Nachlieferung beim nächsten Öffnen). Zwei Terminals
+  arbeiten unabhängig (tree hier, tippen dort); Schließen trägt die
+  Sitzung aus — der Shell-Task endet sauber am await-Punkt, das
+  Haupt-Terminal vererbt seine Rolle
+- src/speedtext.rs — SpeedText, der Texteditor:
+  * Mehrzeiliges Editor-Widget (ui/texteditor.rs): TextPuffer als
+    Zeilen-Vec (im Kommentar begründet: KiB-Dateien brauchen keinen
+    Rope), Einfügen/Löschen über Zeilengrenzen, Pfeile/Pos1/Ende/
+    Bild-Tasten, Klick setzt den Cursor, vertikales Scrolling mit
+    ziehbarem Balken, Zeilennummern-Spalte, blinkender Cursor. Der
+    Puffer lebt GETEILT (Arc<Mutex>) zwischen App und Widget — so
+    überlebt der Text die Widget-Neu-Aufbauten der Statuszeile
+  * Datei öffnen/speichern übers VFS: Strg+S speichert (ohne Pfad:
+    Speichern-unter-Dialog), Strg+O öffnet den neuen DATEI-DIALOG
+    (ui/dialog.rs, wiederverwendbar: Ordner-ScrollListe +
+    Pfad-Eingabe + OK/Abbrechen; Doppelklick navigiert/wählt) —
+    der Explorer-Doppelklick auf Dateien öffnet jetzt SpeedText,
+    der alte Nur-Lese-Betrachter ist Geschichte
+  * Titelleiste zeigt "name.txt * - SpeedText" (Stern = ungespeichert,
+    via neuem AppReaktion.titel); Schließen mit Änderungen fragt nach
+    (Speichern/Verwerfen/Abbrechen) über den generischen
+    BESTÄTIGUNGS-Dialog + neuen App::schliessen_abfragen-Hook und
+    AppReaktion.schliessen
+  * Statusleiste: Zeile:Spalte, Zeichenzahl, Änderungs-Status
+- Unit-Tests: TextPuffer (Einfügen/Löschen über Zeilengrenzen,
+  Umlaute, Cursor-Klemmen, Scroll-Folgen, Roundtrip), Datei-Roundtrip
+  über das Test-VFS, Datei-Dialog-Zustandsmaschine, Schließen-Dialog-
+  Logik, Terminal-Sitzungen (Unabhängigkeit, Haupt-Vererbung,
+  Lebenszyklus, Log-Puffer-Deckel)
+
 ### Hinzugefügt (Task-Manager: App + Executor-Übersicht)
 - Executor-Erweiterung (src/task/uebersicht.rs): Jeder Task bekommt
   beim Spawnen einen NAMEN, seine Id und den Startzeitpunkt; eine

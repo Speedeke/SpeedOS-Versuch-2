@@ -11,6 +11,7 @@
 
 pub mod befehle;
 pub mod editor;
+pub mod sitzung;
 
 use crate::fs::{self, NodeTyp};
 use crate::task::keyboard::KeyStream;
@@ -27,56 +28,41 @@ use pc_keyboard::{DecodedKey, KeyCode};
 /// Wie viele Befehle sich der Verlauf merkt (Pfeil hoch/runter).
 const MAX_VERLAUF: usize = 10;
 
-/// Der Shell-Task: läuft "ewig" im Executor.
-///
-/// Die Arbeitsteilung nach dem Editor-Refactoring:
-///   1. Tastatur-Event in ein abstraktes Taste-Event übersetzen,
-///   2. dem ZeilenEditor geben (der macht die ganze Eingabelogik),
-///   3. seine Reaktion auf den Bildschirm bringen,
-///   4. fertige Zeilen an die Befehls-Registry weiterreichen.
-pub async fn run() {
-    banner();
-    // Blinkenden Hardware-Cursor einschalten — ab jetzt sieht man,
-    // wo die nächste Eingabe landet.
-    konsole::cursor_aktivieren();
-
-    let registry = befehle::alle_befehle();
+/// Der EINGABE-ROUTER: der EINZIGE Leser des globalen KeyStreams.
+/// Er verteilt jede Taste an ihr Ziel — Startmenü, Fenster oder die
+/// Tasten-Queue der fokussierten Terminal-SITZUNG (seit dem
+/// Sitzungs-Konzept läuft pro Terminal-Fenster ein eigener
+/// Shell-Task, siehe sitzung_laufen). Im Vollbild-Modus (ESC) gehen
+/// die Tasten an die HAUPT-Sitzung.
+pub async fn eingabe_router() {
     let mut keys = KeyStream::new();
-    // Der Shell-Zustand: aktuelles Verzeichnis (Befehle ändern ihn).
-    let mut kontext = ShellKontext::neu();
-    // Der Editor übernimmt Eingabezeile, Verlauf und Tab-Logik.
-    let mut editor = ZeilenEditor::neu(MAX_VERLAUF);
-    let vervollstaendiger = FsVervollstaendiger;
-
-    prompt(&kontext);
     while let Some(key) = keys.next().await {
         // Desktop-Modus? ESC schließt erst das Startmenü, dann den
-        // Desktop; Tasten gehen ins offene Startmenü oder ans
-        // fokussierte Fenster (Event-Routing im FensterManager).
-        // AUSNAHME Terminal-Fenster: Dessen Tasten verarbeitet die
-        // Shell SELBST (der Code unter diesem Block) — print! landet
-        // dann automatisch im Terminal-Fenster (konsole::_print).
+        // Desktop; Tasten gehen ins offene Startmenü, in die
+        // fokussierte Terminal-Sitzung oder ans fokussierte Fenster.
         if crate::fenster::desktop_aktiv() {
-            if key == DecodedKey::Unicode('\u{1b}') {
-                if crate::fenster::startmenue_offen() {
-                    crate::fenster::startmenue_schliessen();
-                } else {
-                    crate::fenster::desktop_beenden();
-                    konsole::cursor_aktivieren();
-                    konsole::clear_screen();
-                    prompt(&kontext);
-                }
+            if key == DecodedKey::Unicode('\u{1b}')
+                && !crate::fenster::startmenue_offen()
+            {
+                crate::fenster::desktop_beenden();
+                konsole::cursor_aktivieren();
+                konsole::clear_screen();
+                prompt_nachholen();
                 continue;
             }
             if crate::fenster::startmenue_offen() {
-                crate::fenster::startmenue_taste(key);
+                if key == DecodedKey::Unicode('\u{1b}') {
+                    crate::fenster::startmenue_schliessen();
+                } else {
+                    crate::fenster::startmenue_taste(key);
+                }
                 continue;
             }
-            if !crate::fenster::terminal_fokussiert() {
-                crate::fenster::taste_event(key);
-                continue;
+            match crate::fenster::terminal_fokus_sitzung() {
+                Some(id) => sitzung::taste_einwerfen(id, key),
+                None => crate::fenster::taste_event(key),
             }
-            // Terminal fokussiert: unten normal weiterverarbeiten.
+            continue;
         }
 
         // Grafik-Demo aktiv? Dann beendet JEDE Taste sie und wir
@@ -85,10 +71,58 @@ pub async fn run() {
             crate::grafik::demo_beenden();
             konsole::cursor_aktivieren();
             konsole::clear_screen();
-            prompt(&kontext);
+            prompt_nachholen();
             continue;
         }
 
+        // Vollbild-Konsole: Die Tasten gehören der Haupt-Sitzung.
+        let haupt = sitzung::haupt();
+        if haupt != 0 {
+            sitzung::taste_einwerfen(haupt, key);
+        }
+    }
+}
+
+/// EIN Shell-Task = EINE Terminal-Sitzung: läuft, bis das Fenster
+/// geschlossen wird (naechste_taste liefert dann None).
+///
+/// Die Arbeitsteilung nach dem Editor-Refactoring:
+///   1. Tastatur-Event in ein abstraktes Taste-Event übersetzen,
+///   2. dem ZeilenEditor geben (der macht die ganze Eingabelogik),
+///   3. seine Reaktion auf den Bildschirm bringen,
+///   4. fertige Zeilen an die Befehls-Registry weiterreichen.
+///
+/// AUSGABE-KONTEXT: Um jede synchrone Verarbeitung legt der Task
+/// sitzung::ausgabe_setzen/zuruecksetzen — print! landet dadurch im
+/// EIGENEN Terminal-Fenster. Das ist race-frei, weil dazwischen kein
+/// await liegt (kooperatives Multitasking, siehe sitzung.rs).
+pub async fn sitzung_laufen(sitzungs_id: u64, mit_banner: bool) {
+    let sitzung = match sitzung::holen(sitzungs_id) {
+        Some(sitzung) => sitzung,
+        None => return,
+    };
+
+    let registry = befehle::alle_befehle();
+    // Der Shell-Zustand: aktuelles Verzeichnis (Befehle ändern ihn).
+    let mut kontext = ShellKontext::neu();
+    // Der Editor übernimmt Eingabezeile, Verlauf und Tab-Logik.
+    let mut editor = ZeilenEditor::neu(MAX_VERLAUF);
+    let vervollstaendiger = FsVervollstaendiger;
+
+    sitzung::ausgabe_setzen(sitzungs_id);
+    if mit_banner {
+        banner();
+        // Blinkenden Konsolen-Cursor einschalten (nur Vollbild aktiv).
+        konsole::cursor_aktivieren();
+    } else {
+        konsole::set_color(Color::LightCyan, Color::Black);
+        println!("SpeedShell-Sitzung {} - eigenstaendig und unabhaengig.", sitzungs_id);
+        konsole::set_color(Color::LightGray, Color::Black);
+    }
+    prompt(sitzungs_id, &kontext);
+    sitzung::ausgabe_zuruecksetzen();
+
+    while let Some(key) = sitzung::naechste_taste(&sitzung).await {
         // Schritt 1: pc_keyboard-Event -> abstraktes Taste-Event.
         let taste = match key {
             DecodedKey::Unicode('\n') | DecodedKey::Unicode('\r') => Taste::Enter,
@@ -101,6 +135,10 @@ pub async fn run() {
             // Alles andere (F-Tasten, Pfeile links/rechts, ...): ignorieren.
             _ => continue,
         };
+
+        // Ab hier gehört jede Ausgabe DIESER Sitzung (kein await
+        // bis zum Zurücksetzen — Editor und Befehle sind synchron).
+        sitzung::ausgabe_setzen(sitzungs_id);
 
         // Schritt 2 + 3: Editor fragen, Reaktion anzeigen.
         match editor.taste(taste, &kontext.aktuelles_verzeichnis, &vervollstaendiger) {
@@ -124,19 +162,14 @@ pub async fn run() {
                 if !eingabe.is_empty() {
                     befehl_ausfuehren(&registry, &mut kontext, &eingabe);
                 }
-                // Kein Prompt, wenn gerade die Grafik-Demo läuft oder
-                // der Desktop OHNE Terminal-Fenster — der würde mitten
-                // ins Bild malen. Mit Terminal landet er genau dort.
+                // Kein Prompt, wenn gerade die Grafik-Demo läuft.
                 // AUSNAHME: Der desktop-Befehl hat den Desktop GERADE
                 // gestartet — im Terminal wartet noch der alte Prompt
                 // von vorhin, ein zweiter gäbe "SpeedOS:/> SpeedOS:/>".
                 let desktop = crate::fenster::desktop_aktiv();
                 let gerade_gestartet = desktop && !desktop_vorher;
-                if !crate::grafik::demo_aktiv()
-                    && !gerade_gestartet
-                    && (!desktop || crate::fenster::terminal_vorhanden())
-                {
-                    prompt(&kontext);
+                if !crate::grafik::demo_aktiv() && !gerade_gestartet {
+                    prompt(sitzungs_id, &kontext);
                 }
             }
             Reaktion::KandidatenZeigen(kandidaten) => {
@@ -145,11 +178,16 @@ pub async fn run() {
                     print!("{}  ", kandidat);
                 }
                 println!();
-                prompt(&kontext);
+                prompt(sitzungs_id, &kontext);
                 print!("{}", editor.zeile());
             }
         }
+        sitzung::ausgabe_zuruecksetzen();
     }
+
+    // Fenster geschlossen: Der Task endet hier — der Executor räumt
+    // ihn (und den Registry-Eintrag der Task-Übersicht) sauber ab.
+    crate::serial_println!("[SHELL] Sitzung {} beendet.", sitzungs_id);
 }
 
 /// Die VFS-Anbindung der Tab-Vervollständigung: Der Editor kennt nur
@@ -185,17 +223,20 @@ pub fn befehl_ausfuehren(registry: &[Box<dyn Befehl>], kontext: &mut ShellKontex
     }
 }
 
-/// Spiegel des aktuellen Verzeichnisses für prompt_nachholen — das
-/// ECHTE cwd lebt im ShellKontext des Shell-Tasks; hier steht nur
-/// eine Kopie für Aufrufer außerhalb des Tasks (Terminal-App).
+/// Spiegel des aktuellen Verzeichnisses der HAUPT-Sitzung — für den
+/// Prompt nach dem Wechsel in die Vollbild-Konsole (ESC): Das echte
+/// cwd lebt im ShellKontext des jeweiligen Shell-Tasks.
 static CWD_SPIEGEL: spin::Mutex<String> = spin::Mutex::new(String::new());
 
 /// Gibt den Eingabe-Prompt aus — mit dem aktuellen Verzeichnis,
 /// wie man es von cmd kennt (C:\> ... bei uns: SpeedOS:/system>).
-fn prompt(kontext: &ShellKontext) {
-    x86_64::instructions::interrupts::without_interrupts(|| {
-        *CWD_SPIEGEL.lock() = kontext.aktuelles_verzeichnis.clone();
-    });
+/// Die HAUPT-Sitzung spiegelt ihr cwd für prompt_nachholen.
+fn prompt(sitzungs_id: u64, kontext: &ShellKontext) {
+    if sitzung::haupt() == sitzungs_id {
+        x86_64::instructions::interrupts::without_interrupts(|| {
+            *CWD_SPIEGEL.lock() = kontext.aktuelles_verzeichnis.clone();
+        });
+    }
     prompt_zeigen(&kontext.aktuelles_verzeichnis);
 }
 
@@ -205,10 +246,9 @@ fn prompt_zeigen(pfad: &str) {
     konsole::set_color(Color::LightGray, Color::Black);
 }
 
-/// Druckt den Prompt "von außen" nach — z. B. wenn die Terminal-App
-/// ein FRISCHES Terminal-Fenster geöffnet hat, während die Shell
-/// gerade auf Tasten wartet (sie würde sonst erst nach dem nächsten
-/// Enter wieder einen Prompt zeigen).
+/// Druckt den Prompt der Haupt-Sitzung "von außen" nach — nach dem
+/// Wechsel in die Vollbild-Konsole (ESC) oder dem Ende der
+/// Grafik-Demo, während die Shell gerade auf Tasten wartet.
 pub fn prompt_nachholen() {
     let pfad = x86_64::instructions::interrupts::without_interrupts(|| {
         let spiegel = CWD_SPIEGEL.lock();

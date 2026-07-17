@@ -45,6 +45,7 @@ pub mod memory;
 pub mod rtc;
 pub mod serial;
 pub mod shell;
+pub mod speedtext;
 pub mod task;
 pub mod taskmanager;
 pub mod theme;
