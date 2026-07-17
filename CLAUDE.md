@@ -321,7 +321,13 @@
   `fenster/terminal.rs` bleibt das reine Text-Raster; gerendert wird
   weiter GEBÜNDELT (inhalt_neu + inhalte_rendern pro Frame).
   prompt_nachholen() nutzt nur noch der Vollbild-Pfad (ESC/Demo-Ende,
-  cwd-Spiegel der Haupt-Sitzung).
+  cwd-Spiegel der Haupt-Sitzung). SEIT DEM SERIE-3-PERFORMANCE-PASS
+  führt das Raster DIRTY-ZEILEN: terminal_rendern zeichnet nur den
+  geänderten Zeilenbereich in den persistenten Fenster-Puffer, und
+  terminal_schreiben meldet dem Compositor nur den Zeilen-STREIFEN
+  (2x schnellere Prompt-Ausgabe); Scroll/Resize/inhalt_zeichnen
+  (Theme!) markieren alles. Der Frame-Pfad für Terminals läuft in
+  inhalte_rendern OHNE fenster.dirty.
 - **SpeedText & Dialog-Bausteine (Juli 2026):** `src/speedtext.rs` +
   `ui/texteditor.rs` + `ui/dialog.rs`. Der TextPuffer ist ein
   Zeilen-Vec (BEWUSST kein Rope — KiB-Dateien, Begründung im Code)
@@ -338,6 +344,19 @@
   aus der App schließen) und App::schliessen_abfragen() (X-Knopf
   abfangen -> Nachfrage-Dialog; None = sofort zu). Explorer-
   Doppelklick auf Dateien öffnet SpeedText (Betrachter entfernt).
+  SpeedTexts Tipp-Pfad ist seit dem Performance-Pass schlank: KEIN
+  Baum-Neuaufbau pro Taste — die StatusZeile (texteditor.rs) liest
+  Zeile/Spalte/Zeichen beim ZEICHNEN live aus dem Arc, der Titel
+  wird nur bei echtem Wechsel gemeldet (letzter_titel-Vergleich).
+- **Toolkit-Konventionen (Serie-3-Review):** `ui::w(widget)` statt
+  `Box::new(widget) as Box<dyn Widget>` (neue Apps/Umbauten);
+  `ui::app::SekundenTick` für 1-Hz-Live-Apps (Einstellungen,
+  Task-Manager) statt eigener letzte_sekunde-Buchhaltung. Bekannte
+  Ecken (bewusst offen): Tab ist global die Fokus-Taste (Editor kann
+  keine Tabs einfügen); Nachricht-Basen sind Handarbeit (Basen weit
+  auseinander legen, DIALOG_ID_BREITE als Muster); Textfeld-Inhalt
+  überlebt Neu-Aufbauten nicht (Apps puffern selbst oder teilen
+  Zustand per Arc wie der Editor).
 - **Deadlock-Regeln:** (1) Ausgabe-Locks (WRITER, SERIAL1) werden nur mit
   deaktivierten Interrupts gehalten (`without_interrupts` in den _print-
   Funktionen). (2) Interrupt-Handler sind minimal: nie blockieren, nie

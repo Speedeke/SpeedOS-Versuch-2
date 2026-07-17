@@ -22,7 +22,7 @@
 use crate::fs;
 use crate::grafik::Icon;
 use crate::ui::dialog::{bestaetigung, DateiDialog, DateiDialogErgebnis};
-use crate::ui::texteditor::{geteilter_puffer, GeteilterPuffer, TextEditor, TextPuffer};
+use crate::ui::texteditor::{geteilter_puffer, GeteilterPuffer, StatusZeile, TextEditor, TextPuffer};
 use crate::ui::widgets::Label;
 use crate::ui::{vbox, App, AppReaktion, Widget};
 use alloc::boxed::Box;
@@ -57,16 +57,23 @@ pub struct SpeedTextApp {
     dialog: Option<Dialog>,
     /// Statuszeilen-Meldung (Fehler beim Laden/Speichern).
     meldung: Option<String>,
+    /// Zuletzt gesetzter Fenster-Titel — beim Tippen wird der Titel
+    /// nur gemeldet, wenn er sich WIRKLICH ändert (der Stern kommt
+    /// genau einmal; danach kostet eine Taste keinen Titel-Update).
+    letzter_titel: String,
 }
 
 impl SpeedTextApp {
     pub fn neu() -> Self {
-        SpeedTextApp {
+        let mut app = SpeedTextApp {
             puffer: geteilter_puffer(TextPuffer::leer()),
             pfad: None,
             dialog: None,
             meldung: None,
-        }
+            letzter_titel: String::new(),
+        };
+        app.letzter_titel = app.titel();
+        app
     }
 
     /// Öffnet SpeedText direkt mit einer Datei (Explorer-Doppelklick).
@@ -139,8 +146,9 @@ impl SpeedTextApp {
     }
 
     /// Standard-Reaktion: neu aufbauen + Titel nachziehen.
-    fn reaktion_mit_titel(&self) -> AppReaktion {
-        AppReaktion::neu_aufbauen().mit_titel(self.titel())
+    fn reaktion_mit_titel(&mut self) -> AppReaktion {
+        self.letzter_titel = self.titel();
+        AppReaktion::neu_aufbauen().mit_titel(self.letzter_titel.clone())
     }
 }
 
@@ -176,25 +184,18 @@ impl App for SpeedTextApp {
             None => {}
         }
 
-        // AUFGABE 3 — die Statuszeile: Zeile:Spalte, Zeichenzahl,
-        // Änderungs-Status (plus Fehler-Meldungen).
-        let (zeile, spalte, zeichen, geaendert) = self.mit_puffer(|p| {
-            (p.cursor_zeile + 1, p.cursor_spalte + 1, p.zeichen_anzahl(), p.geaendert)
-        });
-        let status = match &self.meldung {
-            Some(meldung) => format!("Fehler - {}", meldung),
-            None => format!(
-                "Zeile {}, Spalte {}  |  {} Zeichen  |  {}",
-                zeile,
-                spalte,
-                zeichen,
-                if geaendert { "Geaendert *" } else { "Gespeichert" }
-            ),
+        // Die Statuszeile (Zeile:Spalte, Zeichenzahl, Änderungs-
+        // Status) liest LIVE aus dem geteilten Puffer — Tippen
+        // braucht deshalb keinen Baum-Neuaufbau mehr (Performance-
+        // Pass). Nur Fehlermeldungen ersetzen sie durch ein Label.
+        let status: Box<dyn Widget> = match &self.meldung {
+            Some(meldung) => Box::new(Label::sekundaer(&format!("Fehler - {}", meldung))),
+            None => Box::new(StatusZeile::neu(self.puffer.clone())),
         };
 
         Box::new(vbox(vec![
             Box::new(TextEditor::neu(self.puffer.clone(), N_EDITOR)) as Box<dyn Widget>,
-            Box::new(Label::sekundaer(&status)),
+            status,
         ]))
     }
 
@@ -231,8 +232,20 @@ impl App for SpeedTextApp {
         }
 
         match id {
-            // Jede Editor-Interaktion: Statuszeile + Titel nachziehen.
-            N_EDITOR => self.reaktion_mit_titel(),
+            // Editor-Interaktion (jede Taste!): Das Neuzeichnen hat
+            // das Widget schon angestoßen, die Statuszeile liest
+            // live — hier bleibt nur der Titel-Stern, und der auch
+            // nur, wenn er sich WIRKLICH ändert (einmal pro
+            // Geändert-Wechsel statt bei jedem Tastendruck).
+            N_EDITOR => {
+                let titel = self.titel();
+                if titel != self.letzter_titel {
+                    self.letzter_titel = titel.clone();
+                    AppReaktion::keine().mit_titel(titel)
+                } else {
+                    AppReaktion::keine()
+                }
+            }
             // Schließen-Dialog:
             N_SCHL_SPEICHERN => self.speichern(true),
             N_SCHL_VERWERFEN => AppReaktion::schliessen(),

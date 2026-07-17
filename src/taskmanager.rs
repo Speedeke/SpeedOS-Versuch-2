@@ -158,7 +158,8 @@ pub struct TaskManagerApp {
     heap: Option<(usize, usize)>,
     /// Auswahl als Task-ID (nicht Index — überlebt Neu-Aufnahmen).
     auswahl_id: Option<u64>,
-    letzte_sekunde: u64,
+    /// Sekündliche Aktualisierung (geteilter Toolkit-Baustein).
+    sekunden_tick: crate::ui::app::SekundenTick,
 }
 
 impl TaskManagerApp {
@@ -172,7 +173,7 @@ impl TaskManagerApp {
             cpu_prozent: 0,
             heap: None,
             auswahl_id: None,
-            letzte_sekunde: zeit::ms_seit_boot() / 1000,
+            sekunden_tick: crate::ui::app::SekundenTick::neu(),
         };
         app.aktualisieren();
         app
@@ -220,6 +221,13 @@ impl TaskManagerApp {
 
     fn auswahl_task(&self) -> Option<&TaskMoment> {
         self.tasks.iter().find(|task| Some(task.id) == self.auswahl_id)
+    }
+
+    /// Füllt den CPU-Graphen mit 60 synthetischen Werten — für den
+    /// Frame-Zeit-Berichts-Test (der Graph soll wie im Live-Betrieb
+    /// eine volle Linie zeichnen müssen).
+    pub fn cpu_verlauf_fuellen_fuer_messung(&mut self) {
+        self.cpu_verlauf = (0..60).map(|i| ((i * 7) % 100) as u8).collect();
     }
 
     fn art_text(art: TaskArt) -> &'static str {
@@ -348,11 +356,9 @@ impl App for TaskManagerApp {
 
     /// Sekündliche Aktualisierung (Uhr-Task stößt tick an).
     fn tick(&mut self) -> bool {
-        let sekunde = zeit::ms_seit_boot() / 1000;
-        if sekunde == self.letzte_sekunde {
+        if !self.sekunden_tick.faellig() {
             return false;
         }
-        self.letzte_sekunde = sekunde;
         self.aktualisieren();
         true
     }

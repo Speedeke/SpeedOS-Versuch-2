@@ -18,7 +18,7 @@
 //     Widget würde seinen Text beim Neu-Aufbau verlieren).
 
 use super::widgets::{Button, Label, ListenEintrag, ScrollListe, Trennlinie};
-use super::{hbox, vbox, Fueller, Widget};
+use super::{hbox, vbox, w, Fueller, Widget};
 use crate::fs::{self, NodeTyp};
 use alloc::boxed::Box;
 use alloc::format;
@@ -33,14 +33,10 @@ use pc_keyboard::DecodedKey;
 pub fn bestaetigung(frage: &str, knoepfe: &[(&str, u32)]) -> Box<dyn Widget> {
     let mut zeile: Vec<Box<dyn Widget>> = Vec::new();
     for (text, id) in knoepfe {
-        zeile.push(Box::new(Button::neu(text, *id)));
+        zeile.push(w(Button::neu(text, *id)));
     }
-    zeile.push(Box::new(Fueller));
-    Box::new(vbox(vec![
-        Box::new(Label::neu(frage)) as Box<dyn Widget>,
-        Box::new(Trennlinie),
-        Box::new(hbox(zeile)),
-    ]))
+    zeile.push(w(Fueller));
+    w(vbox(vec![w(Label::neu(frage)), w(Trennlinie), w(hbox(zeile))]))
 }
 
 // ---------------------------------------------------------------------------
@@ -125,17 +121,17 @@ impl DateiDialog {
             ScrollListe::mit_index_nachrichten(eintraege, self.basis + D_LISTE, self.basis + D_OEFFNEN)
                 .mit_auswahl(self.auswahl);
 
-        Box::new(vbox(vec![
-            Box::new(Label::neu(self.titel)) as Box<dyn Widget>,
-            Box::new(Label::sekundaer(&format!("Ordner: {}", self.ordner))),
-            Box::new(liste),
-            Box::new(Label::neu(&format!("> {}_", self.eingabe))),
-            Box::new(hbox(vec![
-                Box::new(Button::neu("OK", self.basis + D_OK)) as Box<dyn Widget>,
-                Box::new(Button::neu("Abbrechen", self.basis + D_ABBRECHEN)),
-                Box::new(Fueller),
+        w(vbox(vec![
+            w(Label::neu(self.titel)),
+            w(Label::sekundaer(&format!("Ordner: {}", self.ordner))),
+            w(liste),
+            w(Label::neu(&format!("> {}_", self.eingabe))),
+            w(hbox(vec![
+                w(Button::neu("OK", self.basis + D_OK)),
+                w(Button::neu("Abbrechen", self.basis + D_ABBRECHEN)),
+                w(Fueller),
             ])),
-            Box::new(Label::sekundaer(
+            w(Label::sekundaer(
                 "Doppelklick: Ordner oeffnen / Datei waehlen - Enter = OK, Esc = Abbrechen",
             )),
         ]))

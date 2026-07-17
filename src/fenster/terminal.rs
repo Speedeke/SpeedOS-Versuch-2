@@ -29,6 +29,13 @@ pub struct Terminal {
     cursor_zeile: usize,
     /// Farbe leerer Zellen (der Terminal-Hintergrund des Themes).
     standard_hg: Farbe,
+    /// Geänderte RASTERZEILEN [von, bis) seit dem letzten Rendern —
+    /// der Serie-3-Performance-Pass: Eine Prompt-Zeile soll nicht
+    /// das ganze 80x24-Raster neu zeichnen (und den Compositor nicht
+    /// die ganze Fensterfläche komponieren lassen). Scrollen und
+    /// Resize markieren ALLES.
+    dirty_von: usize,
+    dirty_bis: usize,
 }
 
 impl Terminal {
@@ -41,7 +48,39 @@ impl Terminal {
             cursor_spalte: 0,
             cursor_zeile: 0,
             standard_hg,
+            dirty_von: 0,
+            dirty_bis: zeilen, // frisch: alles rendern
         }
+    }
+
+    /// Markiert eine Rasterzeile als geändert.
+    fn zeile_markieren(&mut self, zeile: usize) {
+        self.dirty_von = self.dirty_von.min(zeile);
+        self.dirty_bis = self.dirty_bis.max(zeile + 1);
+    }
+
+    /// Markiert das GANZE Raster (Scroll, Resize, Theme-Wechsel).
+    pub fn alles_markieren(&mut self) {
+        self.dirty_von = 0;
+        self.dirty_bis = self.zeilen;
+    }
+
+    /// Der aktuelle Dirty-Bereich [von, bis) — None = nichts zu tun.
+    /// (Nur lesen; abholen setzt zurück.)
+    pub fn dirty_zeilen(&self) -> Option<(usize, usize)> {
+        if self.dirty_von >= self.dirty_bis {
+            None
+        } else {
+            Some((self.dirty_von, self.dirty_bis.min(self.zeilen)))
+        }
+    }
+
+    /// Holt den Dirty-Bereich ab und setzt ihn zurück (der Renderer).
+    pub fn dirty_abholen(&mut self) -> Option<(usize, usize)> {
+        let bereich = self.dirty_zeilen();
+        self.dirty_von = usize::MAX;
+        self.dirty_bis = 0;
+        bereich
     }
 
     pub fn spalten(&self) -> usize {
@@ -63,13 +102,17 @@ impl Terminal {
         self.zellen.fill(Zelle::leer(self.standard_hg));
         self.cursor_spalte = 0;
         self.cursor_zeile = 0;
+        self.alles_markieren();
     }
 
     /// Schreibt EIN Zeichen an die Cursor-Position — mit denselben
     /// Regeln wie die FramebufferKonsole: \n bricht um, Backspace geht
     /// nur zurück (die Shell radiert per "\b \b"), am Zeilenende wird
     /// automatisch umgebrochen, unten wird gescrollt.
+    /// Dirty-Buchhaltung: Cursor-Zeile VOR und NACH der Operation
+    /// markieren (der Cursor-Unterstrich wandert mit!).
     pub fn schreiben(&mut self, zeichen: char, vg: Farbe, hg: Farbe) {
+        self.zeile_markieren(self.cursor_zeile);
         match zeichen {
             '\n' => self.neue_zeile(),
             '\r' => self.cursor_spalte = 0,
@@ -83,6 +126,7 @@ impl Terminal {
                 self.cursor_spalte += 1;
             }
         }
+        self.zeile_markieren(self.cursor_zeile);
     }
 
     fn neue_zeile(&mut self) {
@@ -91,9 +135,11 @@ impl Terminal {
             self.cursor_zeile += 1;
         } else {
             // Scrollen: alle Zeilen eine hoch (memmove), unterste leeren.
+            // Danach hat sich JEDE Zeile verschoben:
             self.zellen.copy_within(self.spalten.., 0);
             let ab = (self.zeilen - 1) * self.spalten;
             self.zellen[ab..].fill(Zelle::leer(self.standard_hg));
+            self.alles_markieren();
         }
     }
 
@@ -120,6 +166,7 @@ impl Terminal {
         self.cursor_spalte = self.cursor_spalte.min(spalten - 1);
         self.spalten = spalten;
         self.zeilen = zeilen;
+        self.alles_markieren();
     }
 }
 

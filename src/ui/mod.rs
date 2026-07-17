@@ -47,6 +47,15 @@ use pc_keyboard::DecodedKey;
 /// Der Nachrichten-Kanal vom Widget-Baum zur App (siehe Kopfkommentar).
 pub type NachrichtHandler = fn(u32);
 
+/// TOOLKIT-REVIEW Serie 3: Der meistgetippte Ballast in drei Apps
+/// war `Box::new(widget) as Box<dyn Widget>` (der as-Cast ist am
+/// ersten Vec-Element nötig, damit der Vec-Typ stimmt). `w()` macht
+/// daraus `w(widget)` — neue Apps und Umbauten nutzen das; die alte
+/// Schreibweise bleibt gültig.
+pub fn w(widget: impl Widget + 'static) -> Box<dyn Widget> {
+    Box::new(widget)
+}
+
 // ---------------------------------------------------------------------------
 // Ereignisse und Reaktionen
 // ---------------------------------------------------------------------------
@@ -640,6 +649,54 @@ mod tests {
         // sein Enter meldet seine Nachricht-ID:
         let enter = ui.taste(DecodedKey::Unicode('\n'), &puffer);
         assert_eq!(enter.nachricht, Some(10));
+    }
+
+    /// Event-Routing durch VERSCHACHTELTE Container (vbox > hbox >
+    /// vbox): Klicks finden den tief liegenden Button, Tasten laufen
+    /// bis zum fokussierten Textfeld durch, und MausRaus wird über
+    /// beide Ebenen durchgereicht (bricht den gedrückten Button ab).
+    #[test_case]
+    fn test_routing_verschachtelte_widgets() {
+        // Aufbau (Skala 1.0: Button/Feld 30 hoch, Abstand 8):
+        //   vbox[ hbox[ Button(1), vbox[ Button(2), Textfeld(3) ] ],
+        //         Button(4) ]
+        // Innere vbox beginnt bei x=64 (Button "Eins" = 56 breit + 8);
+        // Button(2): y 0..30, Textfeld(3): y 38..68, Button(4): y 76..106.
+        let mut baum = vbox(alloc::vec![
+            Box::new(hbox(alloc::vec![
+                Box::new(Button::neu("Eins", 1)) as Box<dyn Widget>,
+                Box::new(vbox(alloc::vec![
+                    Box::new(Button::neu("Zwei", 2)) as Box<dyn Widget>,
+                    Box::new(Textfeld::neu(3)),
+                ])),
+            ])) as Box<dyn Widget>,
+            Box::new(Button::neu("Vier", 4)),
+        ]);
+        let bereich = Rechteck::neu(0, 0, 300, 200);
+
+        // Klick + Loslassen auf den tiefen Button(2):
+        baum.ereignis(&UiEreignis::Klick { x: 70, y: 10 }, bereich);
+        let klick = baum.ereignis(&UiEreignis::Losgelassen { x: 70, y: 10 }, bereich);
+        assert_eq!(klick.nachricht, Some(2));
+
+        // Textfeld durch beide Ebenen fokussieren und tippen —
+        // die Taste läuft an Button(1) und Button(2) vorbei:
+        baum.ereignis(&UiEreignis::Klick { x: 70, y: 50 }, bereich);
+        assert!(baum.hat_fokus());
+        baum.ereignis(&UiEreignis::Taste(DecodedKey::Unicode('x')), bereich);
+        let enter = baum.ereignis(&UiEreignis::Taste(DecodedKey::Unicode('\n')), bereich);
+        assert_eq!(enter.nachricht, Some(3));
+
+        // MausRaus-Durchreichung: erst über Button(2) hovern (baut
+        // die Hover-Kette in BEIDEN Containern auf), dann drücken,
+        // dann zum äußeren Button(4) bewegen — die Container reichen
+        // MausRaus zwei Ebenen tief weiter, der Druck ist abgebrochen:
+        // Loslassen über der alten Fläche liefert KEINE Nachricht.
+        baum.ereignis(&UiEreignis::Bewegt { x: 70, y: 10 }, bereich);
+        baum.ereignis(&UiEreignis::Klick { x: 70, y: 10 }, bereich);
+        baum.ereignis(&UiEreignis::Bewegt { x: 10, y: 90 }, bereich);
+        let abgebrochen = baum.ereignis(&UiEreignis::Losgelassen { x: 70, y: 10 }, bereich);
+        assert_eq!(abgebrochen.nachricht, None);
     }
 
     /// Doppelklick-Erkennung im UiFenster: zwei schnelle Klicks auf

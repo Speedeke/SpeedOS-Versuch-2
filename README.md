@@ -8,6 +8,11 @@ ist alles selbst gebaut (auf Basis der bewährten Architektur aus
 > Lernprojekt: Der Code ist bewusst ausführlich auf Deutsch kommentiert —
 > jede Datei erklärt, *was* sie tut und *warum* es so funktioniert.
 
+![Serie-3-Desktop](docs/screenshots/desktop-serie3.png)
+*Der Serie-3-Desktop in 2560x1600: zwei unabhängige Terminal-Sitzungen, Explorer,
+Task-Manager mit Live-CPU-Graph, SpeedText und Einstellungen — sechs Fenster,
+sechs Taskleisten-Knöpfe, alles auf dem eigenen UI-Toolkit.*
+
 ![SpeedOS-Desktop](docs/screenshots/desktop-komplett.png)
 *SpeedOS bootet direkt in den Desktop: SpeedShell als Terminal-Fenster, Taskleiste mit
 Startknopf/Fenster-Knöpfen/Uhr, Startmenü mit App-Registry und Live-Suche.*
@@ -180,7 +185,8 @@ src/
 ├── grafik.rs        Zeichner: Primitive, Clipping, Alpha, Icons
 ├── theme.rs         Themes (Dunkel/Hell), Akzent-Palette, Metrik, Skala
 ├── fenster/         Fenster-Manager, Compositor, Taskleiste, Terminal
-├── ui/              Widget-Toolkit: Widget-Trait, Layout, App-Trait
+├── ui/              Widget-Toolkit: Widgets, Layout, App-Trait,
+│                    Dialog-Bausteine, mehrzeiliger Texteditor
 ├── apps.rs          App-Registry (Startmenü-Einträge)
 ├── explorer.rs      Explorer-App: Navigation, Dateioperationen, Papierkorb
 ├── einstellungen.rs Einstellungs-Store (VFS-persistent) + Einstellungen-App
@@ -222,8 +228,9 @@ docs/                Migrationsplan bootloader 0.9 -> 0.11, Screenshots
       Einstellungen-App mit persistentem Einstellungs-Store (VFS),
       Task-Manager (benannte Tasks, CPU-Metrik, kooperatives Beenden),
       SpeedText-Editor + Terminal-Sitzungen (eine Shell pro Fenster)
-- [ ] **Persistenz:** Block-Device-Treiber + Disk-Dateisystem (VFS und
-      Einstellungs-Store sind bereit)
+- [ ] **Persistenz (Serie 4):** Block-Device-Treiber + Disk-Dateisystem
+      (VFS und Einstellungs-Store sind bereit — Plan und ehrliche
+      Bestandsaufnahme in [docs/serie4-bestandsaufnahme.md](docs/serie4-bestandsaufnahme.md))
 - [ ] **User Space:** Ring-3-Prozesse, Syscalls, präemptiver Scheduler
 - [ ] Ferner: eigene Programme laden (ELF), Netzwerk, Sound
 

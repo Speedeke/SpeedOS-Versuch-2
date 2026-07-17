@@ -126,6 +126,37 @@ pub trait App: Send {
     }
 }
 
+/// TOOLKIT-REVIEW Serie 3: Einstellungen und Task-Manager haben
+/// beide die "nur beim Sekundenwechsel neu bauen"-Logik dupliziert —
+/// jetzt EIN Baustein für alle Live-Apps: in tick() einfach
+/// `self.sekunden_tick.faellig()` fragen.
+pub struct SekundenTick {
+    letzte_sekunde: u64,
+}
+
+impl SekundenTick {
+    pub fn neu() -> Self {
+        SekundenTick { letzte_sekunde: crate::zeit::ms_seit_boot() / 1000 }
+    }
+
+    /// true GENAU einmal pro Sekundenwechsel (der Uhr-Task tickt
+    /// öfter — ohne diese Bremse würde jede Live-App 2x/s neu bauen).
+    pub fn faellig(&mut self) -> bool {
+        let sekunde = crate::zeit::ms_seit_boot() / 1000;
+        if sekunde == self.letzte_sekunde {
+            return false;
+        }
+        self.letzte_sekunde = sekunde;
+        true
+    }
+}
+
+impl Default for SekundenTick {
+    fn default() -> Self {
+        Self::neu()
+    }
+}
+
 /// App + Widget-Baum als Fenster-Inhalt (`Inhalt::App`).
 pub struct AppFenster {
     pub app: Box<dyn App>,

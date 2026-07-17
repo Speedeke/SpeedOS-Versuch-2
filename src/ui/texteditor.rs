@@ -498,6 +498,59 @@ impl Widget for TextEditor {
 }
 
 // ---------------------------------------------------------------------------
+// StatusZeile — liest ihre Werte beim ZEICHNEN live aus dem Puffer
+//
+// Performance-Pass Serie 3: Vorher baute SpeedText bei JEDER Taste
+// den ganzen Widget-Baum neu, nur damit die Statuszeile (Zeile:
+// Spalte, Zeichen, Status) aktuell war. Da der Puffer ohnehin
+// geteilt ist, kann die Statuszeile ihre Zahlen einfach beim
+// Zeichnen holen — Tippen braucht dann NUR noch Neuzeichnen.
+// ---------------------------------------------------------------------------
+
+pub struct StatusZeile {
+    puffer: GeteilterPuffer,
+}
+
+impl StatusZeile {
+    pub fn neu(puffer: GeteilterPuffer) -> Self {
+        StatusZeile { puffer }
+    }
+}
+
+impl Widget for StatusZeile {
+    fn wunschgroesse(&self) -> (i32, i32) {
+        (0, metrik().zeilen_hoehe)
+    }
+
+    fn zeichnen(&self, z: &mut Zeichner<'_, FensterPuffer>, bereich: Rechteck) {
+        let (zeile, spalte, zeichen, geaendert) =
+            x86_64::instructions::interrupts::without_interrupts(|| {
+                let p = self.puffer.lock();
+                (p.cursor_zeile + 1, p.cursor_spalte + 1, p.zeichen_anzahl(), p.geaendert)
+            });
+        let text = alloc::format!(
+            "Zeile {}, Spalte {}  |  {} Zeichen  |  {}",
+            zeile,
+            spalte,
+            zeichen,
+            if geaendert { "Geaendert *" } else { "Gespeichert" }
+        );
+        z.text(
+            bereich.x,
+            bereich.y,
+            &text,
+            metrik().schrift_ui,
+            FontWeight::Regular,
+            theme::aktuell().text_sekundaer,
+        );
+    }
+
+    fn ereignis(&mut self, _e: &UiEreignis, _b: Rechteck) -> UiReaktion {
+        UiReaktion::ignoriert()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests — der Puffer pur, ohne Fenster
 // ---------------------------------------------------------------------------
 

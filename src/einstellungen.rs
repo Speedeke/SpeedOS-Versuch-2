@@ -290,9 +290,9 @@ pub struct EinstellungenApp {
     /// MANAGER!), aufbau()/tick() aber schon — deshalb der Cache.
     /// Die Auflösung ändert sich zur Laufzeit sowieso nie.
     aufloesung: (usize, usize),
-    /// Zuletzt angezeigte Sekunde (tick baut Live-Seiten nur beim
-    /// Sekundenwechsel neu — nicht bei jedem Uhr-Task-Lauf).
-    letzte_sekunde: u64,
+    /// Live-Seiten (Uhr, Info) nur beim Sekundenwechsel neu bauen —
+    /// der geteilte Toolkit-Baustein (Serie-3-Review).
+    sekunden_tick: crate::ui::app::SekundenTick,
 }
 
 impl EinstellungenApp {
@@ -302,7 +302,11 @@ impl EinstellungenApp {
             (info.width, info.height)
         })
         .unwrap_or((0, 0));
-        EinstellungenApp { kategorie: KAT_PERSONALISIERUNG, aufloesung, letzte_sekunde: 0 }
+        EinstellungenApp {
+            kategorie: KAT_PERSONALISIERUNG,
+            aufloesung,
+            sekunden_tick: crate::ui::app::SekundenTick::neu(),
+        }
     }
 
     /// Reaktion für Optionen, die den GANZEN Desktop umfärben:
@@ -569,7 +573,6 @@ impl App for EinstellungenApp {
             // --- Navigation ---
             id if id >= N_KATEGORIE => {
                 self.kategorie = ((id - N_KATEGORIE) as usize).min(KATEGORIEN.len() - 1);
-                self.letzte_sekunde = zeit::ms_seit_boot() / 1000;
             }
             _ => return AppReaktion::keine(),
         }
@@ -578,15 +581,8 @@ impl App for EinstellungenApp {
 
     /// Live-Seiten (Uhrzeit, Uptime) beim Sekundenwechsel neu bauen.
     fn tick(&mut self) -> bool {
-        if self.kategorie != KAT_ZEIT && self.kategorie != KAT_INFO {
-            return false;
-        }
-        let sekunde = zeit::ms_seit_boot() / 1000;
-        if sekunde == self.letzte_sekunde {
-            return false;
-        }
-        self.letzte_sekunde = sekunde;
-        true
+        (self.kategorie == KAT_ZEIT || self.kategorie == KAT_INFO)
+            && self.sekunden_tick.faellig()
     }
 }
 

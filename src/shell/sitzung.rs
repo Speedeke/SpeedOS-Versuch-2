@@ -56,6 +56,14 @@ impl Sitzung {
     pub fn ist_beendet(&self) -> bool {
         self.beendet.load(Ordering::Acquire)
     }
+
+    /// Nächste Taste SYNCHRON abholen (None = Queue leer) — nur für
+    /// Tests; der Shell-Task wartet stattdessen asynchron
+    /// (naechste_taste).
+    #[cfg(test)]
+    pub(crate) fn taste_abholen(&self) -> Option<DecodedKey> {
+        self.tasten.pop()
+    }
 }
 
 static SITZUNGEN: Mutex<BTreeMap<u64, Arc<Sitzung>>> = Mutex::new(BTreeMap::new());

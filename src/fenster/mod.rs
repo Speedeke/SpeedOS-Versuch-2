@@ -794,6 +794,16 @@ impl FensterManager {
     // ----- Terminal (die SpeedShell als Fenster) -----
 
     /// Index des (einzigen) Terminal-Fensters.
+    /// Die Sitzung des FOKUSSIERTEN Terminal-Fensters (None = kein
+    /// unminimiertes Terminal im Fokus) — die Routing-Grundlage des
+    /// Eingabe-Routers, deshalb als eigene, testbare Methode.
+    fn fokus_terminal_sitzung(&self) -> Option<u64> {
+        self.fokus.and_then(|id| self.index_von(id)).and_then(|i| match self.fenster[i].inhalt {
+            Inhalt::Terminal { sitzung, .. } if !self.fenster[i].minimiert => Some(sitzung),
+            _ => None,
+        })
+    }
+
     /// Der Fenster-Index eines Terminals nach Sitzungs-Id.
     fn terminal_index(&self, sitzung: u64) -> Option<usize> {
         self.fenster.iter().position(
@@ -880,7 +890,38 @@ impl FensterManager {
             TerminalZeichner { term, vg, hg }.write_fmt(args).ok();
         }
         self.fenster[index].inhalt_neu = true;
-        self.fenster[index].dirty = true;
+        // PRÄZISE Dirty-Meldung statt fenster.dirty: Nur der
+        // geänderte Zeilen-Streifen wird komponiert und übertragen —
+        // eine Prompt-Zeile kostet so 16 Pixelzeilen, kein Fenster.
+        // (Beim Raster-Scroll ist der Streifen automatisch alles.)
+        if !self.fenster[index].minimiert {
+            let streifen = match &self.fenster[index].inhalt {
+                Inhalt::Terminal { term, .. } => {
+                    term.dirty_zeilen().map(|bereich| (bereich, term.zeilen()))
+                }
+                _ => None,
+            };
+            if let Some(((von, bis), raster_zeilen)) = streifen {
+                let zeilen_hoehe = metrik().zeilen_hoehe;
+                let f = &self.fenster[index];
+                // Endet der Streifen an der letzten Rasterzeile,
+                // gehört der Restsaum unter ihr mit dazu (die
+                // Fensterhöhe ist kein Zeilen-Vielfaches):
+                let oben = von as i32 * zeilen_hoehe;
+                let unten = if bis == raster_zeilen {
+                    f.hoehe()
+                } else {
+                    bis as i32 * zeilen_hoehe
+                };
+                let rect = Rechteck::neu(
+                    f.x,
+                    f.y + metrik().titel_hoehe + oben,
+                    f.breite(),
+                    unten - oben,
+                );
+                self.dirty_melden(rect);
+            }
+        }
         true
     }
 
@@ -897,12 +938,28 @@ impl FensterManager {
 
     /// Rendert alle geänderten Inhalte (inhalt_neu) in ihre Puffer —
     /// ruft der Compositor EINMAL pro Frame, vor dem Komponieren.
+    /// TERMINALS gehen den schlanken Weg: nur die geänderten
+    /// Rasterzeilen in den (persistenten) Puffer, und KEIN
+    /// fenster.dirty — terminal_schreiben hat den Streifen schon
+    /// präzise per dirty_melden angemeldet (Performance-Pass:
+    /// eine Prompt-Zeile komponiert 16 px statt der Fensterfläche).
     fn inhalte_rendern(&mut self) {
         for index in 0..self.fenster.len() {
             if self.fenster[index].inhalt_neu {
                 self.fenster[index].inhalt_neu = false;
-                inhalt_zeichnen(&mut self.fenster[index]);
-                self.fenster[index].dirty = true;
+                let fenster = &mut self.fenster[index];
+                if let Inhalt::Terminal { term, .. } = &mut fenster.inhalt {
+                    let zeichen_breite =
+                        get_raster_width(FontWeight::Regular, metrik().schrift_ui);
+                    let spalten = (fenster.puffer.breite / zeichen_breite).max(1);
+                    let zeilen =
+                        (fenster.puffer.hoehe / metrik().zeilen_hoehe as usize).max(1);
+                    term.groesse_setzen(spalten, zeilen);
+                    terminal_rendern(term, &mut fenster.puffer);
+                } else {
+                    inhalt_zeichnen(fenster);
+                    self.fenster[index].dirty = true;
+                }
             }
         }
     }
@@ -2056,20 +2113,43 @@ fn inhalt_icon(inhalt: &Inhalt) -> &'static crate::grafik::Icon {
 /// Zeichnet das Terminal-Raster in den Fenster-Puffer: Zellen-
 /// Hintergründe, Zeichen (Antialiasing via Alpha) und der Cursor-
 /// Unterstrich in Akzentfarbe.
-fn terminal_rendern(term: &terminal::Terminal, puffer: &mut FensterPuffer) {
+/// SEIT DEM SERIE-3-PERFORMANCE-PASS: rendert NUR die geänderten
+/// Rasterzeilen (term.dirty_abholen) — der Fenster-Puffer ist
+/// persistent, der Rest steht schon drin. Eine Prompt-Ausgabe malt
+/// so eine Zeile statt 24. Volles Neuzeichnen (Theme/Resize) läuft
+/// über term.alles_markieren() davor.
+fn terminal_rendern(term: &mut terminal::Terminal, puffer: &mut FensterPuffer) {
+    let (dirty_von, dirty_bis) = match term.dirty_abholen() {
+        Some(bereich) => bereich,
+        None => return,
+    };
     let thema = theme::aktuell();
     let hintergrund = thema.terminal_hintergrund;
     let zeichen_breite = get_raster_width(FontWeight::Regular, metrik().schrift_ui) as i32;
     let zeilen_hoehe = metrik().zeilen_hoehe;
-    let (breite, hoehe) = (puffer.breite as i32, puffer.hoehe as i32);
+    let breite = puffer.breite as i32;
+    // Unter der letzten Rasterzeile bleibt ein Reststreifen (Fenster-
+    // höhe ist kein Vielfaches der Zeilenhöhe) — mitfüllen, wenn die
+    // letzte Zeile dirty ist:
+    let flaechen_hoehe = puffer.hoehe as i32;
+    let streifen_bis = if dirty_bis == term.zeilen() {
+        flaechen_hoehe
+    } else {
+        dirty_bis as i32 * zeilen_hoehe
+    };
 
     let mut z = Zeichner::neu(puffer);
     z.rechteck_fuellen(
-        Rechteck::neu(0, 0, breite, hoehe),
+        Rechteck::neu(
+            0,
+            dirty_von as i32 * zeilen_hoehe,
+            breite,
+            streifen_bis - dirty_von as i32 * zeilen_hoehe,
+        ),
         Rgba::neu(hintergrund.r, hintergrund.g, hintergrund.b),
     );
     let mut puffer_utf8 = [0u8; 4];
-    for zeile in 0..term.zeilen() {
+    for zeile in dirty_von..dirty_bis {
         for spalte in 0..term.spalten() {
             let zelle = term.zelle(spalte, zeile);
             let x = spalte as i32 * zeichen_breite;
@@ -2093,17 +2173,21 @@ fn terminal_rendern(term: &terminal::Terminal, puffer: &mut FensterPuffer) {
         }
     }
     // Der Terminal-Cursor (ruhig, nicht blinkend — der Konsolen-
-    // Blink-Task ist im Desktop-Modus pausiert):
+    // Blink-Task ist im Desktop-Modus pausiert). Nur zeichnen, wenn
+    // seine Zeile im gerenderten Streifen liegt — sonst steht er
+    // dort unverändert aus dem letzten Rendern.
     let (cursor_spalte, cursor_zeile) = term.cursor();
-    z.rechteck_fuellen(
-        Rechteck::neu(
-            cursor_spalte as i32 * zeichen_breite,
-            cursor_zeile as i32 * zeilen_hoehe + zeilen_hoehe - 2,
-            zeichen_breite,
-            2,
-        ),
-        thema.akzent,
-    );
+    if (dirty_von..dirty_bis).contains(&cursor_zeile) {
+        z.rechteck_fuellen(
+            Rechteck::neu(
+                cursor_spalte as i32 * zeichen_breite,
+                cursor_zeile as i32 * zeilen_hoehe + zeilen_hoehe - 2,
+                zeichen_breite,
+                2,
+            ),
+            thema.akzent,
+        );
+    }
 }
 
 /// Zeichnet den Inhalt eines Fensters in SEINEN Puffer.
@@ -2125,6 +2209,10 @@ fn inhalt_zeichnen(fenster: &mut Fenster) {
         let spalten = (fenster.puffer.breite / zeichen_breite).max(1);
         let zeilen = (fenster.puffer.hoehe / metrik().zeilen_hoehe as usize).max(1);
         term.groesse_setzen(spalten, zeilen);
+        // Dieser Pfad ist das VOLLE Neuzeichnen (Theme-/Skalierungs-
+        // Wechsel, alles_neu_zeichnen) — den Frame-Pfad mit nur den
+        // geänderten Zeilen geht inhalte_rendern direkt.
+        term.alles_markieren();
         terminal_rendern(term, &mut fenster.puffer);
         return;
     }
@@ -2291,13 +2379,7 @@ pub fn terminal_oeffnen() -> Option<u64> {
 /// Terminal fokussiert). Der Eingabe-Router wirft die Tasten dann in
 /// genau diese Sitzungs-Queue.
 pub fn terminal_fokus_sitzung() -> Option<u64> {
-    mit_manager(|m| {
-        m.fokus.and_then(|id| m.index_von(id)).and_then(|i| match m.fenster[i].inhalt {
-            Inhalt::Terminal { sitzung, .. } if !m.fenster[i].minimiert => Some(sitzung),
-            _ => None,
-        })
-    })
-    .flatten()
+    mit_manager(|m| m.fokus_terminal_sitzung()).flatten()
 }
 
 /// Umleitung von konsole::_print im Desktop-Modus: formatierten Text
@@ -2737,6 +2819,229 @@ mod tests {
         }
     }
 
+    /// SPEICHER-PASS Serie 3: ALLE Apps in Schleife öffnen, benutzen
+    /// (Tasten -> Nachrichten -> Neu-Aufbauten) und schließen — der
+    /// Heap darf danach nicht gewachsen sein. Deckt die neuen
+    /// Besitz-Ketten ab: Terminal-Sitzungen (Registry-Austrag),
+    /// SpeedTexts geteilter Arc-Puffer, Explorer-/Task-Manager-/
+    /// Einstellungs-Zustand, Fenster-Puffer.
+    #[test_case]
+    fn test_app_zyklen_lecken_nicht() {
+        let haupt_vorher = crate::shell::sitzung::haupt();
+        crate::shell::sitzung::haupt_setzen(0);
+        let mut manager = FensterManager::neu(1000, 800);
+        let sitzungen_vorher = crate::shell::sitzung::haupt(); // 0
+        let _ = sitzungen_vorher;
+
+        let runde = |manager: &mut FensterManager| {
+            // Terminal: öffnen, schreiben, rendern, schließen.
+            let sitzung = manager.terminal_oeffnen();
+            manager.terminal_schreiben(
+                sitzung,
+                format_args!("Zyklus-Ausgabe mit ein paar Zeichen\n"),
+                Farbe::neu(200, 200, 200),
+                Farbe::neu(0, 0, 0),
+            );
+            manager.inhalte_rendern();
+            let index = manager.terminal_index(sitzung).unwrap();
+            manager.fenster_schliessen(index);
+
+            // Die vier Trait-Apps: öffnen, per Tasten benutzen
+            // (Pfeil/Enter erzeugen echte Nachrichten samt
+            // Neu-Aufbauten), rendern, über den X-Knopf schließen.
+            let apps: [alloc::boxed::Box<dyn crate::ui::App>; 4] = [
+                alloc::boxed::Box::new(crate::explorer::ExplorerApp::neu()),
+                alloc::boxed::Box::new(crate::einstellungen::EinstellungenApp::neu()),
+                alloc::boxed::Box::new(crate::taskmanager::TaskManagerApp::neu()),
+                alloc::boxed::Box::new(crate::speedtext::SpeedTextApp::neu()),
+            ];
+            for app in apps {
+                let id = manager.fenster_erstellen(
+                    "Zyklus", 80, 80, 560, 400,
+                    Inhalt::App(crate::ui::AppFenster::neu(app)),
+                );
+                for taste in [
+                    DecodedKey::RawKey(pc_keyboard::KeyCode::ArrowDown),
+                    DecodedKey::Unicode('a'),
+                    DecodedKey::Unicode('\n'),
+                ] {
+                    let _ = manager.taste_event(taste);
+                }
+                manager.inhalte_rendern();
+                // SpeedText hat jetzt Änderungen -> der X-Knopf würde
+                // den Nachfrage-Dialog zeigen; für den Speicher-Test
+                // schließen wir DIREKT (der Dialog-Weg ist per
+                // Unit-Test abgedeckt) — auch das muss alles freigeben.
+                let index = manager.index_von(id).unwrap();
+                manager.fenster_schliessen(index);
+            }
+        };
+
+        // Aufwärmen: Kapazitäten (Vecs, BTreeMaps, Allocator-Listen)
+        // dürfen sich EINMAL einpendeln.
+        for _ in 0..3 {
+            runde(&mut manager);
+        }
+        let vorher = crate::allocator::heap_statistik().map(|(belegt, _)| belegt);
+
+        for _ in 0..20 {
+            runde(&mut manager);
+        }
+
+        let nachher = crate::allocator::heap_statistik().map(|(belegt, _)| belegt);
+        assert_eq!(
+            vorher, nachher,
+            "App-Zyklen lecken Heap: vorher {:?}, nachher {:?}",
+            vorher, nachher
+        );
+        crate::shell::sitzung::haupt_setzen(haupt_vorher);
+    }
+
+    /// MESSUNG (kein Pass/Fail) — Serie-3-Lastprofil: 5 offene
+    /// App-Fenster (2 Terminal-Sitzungen, Explorer, Task-Manager mit
+    /// gefülltem Graph, SpeedText mit 60 Zeilen). Szenarien: Vollbild,
+    /// Editor-Tippen (Taste -> Neu-Aufbau -> Rendern -> Komposition),
+    /// Terminal-Ausgabe (print -> Raster -> Rendern -> Komposition).
+    /// Zahlen in us/Frame seriell — Vergleichswerte im CHANGELOG.
+    #[test_case]
+    fn messung_serie3_apps_frame_zeit() {
+        use crate::serial_println;
+
+        if !framebuffer::ist_initialisiert() {
+            serial_println!("[MESSUNG-S3] uebersprungen (kein Framebuffer)");
+            return;
+        }
+        let haupt_vorher = crate::shell::sitzung::haupt();
+        crate::shell::sitzung::haupt_setzen(0);
+        let (breite, hoehe) = framebuffer::mit_framebuffer(|fb| {
+            (fb.info().width as i32, fb.info().height as i32)
+        })
+        .unwrap();
+        let mut manager = FensterManager::neu(breite, hoehe);
+
+        // 2 Terminal-Sitzungen mit etwas Inhalt:
+        let sitzung_a = manager.terminal_oeffnen();
+        let sitzung_b = manager.terminal_oeffnen();
+        for i in 0..20 {
+            manager.terminal_schreiben(
+                sitzung_a,
+                format_args!("Zeile {} mit etwas Text im Raster\n", i),
+                Farbe::neu(200, 200, 200),
+                Farbe::neu(0, 0, 0),
+            );
+        }
+
+        // Explorer, Task-Manager (Graph mit 60 Messwerten), SpeedText:
+        manager.fenster_erstellen(
+            "Explorer", 60, 60, 560, 400,
+            Inhalt::App(crate::ui::AppFenster::neu(alloc::boxed::Box::new(
+                crate::explorer::ExplorerApp::neu(),
+            ))),
+        );
+        let mut tm = crate::taskmanager::TaskManagerApp::neu();
+        tm.cpu_verlauf_fuellen_fuer_messung();
+        manager.fenster_erstellen(
+            "Task-Manager", 200, 140, 640, 460,
+            Inhalt::App(crate::ui::AppFenster::neu(alloc::boxed::Box::new(tm))),
+        );
+        let editor_text = "Der schnelle braune Fuchs springt ueber den faulen Hund.\n".repeat(60);
+        let _ = crate::fs::mit_fs(|f| f.schreiben("/messung_s3.txt", editor_text.as_bytes()));
+        manager.fenster_erstellen(
+            "SpeedText", 340, 200, 560, 420,
+            Inhalt::App(crate::ui::AppFenster::neu(alloc::boxed::Box::new(
+                crate::speedtext::SpeedTextApp::mit_datei("/messung_s3.txt"),
+            ))),
+        );
+
+        framebuffer::mit_framebuffer(hintergrund_in_cache_rendern);
+        manager.hintergrund_neu = false;
+
+        const FRAMES: u64 = 40;
+        let szenario = |name: &str,
+                        manager: &mut FensterManager,
+                        schritt: &mut dyn FnMut(&mut FensterManager, u64)| {
+            let start = zeit::us_seit_boot();
+            for i in 0..FRAMES {
+                schritt(manager, i);
+                manager.inhalte_rendern();
+                framebuffer::mit_framebuffer(|fb| {
+                    let rects =
+                        manager.dirty_abholen(fb.info().width as i32, fb.info().height as i32);
+                    if let Some(rects) = rects {
+                        manager.komponieren(fb, &rects);
+                        for r in &rects {
+                            fb.present_bereich(
+                                r.x.max(0) as usize,
+                                r.y.max(0) as usize,
+                                r.breite as usize,
+                                r.hoehe as usize,
+                            );
+                        }
+                    }
+                });
+            }
+            let dauer_us = zeit::us_seit_boot() - start;
+            serial_println!(
+                "[MESSUNG-S3] {}: {} Frames -> {} us/Frame",
+                name,
+                FRAMES,
+                dauer_us / FRAMES
+            );
+        };
+
+        // 1. Vollbild: alle 5 Fenster + Taskleiste komplett.
+        szenario("Vollbild 5 Fenster", &mut manager, &mut |m, _| m.alles_dirty = true);
+        // 2. Editor-Tippen, ALTER WEG simuliert (kompletter Baum-
+        //    Neuaufbau + Voll-Zeichnen pro Taste — so war es vor dem
+        //    Performance-Pass) vs. NEUER Weg (StatusZeile liest live,
+        //    nur Neuzeichnen). Beide im SELBEN Lauf — die Zahlen sind
+        //    damit unabhängig davon, ob QEMU mit WHPX oder TCG läuft.
+        szenario("Editor-Tippen ALT (Neu-Aufbau)", &mut manager, &mut |m, _| {
+            let _ = m.taste_event(DecodedKey::Unicode('a'));
+            let index = m.fenster.len() - 1; // SpeedText (fokussiert)
+            if let Inhalt::App(app_fenster) = &mut m.fenster[index].inhalt {
+                app_fenster.neu_aufbauen();
+            }
+            m.fenster[index].inhalt_neu = true;
+            m.fenster[index].dirty = true;
+        });
+        szenario("Editor-Tippen NEU", &mut manager, &mut |m, _| {
+            let _ = m.taste_event(DecodedKey::Unicode('a'));
+        });
+        // 3. Terminal-Ausgabe in die (nicht fokussierte) Sitzung A —
+        //    ALTER Weg (ganzes Raster rendern + Fensterfläche
+        //    komponieren) vs. NEUER Weg (nur der Zeilen-Streifen).
+        szenario("Terminal-Ausgabe ALT (voll)", &mut manager, &mut |m, i| {
+            m.terminal_schreiben(
+                sitzung_a,
+                format_args!("Ausgabe-Zeile Nummer {} im Messlauf\n", i),
+                Farbe::neu(200, 200, 200),
+                Farbe::neu(0, 0, 0),
+            );
+            let index = m.terminal_index(sitzung_a).unwrap();
+            if let Inhalt::Terminal { term, .. } = &mut m.fenster[index].inhalt {
+                term.alles_markieren();
+            }
+            m.fenster[index].dirty = true;
+        });
+        szenario("Terminal-Ausgabe NEU", &mut manager, &mut |m, i| {
+            m.terminal_schreiben(
+                sitzung_a,
+                format_args!("Ausgabe-Zeile Nummer {} im Messlauf\n", i),
+                Farbe::neu(200, 200, 200),
+                Farbe::neu(0, 0, 0),
+            );
+        });
+
+        // Aufräumen: Sitzungen austragen, Messdatei löschen.
+        let index = manager.terminal_index(sitzung_a).unwrap();
+        manager.fenster_schliessen(index);
+        let index = manager.terminal_index(sitzung_b).unwrap();
+        manager.fenster_schliessen(index);
+        crate::shell::sitzung::haupt_setzen(haupt_vorher);
+        let _ = crate::fs::mit_fs(|f| f.loeschen("/messung_s3.txt"));
+    }
+
     /// MESSUNG (kein Pass/Fail): Frame-Zeit des Compositors bei
     /// 3 offenen Fenstern + Mausbewegung (Drag setzt alles_dirty wie
     /// im echten Betrieb). Ausgabe in ms/Frame über die serielle
@@ -2845,6 +3150,103 @@ mod tests {
                 neu_us
             );
         });
+    }
+
+    /// FOKUS über Fenster-Wechsel hinweg: Tasten landen im Widget
+    /// des FOKUSSIERTEN Fensters — und das fokussierte Textfeld des
+    /// anderen Fensters behält seinen Fokus, bis man zurückwechselt.
+    #[test_case]
+    fn test_fokus_ueber_fensterwechsel() {
+        use crate::ui::widgets::Textfeld;
+        use crate::ui::UiFenster;
+
+        let mut manager = FensterManager::neu(1000, 800);
+        let mut ui_a = UiFenster::neu(
+            alloc::boxed::Box::new(Textfeld::neu(100)),
+            |_| {},
+            &crate::grafik::ICON_LOGO,
+        );
+        ui_a.fokus_initial();
+        let a = manager.fenster_erstellen("A", 100, 100, 300, 120, Inhalt::Ui(ui_a));
+        let mut ui_b = UiFenster::neu(
+            alloc::boxed::Box::new(Textfeld::neu(200)),
+            |_| {},
+            &crate::grafik::ICON_LOGO,
+        );
+        ui_b.fokus_initial();
+        let b = manager.fenster_erstellen("B", 500, 100, 300, 120, Inhalt::Ui(ui_b));
+
+        // B ist zuletzt erstellt -> fokussiert: Enter meldet die
+        // Nachricht von B-Textfeld (200) als NachLock nach draußen.
+        assert_eq!(manager.fokus(), Some(b));
+        match manager.taste_event(DecodedKey::Unicode('\n')) {
+            NachLock::Nachricht(_, id) => assert_eq!(id, 200),
+            _ => panic!("Enter erreichte B nicht"),
+        }
+
+        // Klick auf die Titelzeile von A: Fenster-Fokus wechselt,
+        // OHNE den Widget-Fokus in A anzutasten — Enter landet
+        // jetzt im A-Textfeld (100).
+        manager.maus_event(&MausEvent::Gedrueckt(MausTaste::Links), 150, 110);
+        manager.maus_event(&MausEvent::Losgelassen(MausTaste::Links), 150, 110);
+        assert_eq!(manager.fokus(), Some(a));
+        match manager.taste_event(DecodedKey::Unicode('\n')) {
+            NachLock::Nachricht(_, id) => assert_eq!(id, 100),
+            _ => panic!("Enter erreichte A nicht"),
+        }
+
+        // Und zurück: B hat seinen Widget-Fokus ebenfalls behalten.
+        manager.fokussieren_und_heben(b);
+        match manager.taste_event(DecodedKey::Unicode('\n')) {
+            NachLock::Nachricht(_, id) => assert_eq!(id, 200),
+            _ => panic!("Enter erreichte B nach dem Rueckwechsel nicht"),
+        }
+    }
+
+    /// SITZUNGS-ZUORDNUNG: fokus_terminal_sitzung liefert genau die
+    /// Sitzung des fokussierten Terminals (die Routing-Grundlage des
+    /// Eingabe-Routers) — auch nach Fokuswechsel, bei minimiertem
+    /// Terminal und bei fokussiertem Nicht-Terminal.
+    #[test_case]
+    fn test_terminal_fokus_sitzung_zuordnung() {
+        let haupt_vorher = crate::shell::sitzung::haupt();
+        crate::shell::sitzung::haupt_setzen(0);
+        let mut manager = FensterManager::neu(1000, 800);
+        let erste = manager.terminal_oeffnen();
+        let zweite = manager.terminal_oeffnen();
+
+        // Zuletzt geöffnet = fokussiert -> zweite Sitzung; Tasten
+        // landen (wie im Eingabe-Router) in genau DEREN Queue:
+        assert_eq!(manager.fokus_terminal_sitzung(), Some(zweite));
+        let ziel = manager.fokus_terminal_sitzung().unwrap();
+        crate::shell::sitzung::taste_einwerfen(ziel, DecodedKey::Unicode('x'));
+        let s1 = crate::shell::sitzung::holen(erste).unwrap();
+        let s2 = crate::shell::sitzung::holen(zweite).unwrap();
+        assert_eq!(s2.taste_abholen(), Some(DecodedKey::Unicode('x')));
+        assert_eq!(s1.taste_abholen(), None);
+
+        // Fokus aufs erste Terminal -> erste Sitzung.
+        let erste_id = manager.fenster[manager.terminal_index(erste).unwrap()].id;
+        manager.fokussieren_und_heben(erste_id);
+        assert_eq!(manager.fokus_terminal_sitzung(), Some(erste));
+
+        // Minimiert zählt nicht (der Router gäbe die Taste ans
+        // nächste fokussierte Fenster statt an eine unsichtbare Shell):
+        let index = manager.terminal_index(erste).unwrap();
+        manager.fenster[index].minimiert = true;
+        assert_eq!(manager.fokus_terminal_sitzung(), None);
+
+        // Ein fokussiertes NICHT-Terminal liefert ebenfalls None:
+        let uhr = manager.fenster_erstellen("Uhr", 50, 50, 220, 100, Inhalt::Uhr);
+        manager.fokussieren_und_heben(uhr);
+        assert_eq!(manager.fokus_terminal_sitzung(), None);
+
+        // Aufräumen (globale Sitzungs-Registry sauber hinterlassen):
+        let index = manager.terminal_index(erste).unwrap();
+        manager.fenster_schliessen(index);
+        let index = manager.terminal_index(zweite).unwrap();
+        manager.fenster_schliessen(index);
+        crate::shell::sitzung::haupt_setzen(haupt_vorher);
     }
 
     /// Terminal-SITZUNGEN: Jedes Öffnen erzeugt ein eigenes Fenster

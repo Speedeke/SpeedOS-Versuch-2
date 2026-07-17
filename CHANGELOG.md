@@ -5,6 +5,61 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### Serie-3-Abschluss (Qualitäts-, Performance- und Speicher-Pass)
+- Neue Tests für die kritischsten App-Schicht-Lücken: Event-Routing
+  durch VERSCHACHTELTE Container (Klick/Taste/MausRaus über zwei
+  Ebenen), Fokus über Fenster-Wechsel hinweg (Widget-Fokus bleibt
+  pro Fenster erhalten), Sitzungs-Zuordnung der Terminals
+  (fokus_terminal_sitzung als testbare Manager-Methode)
+- Performance-Pass mit neuem Serie-3-Berichts-Test (5 Fenster:
+  2 Terminal-Sitzungen, Explorer, Task-Manager mit vollem Graph,
+  SpeedText mit 60 Zeilen; A/B alt-gegen-neu im SELBEN Lauf, damit
+  die WHPX/TCG-Lotterie die Zahlen nicht verfälscht):
+
+  | Szenario (720p)      | vorher | nachher |
+  |----------------------|--------|---------|
+  | Terminal-Ausgabe     | 555 us | 275 us  |
+  | Editor-Tippen        | 466 us | 403 us  |
+  | Vollbild 5 Fenster   | 544 us | (unverändert) |
+
+  Optimierung 1: Das Terminal-Raster führt DIRTY-ZEILEN — eine
+  Prompt-Ausgabe rendert nur ihre Rasterzeile in den persistenten
+  Fenster-Puffer, und terminal_schreiben meldet dem Compositor nur
+  noch den Zeilen-STREIFEN statt der Fensterfläche (2x schneller;
+  Scroll/Resize/Theme markieren weiterhin alles).
+  Optimierung 2: SpeedText baut beim Tippen den Widget-Baum NICHT
+  mehr neu — die neue StatusZeile liest Zeile/Spalte/Zeichen live
+  aus dem geteilten Puffer, der Titel wird nur bei echtem Wechsel
+  gemeldet. Ehrliche Bilanz: nur -14 %, denn der Fresser ist das
+  Voll-Zeichnen+Komponieren der Fensterfläche pro Taste — Teil-
+  Rect-Compositing für Widget-Fenster ist als Serie-4-Kandidat
+  notiert
+- Speicher-Pass: App-Zyklen-Test (Terminal + alle vier Trait-Apps
+  20x öffnen/benutzen/schließen) — Heap exakt stabil, KEIN Leck
+  gefunden (die Besitz-Ketten Arc-Puffer/Sitzungs-Registry/
+  Fenster-Puffer geben vollständig frei)
+- unsafe-Audit: Die GESAMTE Serie 3 (Toolkit, vier Apps,
+  Terminal-Sitzungen, Task-Übersicht) kommt ohne einen einzigen
+  neuen unsafe-Block aus — alle 82 unsafe-Stellen liegen in den
+  Hardware-Modulen aus Serie 1/2
+- Toolkit-Review nach drei echten Apps: BEWÄHRT haben sich
+  Nachricht-IDs mit Basis-Kodierung, Zustand-in-App + aufbau(),
+  die NachLock-Disziplin (null Deadlocks in der ganzen Serie) und
+  das Arc-Muster für heißen Widget-Zustand. UMSTÄNDLICH waren das
+  Box-Cast-Boilerplate (-> neuer Helfer ui::w()), die duplizierte
+  Sekunden-Tick-Logik (-> ui::app::SekundenTick, Einstellungen +
+  Task-Manager umgestellt) und der Textfeld-Zustandsverlust bei
+  Neu-Aufbauten (Muster dokumentiert; echte Lösung = geteilter
+  Zustand wie im Editor). Notiert, nicht geändert: Tab ist global
+  Fokus-Taste (der Editor kann keine Tabs einfügen), Nachricht-
+  Basen bleiben Handarbeit
+- docs/serie4-bestandsaufnahme.md: die ehrliche Bestandsaufnahme
+  für Serie 4 — VFS-Lücken (read_at/write_at, stat, rename, sync,
+  BlockDevice-Trait), Treiber-Empfehlung (ATA PIO zuerst, dann
+  virtio-blk; AHCI vertagt), PIC trägt Serie 4 (APIC/MSI als
+  eigener Meilenstein), USB-Stick-Boot: Booten ja, PS/2-Emulation
+  ist das Risiko, Persistenz auf dem Stick braucht xHCI (Blocker)
+
 ### Hinzugefügt (Terminal-Sitzungen + SpeedText — die letzte App der Serie)
 - TERMINAL-SITZUNGEN (das Ein-Terminal-Limit fällt): Jedes
   Terminal-Fenster trägt eine Sitzungs-Id, pro Sitzung läuft ein
