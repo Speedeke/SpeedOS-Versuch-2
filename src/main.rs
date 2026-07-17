@@ -24,7 +24,7 @@ extern crate alloc;
 
 use bootloader_api::{entry_point, BootInfo};
 use core::panic::PanicInfo;
-use speed_os::task::{executor::Executor, Task};
+use speed_os::task::{executor::Executor, Task, TaskArt};
 use speed_os::{allocator, framebuffer, konsole, memory, serial_println, shell};
 use x86_64::VirtAddr;
 
@@ -104,12 +104,18 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     // 7. Der Executor übernimmt als Hauptschleife: SpeedShell,
     //    Compositor, Maus & Co. laufen als kooperative Tasks.
+    //    Jeder Task bekommt einen NAMEN (und die Fenster-Welt ihre
+    //    Art) — so sind sie im Task-Manager erkennbar.
     let mut executor = Executor::new();
-    executor.spawn(Task::new(shell::run()));
-    executor.spawn(Task::new(konsole::cursor_blink_task()));
-    executor.spawn(Task::new(speed_os::maus::maus_task()));
-    executor.spawn(Task::new(speed_os::fenster::compositor_task()));
-    executor.spawn(Task::new(speed_os::fenster::uhr_task()));
+    executor.spawn(Task::new("SpeedShell (Terminal)", shell::run()).mit_art(TaskArt::Fenster));
+    executor.spawn(Task::new("Konsolen-Cursor", konsole::cursor_blink_task()));
+    executor.spawn(Task::new("PS/2-Maus", speed_os::maus::maus_task()));
+    executor.spawn(
+        Task::new("Compositor", speed_os::fenster::compositor_task()).mit_art(TaskArt::Fenster),
+    );
+    executor.spawn(
+        Task::new("Desktop-Uhr", speed_os::fenster::uhr_task()).mit_art(TaskArt::Fenster),
+    );
     executor.run();
 }
 

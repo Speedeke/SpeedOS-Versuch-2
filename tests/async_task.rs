@@ -50,9 +50,9 @@ fn main(boot_info: &'static mut BootInfo) -> ! {
     // Bewusst mit kleiner konfigurierter Kapazität (Aufgabe 2c) —
     // auch damit muss alles funktionieren.
     let mut executor = Executor::mit_kapazitaet(8);
-    executor.spawn(Task::new(zaehler("A")));
-    executor.spawn(Task::new(zaehler("B")));
-    executor.spawn(Task::new(pruef_task()));
+    executor.spawn(Task::new("Zaehler A", zaehler("A")));
+    executor.spawn(Task::new("Zaehler B", zaehler("B")));
+    executor.spawn(Task::new("Pruef-Task", pruef_task()));
     executor.run();
 }
 
@@ -87,7 +87,7 @@ async fn pruef_task() {
 
     // Aufgabe 2a: Ein Task spawnt einen neuen Task — ohne Executor-
     // Referenz, einfach über die globale Spawn-Queue.
-    if task::spawn(Task::new(end_task())).is_err() {
+    if task::spawn(Task::new("End-Task", end_task())).is_err() {
         panic!("task::spawn fehlgeschlagen (Spawn-Queue voll?)");
     }
     // Dieser Task endet hier — wenn end_task nie liefe, bliebe QEMU

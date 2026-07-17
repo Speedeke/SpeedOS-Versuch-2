@@ -29,6 +29,11 @@ persistent in /system/einstellungen.txt gespeichert.*
 *Drei Klicks später: Aurora Hell + grüner Akzent + Ozean-Hintergrund —
 die Wahl überlebt das Schließen der App.*
 
+![Task-Manager](docs/screenshots/taskmanager.png)
+*Der Task-Manager: echte CPU-Auslastung (TSC-Messung Arbeit vs. hlt-Schlaf)
+mit 60-Sekunden-Graph, Heap-Belegung und alle Executor-Tasks mit Namen,
+Laufzeit und Polls/s — Demo-Tasks lassen sich kooperativ beenden.*
+
 ![Widget-Galerie](docs/screenshots/widget-galerie.png)
 *Das UI-Toolkit (ui-Modul): Buttons, Checkbox, Textfeld (ZeilenEditor + blinkender
 Cursor), ScrollListe mit Scrollbalken — das Fundament für Explorer & Co.*
@@ -76,9 +81,11 @@ Cursor), ScrollListe mit Scrollbalken — das Fundament für Explorer & Co.*
   Snap, Alt+Tab, UI-Skalierung 1.0/1.5/2.0
 - **UI-Toolkit + Apps:** retained Widget-Baum (`src/ui/`) mit Buttons,
   Textfeld, ScrollListe & Co. — darauf laufen der Explorer (Navigation,
-  Dateioperationen, Papierkorb, Kontextmenüs, Strg+C/X/V) und die
+  Dateioperationen, Papierkorb, Kontextmenüs, Strg+C/X/V), die
   Einstellungen-App (Theme/Akzent/Hintergrund, Skalierung,
-  Cursor-Blinken, Uhr-Format/-Offset, System-Info)
+  Cursor-Blinken, Uhr-Format/-Offset, System-Info) und der
+  Task-Manager (benannte Executor-Tasks, echte CPU-Auslastung per
+  TSC mit Live-Graph, Heap-Anzeige, kooperatives Task-Beenden)
 - **Einstellungs-Persistenz:** typisierter Schlüssel=Wert-Store, der
   sofort nach /system/einstellungen.txt schreibt und beim Boot lädt —
   die API-Naht, über die später das Disk-Dateisystem echte
@@ -162,6 +169,7 @@ src/
 ├── apps.rs          App-Registry (Startmenü-Einträge)
 ├── explorer.rs      Explorer-App: Navigation, Dateioperationen, Papierkorb
 ├── einstellungen.rs Einstellungs-Store (VFS-persistent) + Einstellungen-App
+├── taskmanager.rs   Task-Manager-App: CPU-Graph, Task-Tabelle, Beenden
 ├── ablage.rs        Globale Zwischenablage (Strg+C/X/V)
 ├── maus.rs          PS/2-Maus: Init, Paket-Parsing, Cursor-Overlay
 ├── serial.rs        Serielle Ausgabe (COM1), parallel zum Bildschirm
@@ -195,7 +203,8 @@ docs/                Migrationsplan bootloader 0.9 -> 0.11, Screenshots
       Auflösungswahl bis 4K, UI-Skalierung, Dirty-Rect-Compositing
 - [x] **UI-Toolkit + erste Apps:** retained Widget-Baum, Explorer
       (Dateioperationen, Papierkorb, Kontextmenüs, Zwischenablage),
-      Einstellungen-App mit persistentem Einstellungs-Store (VFS)
+      Einstellungen-App mit persistentem Einstellungs-Store (VFS),
+      Task-Manager (benannte Tasks, CPU-Metrik, kooperatives Beenden)
 - [ ] **Persistenz:** Block-Device-Treiber + Disk-Dateisystem (VFS und
       Einstellungs-Store sind bereit)
 - [ ] **User Space:** Ring-3-Prozesse, Syscalls, präemptiver Scheduler

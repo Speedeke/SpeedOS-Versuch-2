@@ -24,6 +24,7 @@
 // (Der Timer-Interrupt weckt die CPU spätestens nach ~4 ms aus dem
 // hlt, selbst wenn das Flag mitten im Einschlafen gesetzt wurde.)
 
+use super::uebersicht::{self, TaskZaehler};
 use super::{Task, TaskId};
 use alloc::{collections::BTreeMap, sync::Arc, task::Wake, vec::Vec};
 use conquer_once::spin::OnceCell;
@@ -97,6 +98,15 @@ impl Executor {
     /// Nimmt einen neuen Task auf und reiht ihn zum ersten Lauf ein.
     pub fn spawn(&mut self, task: Task) {
         let task_id = task.id;
+        // Steckbrief in die Task-Übersicht eintragen (Task-Manager);
+        // die Zähler teilen sich Task, Waker und Übersicht per Arc.
+        uebersicht::registrieren(
+            task_id.als_zahl(),
+            task.name.clone(),
+            task.art,
+            task.beendbar,
+            task.zaehler.clone(),
+        );
         if self.tasks.insert(task_id, task).is_some() {
             panic!("Task-ID {:?} existiert schon", task_id);
         }
@@ -110,15 +120,35 @@ impl Executor {
 
     /// Die Hauptschleife des Kernels: Tasks abarbeiten, dann schlafen.
     /// Kehrt nie zurück — sie IST ab jetzt unser Leerlauf.
+    /// Nebenbei die CPU-METRIK: Die Zeit in run_ready_tasks ist
+    /// ARBEIT, die Zeit im hlt (sleep_if_idle) ist RUHE — beides per
+    /// TSC gemessen und ins Auslastungs-Gleitfenster verbucht.
     pub fn run(&mut self) -> ! {
         loop {
+            let start_us = crate::zeit::us_seit_boot();
             self.run_ready_tasks();
+            let arbeit_us = crate::zeit::us_seit_boot() - start_us;
+            uebersicht::cpu_verbuchen(arbeit_us, 0);
             self.sleep_if_idle();
         }
     }
 
     /// Arbeitet alle aktuell anstehenden Aufgaben genau einmal ab.
     fn run_ready_tasks(&mut self) {
+        // 0. Beenden-Anforderungen aus dem Task-Manager: Der Task
+        //    wird FALLEN GELASSEN (Drop der Future) — kooperativ
+        //    heißt: Er endet an seinem aktuellen await-Punkt, nie
+        //    mitten in einer Anweisung. Drop räumt sauber auf.
+        for id in uebersicht::beenden_abholen() {
+            let task_id = TaskId::aus_zahl(id);
+            if self.tasks.remove(&task_id).is_some() {
+                self.waker_cache.remove(&task_id);
+                uebersicht::austragen(id);
+                TASK_ANZAHL.store(self.tasks.len(), Ordering::Relaxed);
+                crate::serial_println!("[EXECUTOR] Task {} auf Anforderung beendet.", id);
+            }
+        }
+
         // 1. Neuzugänge aus der globalen Spawn-Queue übernehmen:
         if let Ok(spawn_queue) = SPAWN_QUEUE.try_get() {
             while let Some(task) = spawn_queue.pop() {
@@ -147,9 +177,15 @@ impl Executor {
             Some(task) => task,
             None => return, // Task existiert nicht mehr (fertig)
         };
+        // Aktivitätszähler: Der Task wird jetzt gepollt — VOR dem
+        // Poll auf "schläft" stellen, damit ein Selbst-Wecken
+        // WÄHREND des Polls (yield_now) wieder "wach" setzen kann.
+        task.zaehler.polls.fetch_add(1, Ordering::Relaxed);
+        task.zaehler.wach.store(false, Ordering::Relaxed);
+        let zaehler = task.zaehler.clone();
         // Waker aus dem Cache holen oder einmalig erzeugen:
         let waker = self.waker_cache.entry(task_id).or_insert_with(|| {
-            TaskWaker::waker(task_id, self.task_queue.clone(), self.ueberlauf.clone())
+            TaskWaker::waker(task_id, self.task_queue.clone(), self.ueberlauf.clone(), zaehler)
         });
         let mut context = Context::from_waker(waker);
         match task.poll(&mut context) {
@@ -157,6 +193,7 @@ impl Executor {
                 // Fertig! Task und seinen Waker entsorgen.
                 self.tasks.remove(&task_id);
                 self.waker_cache.remove(&task_id);
+                uebersicht::austragen(task_id.als_zahl());
                 TASK_ANZAHL.store(self.tasks.len(), Ordering::Relaxed);
             }
             Poll::Pending => {
@@ -185,7 +222,12 @@ impl Executor {
             && spawn_queue_leer
             && !self.ueberlauf.load(Ordering::Relaxed)
         {
+            // RUHE messen: Der TSC läuft auch mit Interrupts aus
+            // weiter; die Handler-Zeit nach dem Aufwachen zählt mit
+            // zur Ruhe — Handler sind minimal, das ist ehrlich genug.
+            let start_us = crate::zeit::us_seit_boot();
             enable_and_hlt();
+            uebersicht::cpu_verbuchen(0, crate::zeit::us_seit_boot() - start_us);
         } else {
             interrupts::enable();
         }
@@ -200,11 +242,13 @@ impl Default for Executor {
 }
 
 /// Der Waker eines Tasks: kennt die Task-ID und die Warteschlange.
-/// wake() = "ID wieder einreihen". Mehr ist es nicht!
+/// wake() = "ID wieder einreihen" — plus Zählerpflege für die
+/// Task-Übersicht (Atomics, denn wake feuert aus Interrupt-Handlern).
 struct TaskWaker {
     task_id: TaskId,
     task_queue: Arc<ArrayQueue<TaskId>>,
     ueberlauf: Arc<AtomicBool>,
+    zaehler: Arc<TaskZaehler>,
 }
 
 impl TaskWaker {
@@ -214,15 +258,20 @@ impl TaskWaker {
         task_id: TaskId,
         task_queue: Arc<ArrayQueue<TaskId>>,
         ueberlauf: Arc<AtomicBool>,
+        zaehler: Arc<TaskZaehler>,
     ) -> Waker {
         Waker::from(Arc::new(TaskWaker {
             task_id,
             task_queue,
             ueberlauf,
+            zaehler,
         }))
     }
 
     fn wake_task(&self) {
+        // Übersicht: geweckt -> Zähler hoch, Status "wachend".
+        self.zaehler.wecken.fetch_add(1, Ordering::Relaxed);
+        self.zaehler.wach.store(true, Ordering::Relaxed);
         // push auf die lock-freie Queue: darf auch mitten im
         // Interrupt-Handler passieren, blockiert nie.
         if self.task_queue.push(self.task_id).is_err() {

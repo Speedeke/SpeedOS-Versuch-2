@@ -46,6 +46,7 @@ pub mod rtc;
 pub mod serial;
 pub mod shell;
 pub mod task;
+pub mod taskmanager;
 pub mod theme;
 pub mod ui;
 pub mod zeit;

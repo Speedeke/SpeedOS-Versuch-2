@@ -557,6 +557,28 @@ pub static ICON_DATEI: Icon = Icon {
     ],
 };
 
+/// Balkendiagramm (Task-Manager): drei Aurora-Balken auf Grundlinie.
+pub static ICON_TASKS: Icon = Icon {
+    zeilen: [
+        "................",
+        "................",
+        "................",
+        "..........cc....",
+        "..........cc....",
+        "......bb..cc....",
+        "......bb..cc....",
+        "......bb..cc....",
+        "..vv..bb..cc....",
+        "..vv..bb..cc....",
+        "..vv..bb..cc....",
+        "..vv..bb..cc....",
+        "..hhhhhhhhhhhh..",
+        "................",
+        "................",
+        "................",
+    ],
+};
+
 /// Zahnrad (Einstellungen).
 pub static ICON_ZAHNRAD: Icon = Icon {
     zeilen: [
@@ -1003,7 +1025,7 @@ mod tests {
         for icon in [
             &ICON_ORDNER, &ICON_DATEI, &ICON_ZAHNRAD, &ICON_LOGO,
             &ICON_TERMINAL, &ICON_UHR, &ICON_TASTATUR, &ICON_PINSEL,
-            &ICON_NEUSTART, &ICON_THEME,
+            &ICON_NEUSTART, &ICON_THEME, &ICON_TASKS,
         ] {
             assert_eq!(icon.zeilen.len(), 16);
             for zeile in icon.zeilen.iter() {

@@ -355,6 +355,20 @@
   hlt (race-frei via disable/enable_and_hlt). Tasks spawnen neue Tasks
   über `task::spawn()` (globale Spawn-Queue; NIE aus Interrupt-Handlern,
   denn Task::new alloziert). Tasks/Futures müssen `Send` sein.
+  SEIT DEM TASK-MANAGER: Task::new(NAME, future) — jeder Task trägt
+  Name/Art/beendbar (Builder mit_art/als_beendbar); die Registry
+  in `task/uebersicht.rs` ist die Schatten-Buchhaltung (Blatt-Lock,
+  Momentaufnahme unterm MANAGER-Lock erlaubt), die heißen Zähler
+  (Polls/Wecken/wach) sind Atomics im geteilten Arc — der WAKER
+  zählt aus dem Interrupt-Kontext, ohne Lock. Beenden ist
+  KOOPERATIV: beenden_anfordern setzt nur ein Flag, der Executor
+  lässt den Task in der nächsten Runde am await-Punkt FALLEN (Drop
+  der Future — nur beendbare Demo-Tasks, Kernel-Tasks geschützt).
+  CPU-Auslastung: run() misst per TSC Arbeit (run_ready_tasks) vs.
+  Ruhe (hlt) und verbucht in ein 10x100-ms-Gleitfenster
+  (cpu_auslastung_prozent, reine getestete Fenster-Logik).
+  Die Task-Manager-App (src/taskmanager.rs) zeigt alles sekündlich
+  per tick; Graph-Downsampling nimmt das Spalten-MAXIMUM.
   Volle Warteschlangen panicken NICHT: Überlauf setzt ein Notfall-Flag,
   die nächste Runde pollt alle Tasks — kein Wecken geht verloren.
   Kapazität konfigurierbar (`Executor::mit_kapazitaet`, Standard 128).

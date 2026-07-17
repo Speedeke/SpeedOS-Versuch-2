@@ -5,6 +5,41 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### Hinzugefügt (Task-Manager: App + Executor-Übersicht)
+- Executor-Erweiterung (src/task/uebersicht.rs): Jeder Task bekommt
+  beim Spawnen einen NAMEN, seine Id und den Startzeitpunkt; eine
+  globale Registry (Blatt-Lock) führt die Schatten-Buchhaltung, die
+  heißen Zähler (Polls, Wecken, wach/schläft) sind Atomics in einem
+  Arc, das sich Executor, Waker und Registry teilen — der Waker
+  feuert aus Interrupt-Handlern und darf keinen Lock nehmen.
+  momentaufnahme() liefert die sortierte Liste (Id, Name, Art,
+  Laufzeit, Status, Zähler), anzahl() die Gesamtzahl. Alle
+  bestehenden spawn-Aufrufe tragen jetzt sinnvolle Namen
+  (SpeedShell (Terminal), Compositor, Desktop-Uhr, PS/2-Maus, ...)
+- CPU-Metrik: Der Executor misst per TSC die Zeit in
+  run_ready_tasks (Arbeit) vs. im hlt-Schlaf (Ruhe) und verbucht
+  beides in einem gleitenden Fenster aus 10 Eimern à 100 ms —
+  cpu_auslastung_prozent() ist die ehrliche System-Auslastung über
+  ~1 s (reine, unit-getestete Fenster-Logik)
+- src/taskmanager.rs — die Task-Manager-App: Kopfzeile mit CPU-%,
+  Live-Graph der letzten 60 s (Linien-Rendering mit Spalten-MAXIMUM
+  beim Downsampling — Spitzen bleiben sichtbar) und Heap-Belegung;
+  Tabelle (Id, Name, Art Kernel/Fenster/Demo, Laufzeit, Polls/s,
+  wach/schläft) mit sekündlichem tick-Update, Auswahl überlebt als
+  Task-ID; "Task beenden" wirkt nur auf beendbare Tasks (Demos),
+  bei geschützten Kernel-/Fenster-Tasks ist der Knopf gedimmt
+  (neues Button::mit_deaktiviert). EHRLICH dokumentiert (Info-Zeile
+  + Code): Kooperative Tasks werden beim nächsten Executor-
+  Durchlauf an ihrem await-Punkt FALLEN GELASSEN (Drop), nicht
+  abgeschossen — "Demo-Task starten" spawnt einen beendbaren
+  Zähler-Task zum gefahrlosen Ausprobieren
+- Neues Icon ICON_TASKS (Balkendiagramm); Registry-Eintrag
+  "Task-Manager" im Startmenü
+- Unit-Tests: Momentaufnahme-Konsistenz (Zähler, Sortierung,
+  Beenden-Schutz), Auslastungs-Gleitfenster mit synthetischen
+  Zahlen (Rotation, Zeitsprünge, 100-%-Deckel), Graph-Downsampling
+  (Spalten-Maximum, Achsen-Abbildung, Grenzfälle), Laufzeit-Format
+
 ### Hinzugefügt (Einstellungen: App + persistenter Store)
 - src/einstellungen.rs, Teil 1 — der persistente Einstellungs-Store:
   Schlüssel=Wert-Datei /system/einstellungen.txt im VFS (parsen/

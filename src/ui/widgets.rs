@@ -106,6 +106,9 @@ pub struct Button {
     /// Dauerhaft hervorgehoben (die AKTIVE Wahl in einer Options-
     /// Gruppe, z. B. das gewählte Theme in den Einstellungen).
     aktiv: bool,
+    /// Ausgegraut und ohne Wirkung (z. B. "Task beenden" bei einem
+    /// geschützten Kernel-Task).
+    deaktiviert: bool,
 }
 
 impl Button {
@@ -117,6 +120,7 @@ impl Button {
             hover: false,
             gedrueckt: false,
             aktiv: false,
+            deaktiviert: false,
         }
     }
     pub fn mit_icon(text: &str, icon: &'static Icon, nachricht: u32) -> Self {
@@ -125,6 +129,11 @@ impl Button {
     /// Builder: als aktive Wahl markieren (Auswahl-Füllung + Akzent).
     pub fn mit_aktiv(mut self, aktiv: bool) -> Self {
         self.aktiv = aktiv;
+        self
+    }
+    /// Builder: deaktivieren (gedimmt, schluckt keine Klicks).
+    pub fn mit_deaktiviert(mut self, deaktiviert: bool) -> Self {
+        self.deaktiviert = deaktiviert;
         self
     }
 }
@@ -140,8 +149,11 @@ impl Widget for Button {
 
     fn zeichnen(&self, z: &mut Zeichner<'_, FensterPuffer>, bereich: Rechteck) {
         let thema = theme::aktuell();
-        // Zustand -> Füllung: gedrückt/aktiv (Auswahl) > hover > normal.
-        let fuellung = if self.gedrueckt || self.aktiv {
+        // Zustand -> Füllung: gedrückt/aktiv (Auswahl) > hover > normal;
+        // deaktiviert bleibt flach und ohne Akzent.
+        let fuellung = if self.deaktiviert {
+            thema.eingabefeld
+        } else if self.gedrueckt || self.aktiv {
             thema.auswahl
         } else if self.hover {
             thema.leiste_knopf_aktiv
@@ -151,7 +163,11 @@ impl Widget for Button {
         z.rechteck_abgerundet(bereich, metrik().radius_klein, fuellung);
         z.rechteck_rahmen(
             bereich,
-            if self.hover || self.aktiv { thema.akzent } else { thema.rahmen_passiv },
+            if !self.deaktiviert && (self.hover || self.aktiv) {
+                thema.akzent
+            } else {
+                thema.rahmen_passiv
+            },
         );
 
         let mut text_x = bereich.x
@@ -169,11 +185,15 @@ impl Widget for Button {
             &self.text,
             metrik().schrift_ui,
             FontWeight::Regular,
-            thema.text_stark,
+            if self.deaktiviert { thema.text_gedimmt } else { thema.text_stark },
         );
     }
 
     fn ereignis(&mut self, ereignis: &UiEreignis, bereich: Rechteck) -> UiReaktion {
+        // Deaktiviert: reagiert auf nichts (auch kein Hover-Akzent).
+        if self.deaktiviert {
+            return UiReaktion::ignoriert();
+        }
         match ereignis {
             UiEreignis::MausRein => {
                 self.hover = true;
