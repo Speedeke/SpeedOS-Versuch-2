@@ -126,10 +126,15 @@ pub fn laden() {
 
 /// Schreibt den kompletten Stand zurück ins VFS (nach jeder Änderung —
 /// die Datei ist winzig, das ist billiger als jede Schlau-Logik).
+/// Danach fs::sync(): Einstellungen sollen auch dann auf dem Medium
+/// sein, wenn unter dem VFS mal ein Disk-FS mit Schreib-Cache liegt
+/// (heute, beim RamFs, ist sync ein No-Op).
 pub fn speichern() {
     let text = mit_werten(|werte| serialisieren(werte));
     let _ = fs::mit_fs(|f| f.mkdir("/system")); // existiert normalerweise
-    if let Err(fehler) = fs::mit_fs(|f| f.schreiben(PFAD, text.as_bytes())) {
+    if let Err(fehler) =
+        fs::mit_fs(|f| f.schreiben(PFAD, text.as_bytes())).and_then(|()| fs::sync())
+    {
         crate::serial_println!("[EINSTELLUNGEN] Speichern fehlgeschlagen: {}", fehler.meldung());
     }
 }
@@ -238,6 +243,21 @@ pub fn uhrzeit_formatieren(datum: &DatumUhrzeit, format24: bool) -> String {
 /// Die Uhrzeit im EINGESTELLTEN Format (für Systray + Uhr-Seite).
 pub fn uhrzeit_text(datum: &DatumUhrzeit) -> String {
     uhrzeit_formatieren(datum, hole_bool(S_FORMAT24, true))
+}
+
+/// Ein Datei-Zeitstempel (Sekunden seit 2000 aus fs::Metadaten bzw.
+/// DirEintrag.geaendert) als LOKALER Anzeigetext "17.07.2026 14:32" —
+/// mit demselben Anzeige-Offset wie die Systray-Uhr, damit dir und
+/// Explorer dieselbe Zeit zeigen wie die Uhr unten rechts.
+pub fn stempel_text(stempel: u64) -> String {
+    let datum = zeit_verschieben(
+        &zeit::datum_von_sekunden_seit_2000(stempel),
+        utc_offset_min(),
+    );
+    format!(
+        "{:02}.{:02}.{:04} {:02}:{:02}",
+        datum.tag, datum.monat, datum.jahr, datum.stunde, datum.minute
+    )
 }
 
 /// Offset als Anzeigetext: "UTC+02:00", "UTC-04:30".

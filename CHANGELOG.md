@@ -5,6 +5,31 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### Serie-4-Auftakt: BlockDevice-Naht + VFS-Erweiterung
+- Neues `src/fs/block.rs`: das schmale `BlockDevice`-Trait
+  (sektor_groesse, anzahl_sektoren, lese_sektoren, schreibe_sektoren,
+  sync — alles `Result<_, IoFehler>`, LBA-Adressierung, Puffer =
+  Sektor-Vielfaches) plus `RamDisk` als Vec-basierte
+  Referenz-Implementierung. Die Naht entsteht BEWUSST vor dem ersten
+  echten Treiber — Disk-Dateisysteme reden nur mit diesem Trait
+- VFS-Trait erweitert: `read_at`/`write_at` (Offset-basiert,
+  POSIX-read-Semantik bzw. Nullbyte-Lücken), `stat` (`Metadaten` mit
+  Typ, Größe, erstellt/geaendert aus der RTC/zeit-API), `rename` als
+  ATOMARE Primitive (validieren, dann entnehmen+einfügen; Ziel-Datei
+  wird ersetzt, Ziel-Verzeichnis/eigener Teilbaum sind Fehler) und
+  `sync`; `FsFehler::Io(IoFehler)` transportiert Geräte-Fehler
+- RamFs-Knoten tragen jetzt Metadaten (erstellt/geaendert);
+  `fs::verschieben`/`verschieben_rekursiv` laufen über rename statt
+  kopieren+löschen (atomar, kann jetzt auch ganze Ordner); `dir` und
+  die Explorer-Statusleiste zeigen echte Zeitstempel
+  (einstellungen::stempel_text, gleicher Anzeige-Offset wie die Uhr)
+- Fehler sichtbar: SpeedText meldet Lade-/Speicherfehler als Dialog
+  (`ui::dialog::fehler`, Mantel um bestaetigung()); Einstellungen
+  rufen nach dem Schreiben fs::sync()
+- 8 neue Tests (RamDisk-Roundtrip/Grenzen, read_at/write_at-Grenzen,
+  rename-Semantik, stat-Zeitstempel, verschieben+sync,
+  SpeedText-Fehlerdialog) — 115 Lib-Tests insgesamt, alle grün
+
 ### Serie-3-Abschluss (Qualitäts-, Performance- und Speicher-Pass)
 - Neue Tests für die kritischsten App-Schicht-Lücken: Event-Routing
   durch VERSCHACHTELTE Container (Klick/Taste/MausRaus über zwei

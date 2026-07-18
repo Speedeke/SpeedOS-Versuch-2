@@ -13,7 +13,10 @@
 // übernimmt pfad_aufloesen() — die Trait-Methoden bekommen bereits
 // fertige absolute Pfade.
 
+pub mod block;
 pub mod ramfs;
+
+pub use block::{BlockDevice, IoFehler, RamDisk};
 
 use alloc::{boxed::Box, format, string::String, vec::Vec};
 use spin::Mutex;
@@ -32,6 +35,21 @@ pub struct DirEintrag {
     pub typ: NodeTyp,
     /// Dateigröße in Bytes (bei Verzeichnissen 0).
     pub groesse: usize,
+    /// Zuletzt geändert (Sekunden seit dem 1.1.2000, zeit-Epoche).
+    pub geaendert: u64,
+}
+
+/// Das Ergebnis von stat(): alles, was das Dateisystem über einen
+/// Eintrag weiß. Zeitstempel als Sekunden seit dem 1.1.2000 (dieselbe
+/// Epoche wie zeit::sekunden_seit_2000 — anzeigen über
+/// einstellungen::stempel_text, das den Anzeige-Offset einrechnet).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Metadaten {
+    pub typ: NodeTyp,
+    /// Dateigröße in Bytes (bei Verzeichnissen 0).
+    pub groesse: usize,
+    pub erstellt: u64,
+    pub geaendert: u64,
 }
 
 /// Alle Fehler, die Dateisystem-Operationen melden können.
@@ -44,10 +62,14 @@ pub enum FsFehler {
     VerzeichnisNichtLeer,
     UngueltigerPfad,
     NichtInitialisiert,
+    /// Ein Blockgeräte-Fehler von unter dem Dateisystem (Disk-FS ab
+    /// Serie 4; das RamFs erzeugt ihn nie). Er wird NIE verschluckt,
+    /// sondern wandert bis in Shell-Ausgabe bzw. App-Dialog.
+    Io(IoFehler),
 }
 
 impl FsFehler {
-    /// Deutsche Fehlermeldung für die Shell.
+    /// Deutsche Fehlermeldung für Shell und Dialoge.
     pub fn meldung(&self) -> &'static str {
         match self {
             FsFehler::NichtGefunden => "Datei oder Verzeichnis nicht gefunden",
@@ -57,7 +79,14 @@ impl FsFehler {
             FsFehler::VerzeichnisNichtLeer => "das Verzeichnis ist nicht leer",
             FsFehler::UngueltigerPfad => "ungueltiger Pfad",
             FsFehler::NichtInitialisiert => "kein Dateisystem gemountet",
+            FsFehler::Io(io) => io.meldung(),
         }
+    }
+}
+
+impl From<IoFehler> for FsFehler {
+    fn from(io: IoFehler) -> Self {
+        FsFehler::Io(io)
     }
 }
 
@@ -79,6 +108,30 @@ pub trait FileSystem: Send {
     fn loeschen(&mut self, pfad: &str) -> FsErgebnis<()>;
     /// Sagt, ob unter dem Pfad eine Datei oder ein Verzeichnis liegt.
     fn node_typ(&self, pfad: &str) -> FsErgebnis<NodeTyp>;
+
+    // --- Offset-basierter Zugriff (die Naht für große Dateien und
+    // --- das Disk-Dateisystem der Serie 4) ---
+
+    /// Liest ab `offset` so viele Bytes, wie in den Puffer passen
+    /// (weniger am Dateiende). Liefert die GELESENE Anzahl —
+    /// 0 heißt: Offset liegt am oder hinter dem Dateiende.
+    fn read_at(&self, pfad: &str, offset: usize, puffer: &mut [u8]) -> FsErgebnis<usize>;
+    /// Schreibt `daten` ab `offset` (legt die Datei bei Bedarf an,
+    /// wie schreiben). Ein Offset HINTER dem Dateiende füllt die
+    /// Lücke mit Nullbytes (klassische Sparse-Semantik, nur ehrlich
+    /// materialisiert). Liefert die geschriebene Anzahl.
+    fn write_at(&mut self, pfad: &str, offset: usize, daten: &[u8]) -> FsErgebnis<usize>;
+    /// Typ, Größe und Zeitstempel eines Eintrags.
+    fn stat(&self, pfad: &str) -> FsErgebnis<Metadaten>;
+    /// Benennt um bzw. verschiebt — ATOMAR: Entweder liegt der
+    /// Eintrag danach vollständig unter `nach`, oder alles ist wie
+    /// vorher. Eine existierende ZIEL-DATEI wird ersetzt (Datei auf
+    /// Datei, wie POSIX-rename); ein existierendes Ziel-VERZEICHNIS
+    /// ist ein Fehler. Zeitstempel des Eintrags bleiben erhalten.
+    fn rename(&mut self, von: &str, nach: &str) -> FsErgebnis<()>;
+    /// Drückt alle gepufferten Änderungen auf das Medium (fürs RamFs
+    /// ein No-Op; das Disk-FS reicht es an sein BlockDevice weiter).
+    fn sync(&mut self) -> FsErgebnis<()>;
 }
 
 /// Das global gemountete Dateisystem ("Root-Mount").
@@ -136,15 +189,19 @@ pub fn kopieren(quelle: &str, ziel: &str) -> FsErgebnis<()> {
     })
 }
 
-/// Verschiebt (oder benennt um): kopieren + Quelle löschen,
-/// als EINE Operation unter einem Lock.
+/// Verschiebt (oder benennt um) — seit der rename-Primitive ATOMAR
+/// statt kopieren+löschen, und damit auch für ganze Ordner richtig.
 pub fn verschieben(quelle: &str, ziel: &str) -> FsErgebnis<()> {
     mit_fs(|fs| {
-        let inhalt = fs.lesen(quelle)?;
         let ziel_pfad = ziel_pfad_bestimmen(fs, quelle, ziel);
-        fs.schreiben(&ziel_pfad, &inhalt)?;
-        fs.loeschen(quelle)
+        fs.rename(quelle, &ziel_pfad)
     })
+}
+
+/// Schiebt alle gepufferten Änderungen des gemounteten Dateisystems
+/// aufs Medium (die API-Naht für das Disk-FS der Serie 4).
+pub fn sync() -> FsErgebnis<()> {
+    mit_fs(|fs| fs.sync())
 }
 
 /// Kopiert einen Pfad REKURSIV (Datei: 1:1; Ordner: mkdir + alle
@@ -182,11 +239,14 @@ pub fn loeschen_rekursiv(pfad: &str) -> FsErgebnis<()> {
     mit_fs(|fs| fs.loeschen(pfad))
 }
 
-/// Verschiebt REKURSIV: kopieren + Quelle löschen (auch Ordner —
-/// das einfache verschieben() kann nur Dateien).
+/// Verschiebt einen Pfad (auch ganze Ordner) an einen EXAKTEN
+/// Zielpfad. Seit der rename-Primitive ist das EIN atomarer Schritt
+/// statt kopieren+löschen — kein halb verschobener Baum mehr, wenn
+/// mittendrin etwas schiefgeht. (Der Name bleibt wegen der vielen
+/// Aufrufer; sobald es mehrere Mounts gibt, braucht der Fall
+/// "über Dateisystem-Grenze" wieder kopieren+löschen als Fallback.)
 pub fn verschieben_rekursiv(quelle: &str, ziel: &str) -> FsErgebnis<()> {
-    kopieren_rekursiv(quelle, ziel)?;
-    loeschen_rekursiv(quelle)
+    mit_fs(|fs| fs.rename(quelle, ziel))
 }
 
 /// Hängt einen Namen an einen absoluten Pfad ("/": kein Doppel-Slash).
@@ -296,5 +356,33 @@ mod tests {
         mit_fs(|fs| fs.loeschen("/verschoben.txt")).unwrap();
         mit_fs(|fs| fs.loeschen("/ablage/verschoben.txt")).unwrap();
         mit_fs(|fs| fs.loeschen("/ablage")).unwrap();
+    }
+
+    /// verschieben läuft seit der rename-Primitive atomar und kann
+    /// damit auch ganze Ordner; fs::sync() läuft durch (RamFs: No-Op).
+    #[test_case]
+    fn test_verschieben_ordner_und_sync() {
+        mit_fs(|fs| fs.mkdir("/vtest")).unwrap();
+        mit_fs(|fs| fs.schreiben("/vtest/inhalt.txt", b"x")).unwrap();
+
+        // Ordner umbenennen (Ziel existiert nicht):
+        verschieben("/vtest", "/vtest2").unwrap();
+        assert_eq!(mit_fs(|fs| fs.lesen("/vtest2/inhalt.txt")).unwrap(), b"x");
+        assert_eq!(
+            mit_fs(|fs| fs.node_typ("/vtest")),
+            Err(FsFehler::NichtGefunden)
+        );
+
+        // Verschieben IN ein existierendes Verzeichnis hängt den
+        // Quellnamen an (cmd-Semantik, wie bei copy):
+        mit_fs(|fs| fs.mkdir("/vziel")).unwrap();
+        verschieben("/vtest2", "/vziel").unwrap();
+        assert_eq!(
+            mit_fs(|fs| fs.lesen("/vziel/vtest2/inhalt.txt")).unwrap(),
+            b"x"
+        );
+
+        sync().unwrap();
+        loeschen_rekursiv("/vziel").unwrap();
     }
 }

@@ -21,7 +21,7 @@
 
 use crate::fs;
 use crate::grafik::Icon;
-use crate::ui::dialog::{bestaetigung, DateiDialog, DateiDialogErgebnis};
+use crate::ui::dialog::{self, bestaetigung, DateiDialog, DateiDialogErgebnis};
 use crate::ui::texteditor::{geteilter_puffer, GeteilterPuffer, StatusZeile, TextEditor, TextPuffer};
 use crate::ui::widgets::Label;
 use crate::ui::{vbox, App, AppReaktion, Widget};
@@ -36,6 +36,7 @@ const N_EDITOR: u32 = 1; // jede Änderung/Cursorbewegung im Editor
 const N_SCHL_SPEICHERN: u32 = 10; // Schließen-Dialog: Speichern
 const N_SCHL_VERWERFEN: u32 = 11; // Schließen-Dialog: Verwerfen
 const N_SCHL_ABBRECHEN: u32 = 12; // Schließen-Dialog: Abbrechen
+const N_FEHLER_OK: u32 = 13; // Fehler-Dialog: OK (schließt ihn)
 const N_DIALOG_BASIS: u32 = 50_000; // Id-Fenster des Datei-Dialogs
 
 /// Welcher Dialog liegt gerade über dem Editor?
@@ -48,6 +49,10 @@ enum Dialog {
     Speichern { dialog: DateiDialog, danach_schliessen: bool },
     /// Schließen mit ungespeicherten Änderungen (X-Knopf).
     SchliessenFrage,
+    /// Laden/Speichern ist gescheitert (FsFehler bis IoFehler):
+    /// Die Meldung kommt als DIALOG, nicht nur als Statuszeile —
+    /// still scheitern gibt es nicht (Daten-Integritäts-Regel).
+    Fehler(String),
 }
 
 pub struct SpeedTextApp {
@@ -96,7 +101,13 @@ impl SpeedTextApp {
                 self.pfad = Some(String::from(pfad));
                 self.meldung = None;
             }
-            Err(fehler) => self.meldung = Some(format!("Laden: {}", fehler.meldung())),
+            Err(fehler) => {
+                // Dialog UND Statuszeile: Der Dialog macht den Fehler
+                // unübersehbar, die Statuszeile erinnert nach dem OK.
+                let text = format!("Laden: {}", fehler.meldung());
+                self.meldung = Some(text.clone());
+                self.dialog = Some(Dialog::Fehler(text));
+            }
         }
     }
 
@@ -111,7 +122,9 @@ impl SpeedTextApp {
                 true
             }
             Err(fehler) => {
-                self.meldung = Some(format!("Speichern: {}", fehler.meldung()));
+                let text = format!("Speichern: {}", fehler.meldung());
+                self.meldung = Some(text.clone());
+                self.dialog = Some(Dialog::Fehler(text));
                 false
             }
         }
@@ -181,6 +194,7 @@ impl App for SpeedTextApp {
                     ],
                 );
             }
+            Some(Dialog::Fehler(meldung)) => return dialog::fehler(meldung, N_FEHLER_OK),
             None => {}
         }
 
@@ -253,6 +267,14 @@ impl App for SpeedTextApp {
                 self.dialog = None;
                 self.reaktion_mit_titel()
             }
+            // Fehler-Dialog: OK schließt ihn (die Statuszeile
+            // erinnert weiter an den Fehler).
+            N_FEHLER_OK => {
+                if matches!(self.dialog, Some(Dialog::Fehler(_))) {
+                    self.dialog = None;
+                }
+                self.reaktion_mit_titel()
+            }
             _ => AppReaktion::keine(),
         }
     }
@@ -288,6 +310,17 @@ impl App for SpeedTextApp {
         if let Some(Dialog::SchliessenFrage) = &self.dialog {
             // Esc = Abbrechen; alles andere gehört den Knöpfen.
             if taste == DecodedKey::Unicode('\u{1b}') {
+                self.dialog = None;
+                return Some(self.reaktion_mit_titel());
+            }
+            return Some(AppReaktion::keine());
+        }
+        if let Some(Dialog::Fehler(_)) = &self.dialog {
+            // Enter/Esc wirken wie der OK-Knopf.
+            if matches!(
+                taste,
+                DecodedKey::Unicode('\n') | DecodedKey::Unicode('\r') | DecodedKey::Unicode('\u{1b}')
+            ) {
                 self.dialog = None;
                 return Some(self.reaktion_mit_titel());
             }
@@ -407,5 +440,27 @@ mod tests {
         assert!(app.nachricht(N_SCHL_SPEICHERN).schliessen);
         assert_eq!(fs::mit_fs(|f| f.lesen("/speedtext_zu.txt")).unwrap(), b"alt!");
         fs::mit_fs(|f| f.loeschen("/speedtext_zu.txt")).unwrap();
+    }
+
+    /// Fehler werden ANGEZEIGT, nicht verschluckt: Ein Speicherfehler
+    /// (fehlendes Eltern-Verzeichnis) öffnet den Fehler-Dialog; OK
+    /// schließt ihn, die Statuszeilen-Meldung bleibt als Erinnerung.
+    #[test_case]
+    fn test_fehler_dialog_bei_speicherfehler() {
+        let mut app = SpeedTextApp::neu();
+        app.mit_puffer(|p| p.einfuegen('x'));
+        app.pfad = Some(String::from("/gibtsnicht/kaputt.txt"));
+
+        let _ = app.speichern(false);
+        assert!(matches!(app.dialog, Some(Dialog::Fehler(_))));
+        assert!(app.meldung.as_deref().unwrap_or("").starts_with("Speichern:"));
+
+        let _ = app.nachricht(N_FEHLER_OK);
+        assert!(app.dialog.is_none());
+        assert!(app.meldung.is_some());
+
+        // Auch das Laden einer fehlenden Datei meldet sich per Dialog:
+        let app = SpeedTextApp::mit_datei("/gibtsnicht/fehlt.txt");
+        assert!(matches!(app.dialog, Some(Dialog::Fehler(_))));
     }
 }

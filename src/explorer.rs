@@ -141,6 +141,8 @@ struct DateiEintrag {
     name: String,
     typ: NodeTyp,
     groesse: usize,
+    /// Zuletzt geändert (Sekunden seit 2000, siehe fs::Metadaten).
+    geaendert: u64,
 }
 
 /// Eine Zeile des Ordnerbaums (flachgeklopfte Hierarchie).
@@ -330,7 +332,12 @@ impl ExplorerApp {
                     .filter(|e| {
                         !(pfad == PAPIERKORB && e.name.ends_with(HERKUNFT_ENDUNG))
                     })
-                    .map(|e| DateiEintrag { name: e.name, typ: e.typ, groesse: e.groesse })
+                    .map(|e| DateiEintrag {
+                        name: e.name,
+                        typ: e.typ,
+                        groesse: e.groesse,
+                        geaendert: e.geaendert,
+                    })
                     .collect();
                 sortieren(&mut self.eintraege);
             }
@@ -607,20 +614,26 @@ impl App for ExplorerApp {
             .mit_auswahl(self.auswahl)
             .mit_fokus(!self.adress_modus && self.umbenennen.is_none());
 
-        // --- Statusleiste ---
+        // --- Statusleiste (bei Auswahl mit ECHTEM Zeitstempel aus
+        // --- dem VFS, im selben Anzeige-Offset wie die Systray-Uhr) ---
         let status = match (&self.fehler, self.auswahl) {
             (Some(fehler), _) => format!("Fehler: {}", fehler),
             (None, Some(index)) => {
                 let e = &self.eintraege[index];
+                let stempel = crate::einstellungen::stempel_text(e.geaendert);
                 match e.typ {
-                    NodeTyp::Verzeichnis => {
-                        format!("{} Eintraege  |  {} (Ordner)", self.eintraege.len(), e.name)
-                    }
-                    NodeTyp::Datei => format!(
-                        "{} Eintraege  |  {} ({})",
+                    NodeTyp::Verzeichnis => format!(
+                        "{} Eintraege  |  {} (Ordner, geaendert {})",
                         self.eintraege.len(),
                         e.name,
-                        groesse_formatieren(e.groesse)
+                        stempel
+                    ),
+                    NodeTyp::Datei => format!(
+                        "{} Eintraege  |  {} ({}, geaendert {})",
+                        self.eintraege.len(),
+                        e.name,
+                        groesse_formatieren(e.groesse),
+                        stempel
                     ),
                 }
             }
@@ -860,10 +873,10 @@ mod tests {
     #[test_case]
     fn test_sortierung_ordner_zuerst() {
         let mut eintraege = vec![
-            DateiEintrag { name: String::from("zebra.txt"), typ: NodeTyp::Datei, groesse: 1 },
-            DateiEintrag { name: String::from("Beta"), typ: NodeTyp::Verzeichnis, groesse: 0 },
-            DateiEintrag { name: String::from("alpha.txt"), typ: NodeTyp::Datei, groesse: 1 },
-            DateiEintrag { name: String::from("anton"), typ: NodeTyp::Verzeichnis, groesse: 0 },
+            DateiEintrag { name: String::from("zebra.txt"), typ: NodeTyp::Datei, groesse: 1, geaendert: 0 },
+            DateiEintrag { name: String::from("Beta"), typ: NodeTyp::Verzeichnis, groesse: 0, geaendert: 0 },
+            DateiEintrag { name: String::from("alpha.txt"), typ: NodeTyp::Datei, groesse: 1, geaendert: 0 },
+            DateiEintrag { name: String::from("anton"), typ: NodeTyp::Verzeichnis, groesse: 0, geaendert: 0 },
         ];
         sortieren(&mut eintraege);
         let namen: Vec<&str> = eintraege.iter().map(|e| e.name.as_str()).collect();

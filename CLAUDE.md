@@ -59,15 +59,45 @@
 - Mikrokernel-inspiriert: Treiber und Systemdienste so isoliert wie möglich
   (eigene Module, klare Schnittstellen, so wenig geteilter Zustand wie möglich).
 
+## Daten-Integritäts-Regel (Juli 2026)
+- Dateisystem- und Geräte-Fehler werden NIE verschluckt: keine Panik, kein
+  stilles `let _ =`, kein leerer Fallback auf dem Nutzer-Pfad. Jede Operation
+  liefert `Result<_, FsFehler>` (Geräte-Schicht: `Result<_, IoFehler>`), und
+  die Oberfläche ZEIGT den Fehler an — Shell rot via fs_fehler_ausgeben,
+  Explorer in der Statusleiste, SpeedText als Fehler-Dialog
+  (`ui::dialog::fehler`, dünner Mantel um bestaetigung()).
+
 ## Architektur-Entscheidungen
-- **VFS-Abstraktion (Juli 2026):** Alle Dateisysteme implementieren das Trait
-  `FileSystem` in `src/fs/mod.rs` (lesen, schreiben, liste, mkdir, loeschen,
-  node_typ — absolute, normalisierte Pfade mit `/`). Shell-Befehle und Kernel
-  greifen NIE auf eine konkrete Implementierung zu, sondern nur über
-  `fs::mit_fs()` auf das global gemountete VFS. Erste Implementierung ist
+- **VFS-Abstraktion (Juli 2026, erweitert um die Serie-4-Naht):** Alle
+  Dateisysteme implementieren das Trait `FileSystem` in `src/fs/mod.rs`
+  (lesen, schreiben, liste, mkdir, loeschen, node_typ, read_at, write_at,
+  stat, rename, sync — absolute, normalisierte Pfade mit `/`). Shell-Befehle
+  und Kernel greifen NIE auf eine konkrete Implementierung zu, sondern nur
+  über `fs::mit_fs()` auf das global gemountete VFS. Erste Implementierung ist
   `RamFs` (`src/fs/ramfs.rs`, in-memory); FAT32 und ein eigenes
   Disk-Dateisystem sollen später exakt dieselbe Schnittstelle bedienen —
   dann wird nur das gemountete Dateisystem ausgetauscht, kein Befehl ändert sich.
+  API-ENTSCHEIDUNGEN der Erweiterung: read_at liefert die GELESENE Anzahl
+  (0 am/hinter dem Dateiende = kein Fehler, POSIX-read-Semantik); write_at
+  legt fehlende Dateien an und füllt Lücken hinterm Dateiende mit Nullbytes;
+  stat liefert `Metadaten` (Typ, Größe, erstellt/geaendert als Sekunden seit
+  1.1.2000 — zeit-Epoche, Anzeige über einstellungen::stempel_text mit dem
+  Systray-Uhr-Offset); rename ist die ATOMARE Primitive (erst komplett
+  validieren, dann entnehmen+einfügen; Ziel-DATEI wird ersetzt,
+  Ziel-VERZEICHNIS ist Fehler, Ziel im eigenen Teilbaum ist Fehler,
+  Zeitstempel wandern mit) — fs::verschieben/verschieben_rekursiv laufen
+  darüber (kein kopieren+löschen mehr; bei mehreren Mounts braucht die
+  FS-Grenze wieder einen Kopier-Fallback); sync() drückt Schreib-Caches aufs
+  Medium (RamFs: ehrliches No-Op; einstellungen::speichern ruft es bereits).
+  `FsFehler::Io(IoFehler)` transportiert Geräte-Fehler durchs ganze VFS.
+- **BlockDevice-Naht (Juli 2026, `src/fs/block.rs`):** JEDER Massenspeicher-
+  Treiber (RamDisk heute, AHCI/NVMe/virtio später) implementiert das schmale
+  Trait `BlockDevice` (sektor_groesse, anzahl_sektoren, lese_sektoren,
+  schreibe_sektoren, sync — alles `Result<_, IoFehler>`). SEKTOR-Adressierung
+  (LBA), Puffer = Vielfaches der Sektorgröße (validiert, nie still
+  abgeschnitten). Disk-Dateisysteme reden NUR mit BlockDevice, nie mit einem
+  konkreten Treiber; die `RamDisk` (Vec-basiert) ist Referenz-Implementierung
+  und Test-Unterbau — die Naht existiert BEWUSST vor dem ersten Treiber.
 - **Grafik-Architektur (Juli 2026):** `framebuffer.rs` = Double Buffering
   (Back-Buffer aus `memory::allocate_pages`, `present()` kopiert als Block,
   `hochscrollen()` = memmove im Back-Buffer, NIE neu rendern). Font:

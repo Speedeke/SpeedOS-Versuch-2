@@ -39,6 +39,15 @@ pub fn bestaetigung(frage: &str, knoepfe: &[(&str, u32)]) -> Box<dyn Widget> {
     w(vbox(vec![w(Label::neu(frage)), w(Trennlinie), w(hbox(zeile))]))
 }
 
+/// Der FEHLER-Dialog: eine Meldung + OK-Knopf — die Standard-Antwort
+/// einer App auf einen FsFehler/IoFehler (Daten-Integritäts-Regel:
+/// Fehler werden ANGEZEIGT, nie verschluckt). Nur ein dünner Mantel
+/// um bestaetigung(); OK schickt `ok_id` an App::nachricht, die App
+/// schließt damit ihren Dialog-Zustand.
+pub fn fehler(meldung: &str, ok_id: u32) -> Box<dyn Widget> {
+    bestaetigung(&format!("Fehler: {}", meldung), &[("OK", ok_id)])
+}
+
 // ---------------------------------------------------------------------------
 // DateiDialog
 // ---------------------------------------------------------------------------

@@ -356,17 +356,21 @@ impl Befehl for Dir {
                 let mut verzeichnisse = 0;
                 let mut bytes = 0;
                 for e in &eintraege {
+                    // Echter Änderungs-Zeitstempel aus dem VFS —
+                    // angezeigt mit demselben Offset wie die
+                    // Systray-Uhr (einstellungen::stempel_text).
+                    let stempel = crate::einstellungen::stempel_text(e.geaendert);
                     match e.typ {
                         NodeTyp::Verzeichnis => {
                             verzeichnisse += 1;
                             konsole::set_color(Color::LightCyan, Color::Black);
-                            println!("    <DIR>           {}", e.name);
+                            println!("    {}  <DIR>           {}", stempel, e.name);
                         }
                         NodeTyp::Datei => {
                             dateien += 1;
                             bytes += e.groesse;
                             konsole::set_color(Color::LightGray, Color::Black);
-                            println!("    {:>9} Bytes  {}", e.groesse, e.name);
+                            println!("    {}  {:>9} Bytes  {}", stempel, e.groesse, e.name);
                         }
                     }
                 }
