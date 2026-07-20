@@ -666,6 +666,32 @@ impl Befehl for Platten {
                 );
             }
         });
+
+        // Die gemounteten Dateisysteme (Typ, Zugriff, Belegung):
+        let mounts = crate::fs::mount_uebersicht();
+        if !mounts.is_empty() {
+            println!();
+            println!("Gemountete Dateisysteme:");
+            for m in &mounts {
+                konsole::set_color(Color::LightCyan, Color::Black);
+                print!("  {:<8}", m.praefix);
+                konsole::set_color(Color::LightGray, Color::Black);
+                let belegung = match m.belegung {
+                    Some((frei, gesamt)) => format!(
+                        "{} frei / {}",
+                        crate::explorer::groesse_formatieren(frei as usize),
+                        crate::explorer::groesse_formatieren(gesamt as usize)
+                    ),
+                    None => String::from("-"),
+                };
+                println!(
+                    "{:<8}  {:<17}  {}",
+                    m.typ,
+                    if m.beschreibbar { "lesen+schreiben" } else { "nur lesen" },
+                    belegung
+                );
+            }
+        }
     }
 }
 

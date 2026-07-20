@@ -89,6 +89,12 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     //    schreibgeschützt; beschreibbar ist nur die Daten-Platte.
     speed_os::ata::init();
 
+    //    Der Heap wächst später in desktop_starten auf Bildschirm-
+    //    größe — aber die Auto-Mounts hier davor brauchen schon Luft
+    //    (der FAT32-Treiber liest die ganze FAT in den RAM, ~256 KiB;
+    //    dazu die SpeedFS-Block-Caches). 1 MiB vorab reicht bequem.
+    allocator::heap_erweitern(256).expect("Heap-Erweiterung vor den Mounts fehlgeschlagen");
+
     //    Dateisystem: RamFs als Wurzel mounten (mit Demo-Dateien),
     //    dann die Daten-Platte AUTO-MOUNTEN (SpeedFS auf /platte;
     //    unformatiert -> nur Hinweis, NIE Auto-Format) und ERST
@@ -96,6 +102,10 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     //    Platte und überleben so den Neustart (Theme, Skala, Uhr).
     speed_os::fs::init();
     speed_os::fs::platte_automounten();
+    // Das FAT-Laufwerk ("der USB-Stick") NUR LESEND unter /fat
+    // mounten, wenn eines angeschlossen ist — nach der Daten-Platte,
+    // damit die Boot-Meldungen in der richtigen Reihenfolge stehen.
+    speed_os::fs::fat_automounten();
     speed_os::einstellungen::laden();
 
     serial_println!("[BOOT] GDT/IDT/PIC, Speicher, Heap, Grafik und RamFs initialisiert.");

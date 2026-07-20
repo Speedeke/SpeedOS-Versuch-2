@@ -387,9 +387,10 @@ fn identifizieren(
     Ok((modell, sektoren))
 }
 
-/// Erkennt die Laufwerke des Primary-Kanals und füllt die Registry:
-///   * Primary MASTER = Boot-Platte -> NUR LESEN (Sicherheitsregel),
-///   * Primary SLAVE  = Daten-Platte -> beschreibbar.
+/// Erkennt die angeschlossenen Laufwerke und füllt die Registry:
+///   * Primary MASTER   = Boot-Platte  -> NUR LESEN (Sicherheitsregel),
+///   * Primary SLAVE    = Daten-Platte -> beschreibbar,
+///   * Secondary MASTER = FAT-Platte   -> NUR LESEN ("der USB-Stick").
 ///
 /// Läuft beim Boot NACH zeit::init() (die Polling-Fristen brauchen
 /// die TSC-Zeit). Fehlende Laufwerke sind kein Boot-Hindernis.
@@ -397,24 +398,26 @@ pub fn init() {
     let mut laufwerke = LAUFWERKE.lock();
     laufwerke.clear(); // idempotent — Tests dürfen erneut initialisieren
 
-    for (slave, rolle, beschreibbar) in [
-        (false, "Boot", false),
-        (true, "Daten", true),
+    // (io_basis, control, slave, rolle, beschreibbar, kanal-name)
+    for (io_basis, control, slave, rolle, beschreibbar, kanal) in [
+        (0x1F0u16, 0x3F6u16, false, "Boot", false, "Primary Master"),
+        (0x1F0, 0x3F6, true, "Daten", true, "Primary Slave"),
+        (0x170, 0x376, false, "FAT", false, "Secondary Master"),
     ] {
-        match identifizieren(0x1F0, 0x3F6, slave) {
+        match identifizieren(io_basis, control, slave) {
             Ok((modell, sektoren)) => {
                 serial_println!(
-                    "[ATA] {}-Laufwerk (Primary {}): '{}', {} Sektoren = {} MiB{}",
+                    "[ATA] {}-Laufwerk ({}): '{}', {} Sektoren = {} MiB{}",
                     rolle,
-                    if slave { "Slave" } else { "Master" },
+                    kanal,
                     modell,
                     sektoren,
                     sektoren * SEKTOR_GROESSE as u64 / 1024 / 1024,
                     if beschreibbar { "" } else { " [schreibgeschuetzt]" }
                 );
                 laufwerke.push(AtaLaufwerk {
-                    io_basis: 0x1F0,
-                    control: 0x3F6,
+                    io_basis,
+                    control,
                     slave,
                     beschreibbar,
                     modell,
@@ -423,8 +426,8 @@ pub fn init() {
                 });
             }
             Err(fehler) => serial_println!(
-                "[ATA] Primary {}: kein Laufwerk ({})",
-                if slave { "Slave" } else { "Master" },
+                "[ATA] {}: kein Laufwerk ({})",
+                kanal,
                 fehler.meldung()
             ),
         }
@@ -441,8 +444,17 @@ pub fn mit_laufwerken<R>(f: impl FnOnce(&mut [AtaLaufwerk]) -> R) -> R {
 pub fn mit_datenlaufwerk<R>(
     f: impl FnOnce(&mut AtaLaufwerk) -> Result<R, IoFehler>,
 ) -> Result<R, IoFehler> {
+    mit_rollenlaufwerk("Daten", f)
+}
+
+/// Führt `f` mit dem Laufwerk der gegebenen Rolle aus. Die Rolle ist
+/// eindeutig (jede kommt in init() genau einmal vor).
+fn mit_rollenlaufwerk<R>(
+    rolle: &str,
+    f: impl FnOnce(&mut AtaLaufwerk) -> Result<R, IoFehler>,
+) -> Result<R, IoFehler> {
     let mut laufwerke = LAUFWERKE.lock();
-    match laufwerke.iter_mut().find(|l| l.beschreibbar) {
+    match laufwerke.iter_mut().find(|l| l.rolle == rolle) {
         Some(laufwerk) => f(laufwerk),
         None => Err(IoFehler::NichtBereit),
     }
@@ -474,7 +486,7 @@ pub fn daten_platte() -> Option<DatenPlatte> {
     let laufwerke = LAUFWERKE.lock();
     laufwerke
         .iter()
-        .find(|l| l.beschreibbar)
+        .find(|l| l.rolle == "Daten")
         .map(|l| DatenPlatte { sektoren: l.sektoren })
 }
 
@@ -493,6 +505,42 @@ impl BlockDevice for DatenPlatte {
     }
     fn sync(&mut self) -> Result<(), IoFehler> {
         mit_datenlaufwerk(|laufwerk| laufwerk.sync())
+    }
+}
+
+/// Ein besitzbares BlockDevice-Handle auf die FAT-Platte (Secondary
+/// Master). Wie DatenPlatte, aber delegiert an das FAT-Laufwerk —
+/// und lehnt Schreibversuche schon in der Registry ab (das FAT-
+/// Laufwerk trägt beschreibbar=false, siehe AtaLaufwerk::
+/// schreibe_sektoren -> IoFehler::Schreibgeschuetzt).
+pub struct FatPlatte {
+    sektoren: u64,
+}
+
+/// Liefert das Handle, wenn eine FAT-Platte erkannt wurde.
+pub fn fat_platte() -> Option<FatPlatte> {
+    let laufwerke = LAUFWERKE.lock();
+    laufwerke
+        .iter()
+        .find(|l| l.rolle == "FAT")
+        .map(|l| FatPlatte { sektoren: l.sektoren })
+}
+
+impl BlockDevice for FatPlatte {
+    fn sektor_groesse(&self) -> usize {
+        SEKTOR_GROESSE
+    }
+    fn anzahl_sektoren(&self) -> u64 {
+        self.sektoren
+    }
+    fn lese_sektoren(&mut self, start: u64, puffer: &mut [u8]) -> Result<(), IoFehler> {
+        mit_rollenlaufwerk("FAT", |laufwerk| laufwerk.lese_sektoren(start, puffer))
+    }
+    fn schreibe_sektoren(&mut self, start: u64, puffer: &[u8]) -> Result<(), IoFehler> {
+        mit_rollenlaufwerk("FAT", |laufwerk| laufwerk.schreibe_sektoren(start, puffer))
+    }
+    fn sync(&mut self) -> Result<(), IoFehler> {
+        mit_rollenlaufwerk("FAT", |laufwerk| laufwerk.sync())
     }
 }
 

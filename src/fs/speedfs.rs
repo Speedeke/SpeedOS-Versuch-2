@@ -1310,6 +1310,10 @@ impl FileSystem for SpeedFs {
             gesamt * BLOCK_GROESSE as u64,
         )))
     }
+
+    fn typ_name(&self) -> &'static str {
+        "SpeedFS"
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -14,6 +14,7 @@
 // fertige absolute Pfade.
 
 pub mod block;
+pub mod fat32;
 pub mod ramfs;
 pub mod speedfs;
 
@@ -69,6 +70,9 @@ pub enum FsFehler {
     DateiZuGross,
     /// Das Gerät trägt kein (gültiges) SpeedFS — erst formatieren.
     KeinSpeedFs,
+    /// Das Gerät trägt kein (gültiges) FAT32 (Bootsektor/BPB kaputt
+    /// oder ein anderes Format).
+    KeinFat32,
     /// rename über eine Mount-Grenze hinweg: nicht atomar möglich.
     /// fs::verschieben fängt das ab und fällt auf kopieren+löschen
     /// zurück — Endnutzer sehen diesen Fehler normalerweise nie.
@@ -93,6 +97,7 @@ impl FsFehler {
             FsFehler::Voll => "das Dateisystem ist voll",
             FsFehler::DateiZuGross => "die Datei ist zu gross fuer das Dateisystem",
             FsFehler::KeinSpeedFs => "kein SpeedFS auf dem Geraet (erst mkfs.speedfs)",
+            FsFehler::KeinFat32 => "kein gueltiges FAT32 auf dem Geraet",
             FsFehler::MountGrenze => "Operation geht ueber eine Mount-Grenze",
             FsFehler::Io(io) => io.meldung(),
         }
@@ -151,6 +156,19 @@ pub trait FileSystem: Send {
     /// Ok(None) — das Dateisystem führt keine Zählung (RamFs).
     fn speicher_info(&self) -> FsErgebnis<Option<(u64, u64)>> {
         Ok(None)
+    }
+    /// Kann unter diesem Pfad geschrieben werden? Nur-Lese-Systeme
+    /// (FAT32-Treiber) melden false — der Explorer graut Aktionen
+    /// dann aus, BEVOR sie an einem NurLesen-Fehler scheitern. Der
+    /// Pfad zählt, weil die MountTabelle je Mount unterschiedlich
+    /// antwortet; Blatt-Dateisysteme ignorieren ihn.
+    fn ist_beschreibbar(&self, _pfad: &str) -> bool {
+        true
+    }
+    /// Menschlicher Name des Dateisystem-Typs (für `platten` und
+    /// die Speicher-Seite).
+    fn typ_name(&self) -> &'static str {
+        "?"
     }
 }
 
@@ -280,6 +298,19 @@ impl FileSystem for MountTabelle {
             }
         }
         ergebnis
+    }
+    fn speicher_info(&self) -> FsErgebnis<Option<(u64, u64)>> {
+        // Die Wurzel (RamFs) zählt nicht — ein sinnvolles
+        // speicher_info liefert nur ein konkreter Mount (per
+        // fs::speicher_info direkt abgefragt). Als Tabelle: Ok(None).
+        Ok(None)
+    }
+    fn ist_beschreibbar(&self, pfad: &str) -> bool {
+        let (fs, rest) = self.ziel(pfad);
+        fs.ist_beschreibbar(rest)
+    }
+    fn typ_name(&self) -> &'static str {
+        "Mount-Tabelle"
     }
 }
 
@@ -430,6 +461,83 @@ pub fn platte_automounten() {
             konsole::set_color(Color::LightGray, Color::Black);
         }
     }
+}
+
+/// Der Mount-Punkt des FAT-Laufwerks ("der USB-Stick").
+pub const FAT: &str = "/fat";
+
+/// AUTO-MOUNT des FAT32-Laufwerks beim Boot (nach platte_automounten).
+/// Es ist OPTIONAL — fehlt die Platte, passiert einfach nichts. FAT32
+/// wird NUR LESEND gemountet; ein kaputtes/fremdes Format bekommt eine
+/// serielle Meldung, aber keinen Boot-Abbruch.
+pub fn fat_automounten() {
+    let platte = match crate::ata::fat_platte() {
+        Some(platte) => platte,
+        None => {
+            crate::serial_println!("[FAT] Kein FAT-Laufwerk angeschlossen.");
+            return;
+        }
+    };
+    match fat32::Fat32::mounten(Box::new(platte)) {
+        Ok(gemountet) => {
+            let name = gemountet.volume_name();
+            if let Err(fehler) = mounten(FAT, Box::new(gemountet)) {
+                crate::serial_println!("[FAT] Mount fehlgeschlagen: {}", fehler.meldung());
+                return;
+            }
+            crate::serial_println!(
+                "[FAT] FAT32 '{}' auf {} gemountet (nur lesen).",
+                name,
+                FAT
+            );
+            crate::println!("FAT-Laufwerk eingehaengt: {} (nur lesen)", FAT);
+        }
+        Err((fehler, _)) => {
+            crate::serial_println!(
+                "[FAT] FAT-Laufwerk gefunden, aber kein gueltiges FAT32: {}",
+                fehler.meldung()
+            );
+        }
+    }
+}
+
+/// Eine Zeile der Mount-Übersicht (für `platten` und die Speicher-
+/// Seite): Präfix, Dateisystem-Typ, ob beschreibbar, und die
+/// Speicher-Statistik, wenn das Dateisystem eine liefert.
+pub struct MountZeile {
+    pub praefix: String,
+    pub typ: &'static str,
+    pub beschreibbar: bool,
+    pub belegung: Option<(u64, u64)>,
+}
+
+/// Liefert alle aktiven Präfix-Mounts (ohne die RamFs-Wurzel).
+pub fn mount_uebersicht() -> Vec<MountZeile> {
+    let vfs = VFS.lock();
+    let tabelle = match vfs.as_ref() {
+        Some(tabelle) => tabelle,
+        None => return Vec::new(),
+    };
+    tabelle
+        .mounts
+        .iter()
+        .map(|(praefix, fs)| MountZeile {
+            praefix: praefix.clone(),
+            typ: fs.typ_name(),
+            beschreibbar: fs.ist_beschreibbar("/"),
+            belegung: fs.speicher_info().ok().flatten(),
+        })
+        .collect()
+}
+
+/// Ist unter diesem Pfad Schreiben erlaubt? Routet durch die
+/// Mount-Tabelle zum zuständigen Dateisystem — der Explorer graut
+/// damit Aktionen aus, bevor sie an NurLesen scheitern.
+pub fn pfad_beschreibbar(pfad: &str) -> bool {
+    let vfs = VFS.lock();
+    vfs.as_ref()
+        .map(|tabelle| tabelle.ist_beschreibbar(pfad))
+        .unwrap_or(false)
 }
 
 /// Mountet das RamFs als Wurzel und legt die Demo-Dateien an.

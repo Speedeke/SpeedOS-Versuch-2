@@ -40,6 +40,10 @@ pub enum IoFehler {
     /// Das Laufwerk ist schreibgeschützt (z. B. die Boot-Platte —
     /// siehe Sicherheitsregel im ATA-Treiber).
     Schreibgeschuetzt,
+    /// Das Dateisystem ist nur lesbar (FAT32-Treiber: Schreiben ist
+    /// bewusst nicht implementiert — ehrlich ablehnen statt halbgar
+    /// kaputtschreiben).
+    NurLesen,
 }
 
 impl IoFehler {
@@ -54,6 +58,7 @@ impl IoFehler {
             IoFehler::NichtBereit => "das Geraet ist nicht bereit",
             IoFehler::Zeitueberschreitung => "das Geraet antwortet nicht (Timeout)",
             IoFehler::Schreibgeschuetzt => "das Laufwerk ist schreibgeschuetzt",
+            IoFehler::NurLesen => "das Dateisystem ist nur lesbar",
         }
     }
 }

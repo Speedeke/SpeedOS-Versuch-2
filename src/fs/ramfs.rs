@@ -334,6 +334,10 @@ impl FileSystem for RamFs {
         // Das RamFs hat kein Medium unter sich — nichts zu tun.
         Ok(())
     }
+
+    fn typ_name(&self) -> &'static str {
+        "RamFS"
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -419,6 +419,20 @@ impl ExplorerApp {
         }
     }
 
+    /// Darf im aktuellen Ordner geschrieben werden? Auf Nur-Lese-
+    /// Mounts (FAT32) false — dann sind Neu/Löschen/Umbenennen/
+    /// Einfügen ausgegraut bzw. gesperrt. Kopieren VON hier bleibt
+    /// erlaubt (das schreibt ja woanders hin).
+    fn beschreibbar(&self) -> bool {
+        fs::pfad_beschreibbar(self.pfad())
+    }
+
+    /// Setzt eine "nur lesen"-Meldung in die Statusleiste (wenn ein
+    /// Schreib-Versuch auf einem Nur-Lese-Mount abgefangen wird).
+    fn nur_lesen_hinweis(&mut self) {
+        self.fehler = Some(String::from("Dieses Laufwerk ist nur lesbar (z. B. FAT-Stick)."));
+    }
+
     /// Der Icon fürs Dateilisten-/Baum-Element.
     fn eintrag_icon(typ: NodeTyp) -> &'static Icon {
         match typ {
@@ -561,12 +575,14 @@ impl App for ExplorerApp {
 
     fn aufbau(&self) -> Box<dyn Widget> {
         // --- Werkzeugleiste ---
+        // Neu-Ordner/-Datei nur, wo geschrieben werden darf (FAT = aus):
+        let schreibbar = self.beschreibbar();
         let mut leiste: Vec<Box<dyn Widget>> = vec![
             Box::new(Button::neu("<", N_ZURUECK)),
             Box::new(Button::neu(">", N_VOR)),
             Box::new(Button::neu("^", N_HOCH)),
-            Box::new(Button::neu("+O", N_NEU_ORDNER)),
-            Box::new(Button::neu("+D", N_NEU_DATEI)),
+            Box::new(Button::neu("+O", N_NEU_ORDNER).mit_deaktiviert(!schreibbar)),
+            Box::new(Button::neu("+D", N_NEU_DATEI).mit_deaktiviert(!schreibbar)),
             Box::new(Button::neu("@", N_AKTUALISIEREN)),
         ];
         if self.im_papierkorb() {
@@ -668,6 +684,19 @@ impl App for ExplorerApp {
     }
 
     fn nachricht(&mut self, id: u32) -> AppReaktion {
+        // Alle SCHREIBENDEN Aktionen auf einem Nur-Lese-Mount abfangen —
+        // die Knöpfe sind zwar ausgegraut, aber Tastenkürzel könnten
+        // sie sonst noch auslösen. Ausschneiden (= Verschieben von HIER
+        // weg) verändert diesen Ordner ebenfalls, zählt also mit;
+        // Kopieren nach woanders bleibt erlaubt.
+        let schreibt_hier = matches!(
+            id,
+            N_UMBENENNEN | N_AUSSCHNEIDEN | N_LOESCHEN | N_EINFUEGEN | N_NEU_ORDNER | N_NEU_DATEI
+        );
+        if schreibt_hier && !self.beschreibbar() {
+            self.nur_lesen_hinweis();
+            return AppReaktion::neu_aufbauen();
+        }
         match id {
             // --- Operationen (wirken auf die Auswahl) ---
             N_UMBENENNEN => {
@@ -709,23 +738,32 @@ impl App for ExplorerApp {
                 }
             }
             // --- Kontextmenüs (Rechtsklick) ---
+            // Auf Nur-Lese-Mounts (FAT) fehlen die schreibenden
+            // Einträge komplett — der Nutzer soll gar nicht erst
+            // ins Leere klicken.
             N_RECHTS_LEER => {
-                return AppReaktion::menue(vec![
-                    (String::from("Einfuegen"), N_EINFUEGEN),
-                    (String::from("Neuer Ordner"), N_NEU_ORDNER),
-                    (String::from("Neue Datei"), N_NEU_DATEI),
-                    (String::from("Aktualisieren"), N_AKTUALISIEREN),
-                ]);
+                let mut eintraege = Vec::new();
+                if self.beschreibbar() {
+                    eintraege.push((String::from("Einfuegen"), N_EINFUEGEN));
+                    eintraege.push((String::from("Neuer Ordner"), N_NEU_ORDNER));
+                    eintraege.push((String::from("Neue Datei"), N_NEU_DATEI));
+                }
+                eintraege.push((String::from("Aktualisieren"), N_AKTUALISIEREN));
+                return AppReaktion::menue(eintraege);
             }
             id if id >= N_RECHTSKLICK => {
                 self.auswahl = Some((id - N_RECHTSKLICK) as usize);
+                let schreibbar = self.beschreibbar();
                 let mut eintraege = vec![
                     (String::from("Oeffnen"), N_OEFFNEN),
-                    (String::from("Umbenennen (F2)"), N_UMBENENNEN),
+                    // Kopieren geht immer (Ziel bestimmt der Nutzer):
                     (String::from("Kopieren (Strg+C)"), N_KOPIEREN),
-                    (String::from("Ausschneiden (Strg+X)"), N_AUSSCHNEIDEN),
-                    (String::from("Loeschen (Entf)"), N_LOESCHEN),
                 ];
+                if schreibbar {
+                    eintraege.insert(1, (String::from("Umbenennen (F2)"), N_UMBENENNEN));
+                    eintraege.push((String::from("Ausschneiden (Strg+X)"), N_AUSSCHNEIDEN));
+                    eintraege.push((String::from("Loeschen (Entf)"), N_LOESCHEN));
+                }
                 if self.im_papierkorb() {
                     eintraege.push((String::from("Wiederherstellen"), N_WIEDERHERSTELLEN));
                 }

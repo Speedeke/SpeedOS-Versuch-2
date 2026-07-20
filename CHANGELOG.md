@@ -5,6 +5,39 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### FAT32 lesen: SpeedOS versteht fremde Medien (nur lesend)
+- Neuer FAT32-Treiber `src/fs/fat32.rs` (NUR LESEN) auf dem
+  BlockDevice-Trait: Bootsektor/BPB parsen und streng validieren
+  (nie panicken -> `FsFehler::KeinFat32`), die FAT einmal in den RAM,
+  Cluster-Ketten mit Schleifen-Schutz verfolgen, Verzeichnisse
+  inklusive langer Dateinamen (VFAT-LFN, UTF-16-LE -> unsere Strings,
+  Umlaute stimmen), Dateien über read_at lesen, FAT-Zeitstempel ->
+  zeit-Epoche. Jeder Schreib-Weg lehnt sauber mit
+  `IoFehler::NurLesen` ab
+- Runner: `tools/fat32_image_erzeugen.py` baut speedos-fat.img mit
+  Beispieldateien, Unterordner und Umlaut-Namen — bevorzugt mit den
+  Host-mtools (mformat/mcopy), sonst mit eingebautem Python-FAT32-
+  Writer. Der Runner hängt es als Secondary Master an ("USB-Stick");
+  gitignored
+- Mount-Integration: `fs::fat_automounten()` beim Boot mountet das
+  FAT-Laufwerk NUR LESEND unter /fat; `platten` zeigt jetzt eine
+  Mount-Übersicht mit Dateisystem-Typ und Zugriffsrecht (neue
+  Trait-Methoden `FileSystem::ist_beschreibbar`/`typ_name`,
+  `fs::mount_uebersicht`/`pfad_beschreibbar`)
+- Explorer graut Schreib-Aktionen (+O/+D, Umbenennen, Löschen,
+  Ausschneiden, Einfügen) auf Nur-Lese-Mounts aus — Kontextmenü und
+  Tastenkürzel gesperrt; Kopieren VON /fat bleibt erlaubt. Der
+  Alltag funktioniert: durch /fat navigieren, .txt in SpeedText
+  öffnen (Umlaute im Namen UND im Inhalt), Dateien nach /platte
+  kopieren
+- Tests: BPB-Validierung gegen kaputte Werte (kein Panik),
+  LFN-Zusammensetzung inkl. Umlauten, komplettes Mini-FAT32 auf
+  einer sparse RamDisk; Integrationstest tests/fat_platte.rs
+  vergleicht die gelesenen Inhalte Byte für Byte mit dem
+  mtools-Image (Texte, Umlaut-Namen, 100-KiB-Datei über viele
+  Cluster, Kopieren /fat -> /platte). 134 Lib-Tests + alle
+  Integrationstests grün
+
 ### Persistenz wird Standard: SpeedOS überlebt den Neustart
 - AUTO-MOUNT beim Boot: fs::platte_automounten() erkennt die
   Daten-Platte, mountet ihr SpeedFS unter /platte (klare serielle

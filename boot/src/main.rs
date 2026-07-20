@@ -116,13 +116,24 @@ fn main() {
     // des RAM-Fallback-Pfads (Einstellungen & Co. ohne Persistenz).
     let ohne_platte = std::env::var("SPEEDOS_OHNE_DATENPLATTE").map(|v| v == "1").unwrap_or(false);
     if ohne_platte {
-        eprintln!("[Runner] SPEEDOS_OHNE_DATENPLATTE=1 — es haengt KEINE Daten-Platte an.");
+        eprintln!("[Runner] SPEEDOS_OHNE_DATENPLATTE=1 — es haengt KEINE Daten-/FAT-Platte an.");
     } else {
         let daten_pfad = daten_image_sicherstellen(test_modus);
         qemu.arg("-drive").arg(format!(
             "format=raw,file={},if=ide,index=1",
             daten_pfad.display()
         ));
+        // Die dritte Platte: ein FAT32-Beispiel-Image am Secondary
+        // Master ("der USB-Stick"). SpeedOS liest es NUR — deshalb
+        // teilen sich Run- und Test-Modus dasselbe Image. Fehlt das
+        // Image und lässt es sich nicht erzeugen, startet SpeedOS
+        // einfach ohne /fat (optional, kein Boot-Hindernis).
+        if let Some(fat_pfad) = fat_image_sicherstellen() {
+            qemu.arg("-drive").arg(format!(
+                "format=raw,file={},if=ide,index=2",
+                fat_pfad.display()
+            ));
+        }
     }
     // Hardware-Virtualisierung: WHPX (Windows Hypervisor Platform)
     // lässt den Kernel-Code DIREKT auf der CPU laufen statt ihn
@@ -261,6 +272,36 @@ fn daten_image_sicherstellen(test_modus: bool) -> PathBuf {
         );
     }
     pfad
+}
+
+/// Stellt das FAT32-Beispiel-Image sicher. Das Erzeugen übernimmt
+/// das Repo-Werkzeug tools/fat32_image_erzeugen.py: Es nutzt die
+/// Host-Werkzeuge mformat/mcopy (mtools), wenn sie installiert sind —
+/// dann hat ein FREMDES, etabliertes Programm das Dateisystem gebaut,
+/// nicht wir selbst — und fällt sonst auf seinen eingebauten
+/// Python-FAT32-Writer zurück. Ohne Python gibt es eben kein /fat.
+fn fat_image_sicherstellen() -> Option<PathBuf> {
+    let pfad = PathBuf::from("speedos-fat.img");
+    if pfad.exists() {
+        return Some(pfad);
+    }
+    let ergebnis = Command::new("python")
+        .arg("tools/fat32_image_erzeugen.py")
+        .arg(&pfad)
+        .status();
+    match ergebnis {
+        Ok(status) if status.success() && pfad.exists() => {
+            eprintln!("[Runner] FAT32-Beispiel-Image angelegt: {}", pfad.display());
+            Some(pfad)
+        }
+        _ => {
+            eprintln!(
+                "[Runner] Kein FAT32-Image erzeugbar (python/tools fehlen?) — \
+                 SpeedOS startet ohne /fat."
+            );
+            None
+        }
+    }
 }
 
 /// Wartet auf QEMU, bricht aber nach dem Timeout ab (hängender Test).

@@ -77,6 +77,35 @@
   (speedos-daten-test.img), nie gegen speedos-daten.img.
 
 ## Architektur-Entscheidungen
+- **FAT32-Treiber (Juli 2026, `src/fs/fat32.rs`) — NUR LESEN:**
+  SpeedOS liest fremde FAT32-Medien ("der USB-Stick"), schreibt sie
+  aber NIE (jeder Schreib-Weg -> `IoFehler::NurLesen`). Kein/kaputtes
+  FAT wird sauber mit `FsFehler::KeinFat32` abgelehnt, NIE per Panik:
+  Die BPB-Validierung ist eine reine, unit-getestete Funktion, die
+  JEDEN Wert prüft (Signatur 0x55AA, bytes_pro_sektor Zweierpotenz +
+  Vielfaches der Gerätesektorgröße, sektoren_pro_cluster Zweierpotenz,
+  FAT16-Kennzeichen ausgeschlossen, Layout passt ins Gerät,
+  >= 65525 Cluster = echtes FAT32). Der Treiber liest die ganze FAT
+  einmal in den RAM (ein u32/Cluster); Cluster-Ketten haben einen
+  SCHLEIFEN-SCHUTZ (Ring in kaputter FAT -> Geraetefehler, nie
+  hängen). VFAT-LFN: die 32-Byte-Zusatzeinträge (UTF-16-LE, Positionen
+  1/14/28) werden per Prüfsumme dem Kurznamen zugeordnet und zu
+  unserem String zusammengesetzt — daher stimmen die Umlaute
+  (char::decode_utf16). FAT-Zeitstempel -> zeit-Epoche (reine
+  Funktion). Läuft wie SpeedFS nur auf dem BlockDevice-Trait
+  (RamDisk-Tests via SPARSE Test-Disk, weil 65525 Cluster ~34 MiB
+  wären; ATA in Produktion) und nutzt RefCell (VFS-Mutex
+  serialisiert). Runner: tools/fat32_image_erzeugen.py baut
+  speedos-fat.img — bevorzugt mit HOST-mtools (mformat/mcopy), sonst
+  eigener Python-FAT32-Writer; Secondary Master, gitignored. Mount:
+  fs::fat_automounten() beim Boot -> /fat (nur lesen); platten zeigt
+  den Typ. Explorer graut Schreib-Aktionen auf Nur-Lese-Pfaden aus
+  (fs::pfad_beschreibbar über die neue Trait-Methode
+  FileSystem::ist_beschreibbar(pfad); FileSystem::typ_name für
+  platten/Speicher-Seite; fs::mount_uebersicht). ACHTUNG: main.rs
+  lässt den Heap VOR den Auto-Mounts wachsen (heap_erweitern(256)) —
+  der FAT-Treiber alloziert ~256 KiB für die FAT, bevor
+  desktop_starten den Heap groß macht.
 - **SpeedFS (Juli 2026, `src/fs/speedfs.rs`) — das eigene Disk-
   Dateisystem:** Das On-Disk-Format ist in docs/speedfs-format.md
   SPEZIFIZIERT (Dokument vor Code; Format-Änderung = erst Doku,
