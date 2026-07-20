@@ -43,6 +43,7 @@ pub mod interrupts;
 pub mod konsole;
 pub mod maus;
 pub mod memory;
+pub mod protokoll;
 pub mod rtc;
 pub mod serial;
 pub mod shell;

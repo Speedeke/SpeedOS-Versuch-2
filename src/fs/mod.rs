@@ -147,6 +147,11 @@ pub trait FileSystem: Send {
     /// Drückt alle gepufferten Änderungen auf das Medium (fürs RamFs
     /// ein No-Op; das Disk-FS reicht es an sein BlockDevice weiter).
     fn sync(&mut self) -> FsErgebnis<()>;
+    /// Speicher-Statistik (frei, gesamt) in Bytes. Standard:
+    /// Ok(None) — das Dateisystem führt keine Zählung (RamFs).
+    fn speicher_info(&self) -> FsErgebnis<Option<(u64, u64)>> {
+        Ok(None)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -326,6 +331,105 @@ pub fn ist_gemountet(praefix: &str) -> bool {
     vfs.as_ref()
         .map(|t| t.mounts.iter().any(|(p, _)| p == praefix))
         .unwrap_or(false)
+}
+
+/// Speicher-Statistik eines Mounts: (frei, gesamt) in Bytes.
+/// Ok(None), wenn das Dateisystem dort keine Zählung anbietet.
+pub fn speicher_info(praefix: &str) -> FsErgebnis<Option<(u64, u64)>> {
+    let vfs = VFS.lock();
+    let tabelle = vfs.as_ref().ok_or(FsFehler::NichtInitialisiert)?;
+    match tabelle.mounts.iter().find(|(p, _)| p == praefix) {
+        Some((_, fs)) => fs.speicher_info(),
+        None => Err(FsFehler::NichtGefunden),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Die Daten-Platte: Auto-Mount und die persistenten Standard-Orte
+// ---------------------------------------------------------------------------
+
+/// Der Mount-Punkt der Daten-Platte.
+pub const PLATTE: &str = "/platte";
+
+/// DIE Abstraktion für "wo speichern wir dauerhaft?": Liefert den
+/// Platten-Pfad, wenn /platte gemountet ist, sonst den RAM-Fallback.
+/// Alle Aufrufer (Einstellungen, Papierkorb, Startordner, Log)
+/// fragen HIER — kein if-Wildwuchs in den Modulen, und ein späterer
+/// Wechsel des Speicherorts ist eine Ein-Zeilen-Änderung.
+pub fn persistenter_pfad(platten_pfad: &'static str, ram_pfad: &'static str) -> &'static str {
+    if ist_gemountet(PLATTE) {
+        platten_pfad
+    } else {
+        ram_pfad
+    }
+}
+
+/// AUTO-MOUNT beim Boot (main.rs, nach ata::init und fs::init,
+/// VOR einstellungen::laden — die Einstellungen wohnen ja auf der
+/// Platte). Erkennt die Daten-Platte, mountet ihr SpeedFS unter
+/// /platte und legt beim ersten Mal die Standard-Ordner an.
+/// GRUNDSATZ: KEIN Auto-Format! Eine unformatierte Platte bekommt
+/// nur einen freundlichen Hinweis (mkfs.speedfs ist eine bewusste
+/// Nutzer-Entscheidung — sie vernichtet, was auch immer drauf ist).
+pub fn platte_automounten() {
+    use crate::konsole::{self, Color};
+
+    let platte = match crate::ata::daten_platte() {
+        Some(platte) => platte,
+        None => {
+            crate::serial_println!(
+                "[PLATTE] Keine Daten-Platte erkannt — alles bleibt im RAM-Dateisystem."
+            );
+            return;
+        }
+    };
+    match speedfs::SpeedFs::mounten(Box::new(platte)) {
+        Ok(gemountet) => {
+            if let Err(fehler) = mounten(PLATTE, Box::new(gemountet)) {
+                crate::serial_println!("[PLATTE] Mount fehlgeschlagen: {}", fehler.meldung());
+                return;
+            }
+            // Standard-Struktur, idempotent — nur ExistiertBereits
+            // ist erwartet, alles andere wird gemeldet (Regel:
+            // FS-Fehler nie verschlucken):
+            for ordner in ["/platte/heim", "/platte/dokumente", "/platte/system"] {
+                match mit_fs(|f| f.mkdir(ordner)) {
+                    Ok(()) | Err(FsFehler::ExistiertBereits) => {}
+                    Err(fehler) => crate::serial_println!(
+                        "[PLATTE] {} anlegen fehlgeschlagen: {}",
+                        ordner,
+                        fehler.meldung()
+                    ),
+                }
+            }
+            let frei_text = match speicher_info(PLATTE) {
+                Ok(Some((frei, gesamt))) => alloc::format!(
+                    " ({} MiB frei von {} MiB)",
+                    frei / 1024 / 1024,
+                    gesamt / 1024 / 1024
+                ),
+                _ => String::new(),
+            };
+            crate::serial_println!("[PLATTE] SpeedFS auf {} gemountet{}.", PLATTE, frei_text);
+            crate::println!("Daten-Platte eingehaengt: {}{}", PLATTE, frei_text);
+        }
+        Err((FsFehler::KeinSpeedFs, _)) => {
+            crate::serial_println!(
+                "[PLATTE] Daten-Platte gefunden, aber ohne SpeedFS — NICHT formatiert (Nutzer-Entscheidung)."
+            );
+            konsole::set_color(Color::Yellow, Color::Black);
+            crate::println!("Die Daten-Platte traegt noch kein Dateisystem.");
+            konsole::set_color(Color::LightGray, Color::Black);
+            crate::println!("Formatieren mit 'mkfs.speedfs JA', dann 'mount' — alles auf");
+            crate::println!("der Platte geht dabei verloren, darum passiert das nie automatisch.");
+        }
+        Err((fehler, _)) => {
+            crate::serial_println!("[PLATTE] Mount fehlgeschlagen: {}", fehler.meldung());
+            konsole::set_color(Color::LightRed, Color::Black);
+            crate::println!("Daten-Platte: Mount fehlgeschlagen — {}", fehler.meldung());
+            konsole::set_color(Color::LightGray, Color::Black);
+        }
+    }
 }
 
 /// Mountet das RamFs als Wurzel und legt die Demo-Dateien an.

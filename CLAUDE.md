@@ -465,6 +465,36 @@
   auseinander legen, DIALOG_ID_BREITE als Muster); Textfeld-Inhalt
   überlebt Neu-Aufbauten nicht (Apps puffern selbst oder teilen
   Zustand per Arc wie der Editor).
+- **Persistenz-Standard (Juli 2026) — SpeedOS überlebt den
+  Neustart:** fs::platte_automounten() läuft beim Boot (main.rs,
+  NACH ata::init/fs::init, VOR einstellungen::laden): mountet das
+  SpeedFS der Daten-Platte auf /platte und legt die Standard-Ordner
+  /platte/heim, /platte/dokumente, /platte/system an. KEIN
+  AUTO-FORMAT — eine unformatierte Platte bekommt nur den
+  mkfs-Hinweis in der Shell (Formatieren ist Nutzer-Entscheidung).
+  DIE Orts-Abstraktion ist fs::persistenter_pfad(platte, ram)
+  (EINE Stelle, kein if-Wildwuchs): einstellungen::pfad() ->
+  /platte/system/einstellungen.txt (Fallback /system/...), Explorer
+  papierkorb() -> /platte/papierkorb, start_ordner() ->
+  /platte/heim (auch SpeedTexts Datei-Dialoge). ACHTUNG (neue
+  Deadlock-Erkenntnis): persistenter_pfad/ist_gemountet nehmen den
+  VFS-Lock — sie dürfen NIE innerhalb einer mit_fs-Closure
+  ausgewertet werden, auch nicht versteckt als Argument-Ausdruck
+  (`f.lesen(pfad())` ist der Klassiker) — Pfad IMMER vorher binden.
+  KERNEL-LOG (src/protokoll.rs): konsole::_print hängt jede Ausgabe
+  zusätzlich an einen Blatt-Lock-RAM-Puffer (64-KiB-Fenster; vor
+  der Heap-Init No-Op); der Log-Schreiber-Task flusht sekündlich
+  rotierend nach /platte/system/log.txt (write_at ans Ende, bei
+  64 KiB rename -> log.alt.txt). WARUM Puffer+Task: _print hält
+  KONSOLE, Shell-Befehle halten VFS und drucken dann — synchrones
+  Schreiben aus _print wäre ABBA; Log-Task-Fehler werden NUR
+  seriell gemeldet (println wäre Rekursion). Einstellungen-App:
+  Kategorie "Speicher" (Laufwerke, Mount-Status + frei/gesamt über
+  das neue FileSystem::speicher_info (Default Ok(None), SpeedFS
+  zählt die Bitmap), sync-Knopf, pruefe.speedfs-Knopf: hängt kurz
+  aus, prüft, hängt wieder ein; Ergebnis als Dialog im
+  SpeedText-Muster). Runner: SPEEDOS_OHNE_DATENPLATTE=1 startet
+  ohne Daten-Platte (RAM-Fallback-Test).
 - **Deadlock-Regeln:** (1) Ausgabe-Locks (WRITER, SERIAL1) werden nur mit
   deaktivierten Interrupts gehalten (`without_interrupts` in den _print-
   Funktionen). (2) Interrupt-Handler sind minimal: nie blockieren, nie

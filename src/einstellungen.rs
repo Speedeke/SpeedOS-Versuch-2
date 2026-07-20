@@ -44,8 +44,13 @@ use alloc::vec;
 use alloc::vec::Vec;
 use spin::Mutex;
 
-/// Die Einstellungs-Datei im VFS.
-pub const PFAD: &str = "/system/einstellungen.txt";
+/// Die Einstellungs-Datei: Sie wohnt auf der DATEN-PLATTE, wenn
+/// /platte gemountet ist (dann überleben Theme & Co. den Neustart!),
+/// sonst im RAM-VFS. Die Wahl trifft zentral fs::persistenter_pfad —
+/// hier gibt es genau EINE Stelle, die den Ort kennt.
+pub fn pfad() -> &'static str {
+    fs::persistenter_pfad("/platte/system/einstellungen.txt", "/system/einstellungen.txt")
+}
 
 // ----- Die Schlüssel (zentral, damit sich niemand vertippt) -----
 pub const S_THEME_HELL: &str = "theme.hell";
@@ -64,7 +69,9 @@ static SPEICHER: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
 
 /// Blatt-Lock-Zugriff (Interrupts aus, wie bei der Ablage) — die
 /// Closure darf KEINE anderen Locks nehmen.
-fn mit_werten<T>(f: impl FnOnce(&mut BTreeMap<String, String>) -> T) -> T {
+/// pub(crate) nur für den Neustart-Roundtrip-Test (er radiert den
+/// RAM-Zustand, um die Platten-Herkunft der Werte zu beweisen).
+pub(crate) fn mit_werten<T>(f: impl FnOnce(&mut BTreeMap<String, String>) -> T) -> T {
     x86_64::instructions::interrupts::without_interrupts(|| f(&mut SPEICHER.lock()))
 }
 
@@ -114,14 +121,17 @@ pub fn serialisieren(werte: &BTreeMap<String, String>) -> String {
 /// Lädt die Einstellungen aus dem VFS (beim Boot, nach fs::init) und
 /// wendet sie an. Fehlt die Datei, gelten die Standardwerte.
 pub fn laden() {
-    let text = fs::mit_fs(|f| f.lesen(PFAD))
+    // pfad() nimmt den VFS-Lock (ist_gemountet) — IMMER vor mit_fs
+    // auswerten, nie im Closure-Argument (mit_fs-Verschachtelung!):
+    let quelle = pfad();
+    let text = fs::mit_fs(|f| f.lesen(quelle))
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
         .unwrap_or_default();
     let werte = parsen(&text);
     let anzahl = werte.len();
     mit_werten(|speicher| *speicher = werte);
     anwenden();
-    crate::serial_println!("[EINSTELLUNGEN] {} Wert(e) aus {} geladen.", anzahl, PFAD);
+    crate::serial_println!("[EINSTELLUNGEN] {} Wert(e) aus {} geladen.", anzahl, pfad());
 }
 
 /// Schreibt den kompletten Stand zurück ins VFS (nach jeder Änderung —
@@ -131,9 +141,17 @@ pub fn laden() {
 /// (heute, beim RamFs, ist sync ein No-Op).
 pub fn speichern() {
     let text = mit_werten(|werte| serialisieren(werte));
-    let _ = fs::mit_fs(|f| f.mkdir("/system")); // existiert normalerweise
+    // Wie beim Laden: den Ziel-Pfad VOR mit_fs bestimmen (pfad()
+    // nimmt selbst den VFS-Lock — im Closure waere das ein Deadlock).
+    let ziel = pfad();
+    // Der Eltern-Ordner existiert normalerweise (RAM: fs::init,
+    // Platte: platte_automounten) — nur der RAM-Fallback braucht
+    // das mkdir noch, falls jemand /system gelöscht hat:
+    if !fs::ist_gemountet(fs::PLATTE) {
+        let _ = fs::mit_fs(|f| f.mkdir("/system"));
+    }
     if let Err(fehler) =
-        fs::mit_fs(|f| f.schreiben(PFAD, text.as_bytes())).and_then(|()| fs::sync())
+        fs::mit_fs(|f| f.schreiben(ziel, text.as_bytes())).and_then(|()| fs::sync())
     {
         crate::serial_println!("[EINSTELLUNGEN] Speichern fehlgeschlagen: {}", fehler.meldung());
     }
@@ -285,6 +303,10 @@ const N_BLINK_BASIS: u32 = 20; // +0/+1/+2 -> langsam/normal/schnell
 const N_OFFSET_MINUS: u32 = 30;
 const N_OFFSET_PLUS: u32 = 31;
 const N_FORMAT24: u32 = 32;
+const N_SYNC: u32 = 40; // Speicher-Seite: alles aufs Medium
+const N_PRUEFEN: u32 = 41; // pruefe.speedfs (nur melden)
+const N_PRUEFEN_REPARIEREN: u32 = 42; // pruefe.speedfs --repariere
+const N_DIALOG_OK: u32 = 43; // Ergebnis-Dialog schließen
 const N_AKZENT: u32 = 100; // + Palette-Index
 const N_HINTERGRUND: u32 = 200; // + Preset-Index
 const N_KATEGORIE: u32 = 10_000; // + Kategorie-Index
@@ -295,11 +317,13 @@ const BLINK_STUFEN: [(&str, i64); 3] = [("Langsam", 800), ("Normal", 500), ("Sch
 const KAT_PERSONALISIERUNG: usize = 0;
 const KAT_ANZEIGE: usize = 1;
 const KAT_ZEIT: usize = 2;
-const KAT_INFO: usize = 3;
-const KATEGORIEN: [(&str, &Icon); 4] = [
+const KAT_SPEICHER: usize = 3;
+const KAT_INFO: usize = 4;
+const KATEGORIEN: [(&str, &Icon); 5] = [
     ("Personalisierung", &crate::grafik::ICON_THEME),
     ("Anzeige", &crate::grafik::ICON_ZAHNRAD),
     ("Datum & Uhrzeit", &crate::grafik::ICON_UHR),
+    ("Speicher", &crate::grafik::ICON_ORDNER),
     ("Info", &crate::grafik::ICON_LOGO),
 ];
 
@@ -313,6 +337,10 @@ pub struct EinstellungenApp {
     /// Live-Seiten (Uhr, Info) nur beim Sekundenwechsel neu bauen —
     /// der geteilte Toolkit-Baustein (Serie-3-Review).
     sekunden_tick: crate::ui::app::SekundenTick,
+    /// Ergebnis-Dialog der Speicher-Seite (sync/pruefe.speedfs):
+    /// Some = der Dialog ERSETZT den Fenster-Inhalt (SpeedText-
+    /// Muster), OK räumt ihn weg.
+    speicher_dialog: Option<String>,
 }
 
 impl EinstellungenApp {
@@ -326,6 +354,7 @@ impl EinstellungenApp {
             kategorie: KAT_PERSONALISIERUNG,
             aufloesung,
             sekunden_tick: crate::ui::app::SekundenTick::neu(),
+            speicher_dialog: None,
         }
     }
 
@@ -453,6 +482,76 @@ impl EinstellungenApp {
         ]
     }
 
+    fn seite_speicher(&self) -> Vec<Box<dyn Widget>> {
+        use crate::explorer::groesse_formatieren;
+        use crate::fs::block::BlockDevice;
+
+        // Laufwerke aus der ATA-Registry (Blatt-Lock — unterm
+        // MANAGER-Lock erlaubt, siehe Lock-Regeln):
+        let laufwerke: Vec<String> = crate::ata::mit_laufwerken(|laufwerke| {
+            laufwerke
+                .iter_mut()
+                .map(|l| {
+                    format!(
+                        "{:<6}  {:<16}  {:>9}  {}",
+                        l.rolle(),
+                        l.modell(),
+                        groesse_formatieren(
+                            (l.anzahl_sektoren() * l.sektor_groesse() as u64) as usize
+                        ),
+                        if l.ist_beschreibbar() { "beschreibbar" } else { "schreibgeschuetzt" }
+                    )
+                })
+                .collect()
+        });
+
+        let mut zeilen: Vec<Box<dyn Widget>> =
+            vec![Box::new(Label::neu("Laufwerke")) as Box<dyn Widget>];
+        if laufwerke.is_empty() {
+            zeilen.push(Box::new(Label::sekundaer("Keine ATA-Laufwerke erkannt.")));
+        }
+        for zeile in &laufwerke {
+            zeilen.push(Box::new(Label::sekundaer(zeile)));
+        }
+
+        // Mount-Status + Füllstand der Daten-Platte (SpeedFS-Bitmap):
+        zeilen.push(Box::new(Trennlinie));
+        zeilen.push(Box::new(Label::neu("Daten-Platte (/platte)")));
+        if fs::ist_gemountet(fs::PLATTE) {
+            match fs::speicher_info(fs::PLATTE) {
+                Ok(Some((frei, gesamt))) => zeilen.push(Box::new(Label::sekundaer(&format!(
+                    "Gemountet (SpeedFS) - {} frei von {}",
+                    groesse_formatieren(frei as usize),
+                    groesse_formatieren(gesamt as usize)
+                )))),
+                Ok(None) => zeilen.push(Box::new(Label::sekundaer("Gemountet."))),
+                Err(fehler) => zeilen.push(Box::new(Label::sekundaer(&format!(
+                    "Gemountet, Statistik fehlgeschlagen: {}",
+                    fehler.meldung()
+                )))),
+            }
+        } else {
+            zeilen.push(Box::new(Label::sekundaer(
+                "Nicht gemountet - Shell: mount (oder mkfs.speedfs JA, wenn unformatiert).",
+            )));
+        }
+
+        zeilen.push(Box::new(Trennlinie));
+        zeilen.push(Box::new(Label::neu("Wartung")));
+        zeilen.push(Box::new(hbox(vec![
+            Box::new(Button::neu("Jetzt syncen", N_SYNC)) as Box<dyn Widget>,
+            Box::new(Button::neu("Dateisystem pruefen", N_PRUEFEN)),
+            Box::new(Button::neu("Pruefen + reparieren", N_PRUEFEN_REPARIEREN)),
+            Box::new(Fueller),
+        ])));
+        zeilen.push(Box::new(Label::sekundaer(
+            "Pruefen haengt die Platte kurz aus, prueft Baum, Bitmap und\n\
+             Inode-Tabelle (docs/speedfs-format.md, Abschnitt 10) und haengt\n\
+             sie wieder ein. Repariert werden nur Absturz-Lecks.",
+        )));
+        zeilen
+    }
+
     fn seite_info(&self) -> Vec<Box<dyn Widget>> {
         use crate::explorer::groesse_formatieren;
 
@@ -503,6 +602,11 @@ impl App for EinstellungenApp {
     }
 
     fn aufbau(&self) -> Box<dyn Widget> {
+        // Ein offener Ergebnis-Dialog (sync/pruefe.speedfs) ERSETZT
+        // den Fenster-Inhalt — das SpeedText-Dialog-Muster:
+        if let Some(text) = &self.speicher_dialog {
+            return crate::ui::dialog::bestaetigung(text, &[("OK", N_DIALOG_OK)]);
+        }
         // Kategorien-Navigation links:
         let eintraege = KATEGORIEN
             .iter()
@@ -519,6 +623,7 @@ impl App for EinstellungenApp {
         let inhalt = match self.kategorie {
             KAT_ANZEIGE => self.seite_anzeige(),
             KAT_ZEIT => self.seite_zeit(),
+            KAT_SPEICHER => self.seite_speicher(),
             KAT_INFO => self.seite_info(),
             _ => self.seite_personalisierung(),
         };
@@ -590,6 +695,21 @@ impl App for EinstellungenApp {
             N_FORMAT24 => {
                 setze_bool(S_FORMAT24, !hole_bool(S_FORMAT24, true));
             }
+            // --- Speicher ---
+            N_SYNC => {
+                // fs-Zugriff unterm MANAGER-Lock ist erlaubt (Regel
+                // in ui/app.rs); der ATA-Flush dauert Mikrosekunden.
+                self.speicher_dialog = Some(match fs::sync() {
+                    Ok(()) => String::from("sync ok - alle Puffer sind auf dem Medium."),
+                    Err(fehler) => format!("sync fehlgeschlagen:\n{}", fehler.meldung()),
+                });
+            }
+            N_PRUEFEN | N_PRUEFEN_REPARIEREN => {
+                self.speicher_dialog = Some(speedfs_pruefen_text(id == N_PRUEFEN_REPARIEREN));
+            }
+            N_DIALOG_OK => {
+                self.speicher_dialog = None;
+            }
             // --- Navigation ---
             id if id >= N_KATEGORIE => {
                 self.kategorie = ((id - N_KATEGORIE) as usize).min(KATEGORIEN.len() - 1);
@@ -606,9 +726,94 @@ impl App for EinstellungenApp {
     }
 }
 
-/// Start-Funktion für die App-Registry.
+/// Start-Funktion für die App-Registry. Breite 700: Seit der
+/// Speicher-Seite braucht die breiteste Zeile (drei Wartungs-Knöpfe
+/// nebeneinander) mehr Platz als die alten 620.
 pub fn starten() {
-    crate::fenster::app_starten(Box::new(EinstellungenApp::neu()), 620, 440);
+    crate::fenster::app_starten(Box::new(EinstellungenApp::neu()), 700, 460);
+}
+
+// ---------------------------------------------------------------------------
+// pruefe.speedfs aus der App heraus (Speicher-Seite)
+// ---------------------------------------------------------------------------
+
+/// Prüft das SpeedFS der Daten-Platte und liefert den Berichtstext
+/// für den Ergebnis-Dialog. Ist /platte gemountet, wird es dafür
+/// kurz ausgehängt (pruefen läuft NUR ungemountet, wie der
+/// Shell-Befehl) und danach wieder eingehängt — schlägt DAS fehl,
+/// steht es unübersehbar im Text.
+fn speedfs_pruefen_text(reparieren: bool) -> String {
+    use crate::fs::speedfs::SpeedFs;
+    use crate::fs::{FsFehler, IoFehler};
+
+    let war_gemountet = fs::ist_gemountet(fs::PLATTE);
+    if war_gemountet {
+        if let Err(fehler) = fs::unmounten(fs::PLATTE) {
+            return format!(
+                "Pruefen abgebrochen - Aushaengen fehlgeschlagen:\n{}",
+                fehler.meldung()
+            );
+        }
+    }
+
+    let ergebnis = (|| -> Result<String, FsFehler> {
+        let platte = crate::ata::daten_platte()
+            .ok_or(FsFehler::Io(IoFehler::NichtBereit))?;
+        let speedfs = SpeedFs::mounten(Box::new(platte)).map_err(|(fehler, _)| fehler)?;
+        let bericht = speedfs.pruefen(reparieren)?;
+
+        let mut text = format!(
+            "SpeedFS geprueft: {} Inodes erreichbar,\n{} Bloecke referenziert.",
+            bericht.inodes_erreichbar, bericht.bloecke_referenziert
+        );
+        for eintrag in &bericht.doppel_eintraege {
+            text.push_str(&format!("\nBefund: Doppel-Eintrag {} (harmlos)", eintrag));
+        }
+        if bericht.hat_lecks() {
+            text.push_str(&format!(
+                "\nLecks: {} Bloecke, {} Inodes{}",
+                bericht.block_lecks.len(),
+                bericht.inode_lecks.len(),
+                if bericht.repariert {
+                    " - repariert."
+                } else {
+                    " - reparierbar ('Pruefen + reparieren')."
+                }
+            ));
+        }
+        if bericht.defekte.is_empty() {
+            if !bericht.hat_lecks() && bericht.doppel_eintraege.is_empty() {
+                text.push_str("\nKeine Befunde - das Dateisystem ist sauber.");
+            }
+        } else {
+            text.push_str(&format!("\nDEFEKTE ({}):", bericht.defekte.len()));
+            // Die ersten fünf reichen für den Dialog; der Rest steht
+            // ausfuehrlich im Shell-Befehl pruefe.speedfs.
+            for defekt in bericht.defekte.iter().take(5) {
+                text.push_str(&format!("\n  {}", defekt));
+            }
+        }
+        Ok(text)
+    })();
+
+    let mut text = match ergebnis {
+        Ok(text) => text,
+        Err(fehler) => format!("Pruefen fehlgeschlagen:\n{}", fehler.meldung()),
+    };
+
+    if war_gemountet {
+        let wieder = crate::ata::daten_platte()
+            .ok_or(FsFehler::Io(IoFehler::NichtBereit))
+            .and_then(|platte| SpeedFs::mounten(Box::new(platte)).map_err(|(fehler, _)| fehler))
+            .and_then(|speedfs| fs::mounten(fs::PLATTE, Box::new(speedfs)));
+        if let Err(fehler) = wieder {
+            text.push_str(&format!(
+                "\nACHTUNG: Wieder-Einhaengen fehlgeschlagen: {}",
+                fehler.meldung()
+            ));
+        }
+    }
+    text
 }
 
 // ---------------------------------------------------------------------------

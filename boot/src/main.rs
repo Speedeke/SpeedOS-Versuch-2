@@ -112,11 +112,18 @@ fn main() {
     // der erste echte persistente Speicher von SpeedOS. Im Test-Modus
     // nehmen wir bewusst ein EIGENES Image, damit Testläufe nie die
     // Nutzerdaten der normalen Daten-Platte überschreiben.
-    let daten_pfad = daten_image_sicherstellen(test_modus);
-    qemu.arg("-drive").arg(format!(
-        "format=raw,file={},if=ide,index=1",
-        daten_pfad.display()
-    ));
+    // SPEEDOS_OHNE_DATENPLATTE=1 lässt die Platte weg — zum Testen
+    // des RAM-Fallback-Pfads (Einstellungen & Co. ohne Persistenz).
+    let ohne_platte = std::env::var("SPEEDOS_OHNE_DATENPLATTE").map(|v| v == "1").unwrap_or(false);
+    if ohne_platte {
+        eprintln!("[Runner] SPEEDOS_OHNE_DATENPLATTE=1 — es haengt KEINE Daten-Platte an.");
+    } else {
+        let daten_pfad = daten_image_sicherstellen(test_modus);
+        qemu.arg("-drive").arg(format!(
+            "format=raw,file={},if=ide,index=1",
+            daten_pfad.display()
+        ));
+    }
     // Hardware-Virtualisierung: WHPX (Windows Hypervisor Platform)
     // lässt den Kernel-Code DIREKT auf der CPU laufen statt ihn
     // Befehl für Befehl zu übersetzen (TCG) — der Unterschied ist

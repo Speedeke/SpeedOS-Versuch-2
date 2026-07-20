@@ -5,6 +5,42 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### Persistenz wird Standard: SpeedOS überlebt den Neustart
+- AUTO-MOUNT beim Boot: fs::platte_automounten() erkennt die
+  Daten-Platte, mountet ihr SpeedFS unter /platte (klare serielle
+  Meldung mit Füllstand) und legt beim ersten Mal /platte/heim,
+  /platte/dokumente und /platte/system an. Eine unformatierte
+  Platte bekommt NUR den mkfs-Hinweis in der Shell — nie
+  Auto-Format (Formatieren bleibt eine Nutzer-Entscheidung)
+- DER Demo-Moment, maschinell bewiesen: Die Einstellungen wohnen
+  jetzt auf /platte/system/einstellungen.txt (RAM-Fallback ohne
+  Platte) — Theme, Akzent, Skala und Uhrformat überleben den
+  QEMU-Neustart. tests/speedfs_platte.rs führt den Beweis mit
+  Boot-Zähler und Theme-Testwert über echte Neustarts; dazu ein
+  Lib-Roundtrip über simuliertes umount+mount. Die Ortswahl trifft
+  zentral fs::persistenter_pfad(platte, ram) — EINE Abstraktion,
+  kein if-Wildwuchs
+- Umzug auf die Platte: Papierkorb -> /platte/papierkorb,
+  Explorer-Startordner und SpeedText-Dialoge -> /platte/heim
+  (jeweils mit RAM-Fallback)
+- Rotierendes Kernel-Log (src/protokoll.rs): jede println!-Ausgabe
+  landet zusätzlich in einem RAM-Puffer (Blatt-Lock, 64-KiB-
+  Fenster); der Log-Schreiber-Task flusht sekündlich nach
+  /platte/system/log.txt — write_at ans Dateiende, bei 64 KiB
+  Rotation per rename nach log.alt.txt. Bewusst Puffer+Task statt
+  synchronem Schreiben aus _print (ABBA-Deadlock KONSOLE/VFS)
+- Einstellungen-App, neue Seite "Speicher": Laufwerksliste
+  (Modell, Größe, Schreibschutz), Mount-Status mit frei/gesamt aus
+  der SpeedFS-Bitmap (neue Trait-Methode FileSystem::speicher_info),
+  sync-Knopf und pruefe.speedfs-Knopf (hängt kurz aus, prüft,
+  hängt wieder ein) mit Ergebnis-Dialog; Startbreite 700
+- Runner-Option SPEEDOS_OHNE_DATENPLATTE=1 (Boot ohne Platte —
+  der RAM-Fallback-Pfad, manuell verifiziert: sauberer Boot,
+  alles im RAM); Deadlock-Lehre dokumentiert: ist_gemountet/
+  persistenter_pfad nie in mit_fs-Closures auswerten
+- 131 Lib-Tests (u. a. Log-Rotation, Puffer-Fenster, Einstellungs-
+  Roundtrip) + alle Integrationstests grün
+
 ### SpeedFS wird erwachsen: rename überall, sync-Kette, fsck, Folter-Test
 - Explorer-Ausschneiden+Einfügen nutzt jetzt `fs::verschieben_rekursiv`
   (echtes atomares rename) statt kopieren+löschen — auf einer echten

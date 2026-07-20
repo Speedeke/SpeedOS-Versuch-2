@@ -144,7 +144,7 @@ impl SpeedTextApp {
             }
         } else {
             self.dialog = Some(Dialog::Speichern {
-                dialog: DateiDialog::neu("Speichern unter", "/", "neu.txt", N_DIALOG_BASIS),
+                dialog: DateiDialog::neu("Speichern unter", crate::explorer::start_ordner(), "neu.txt", N_DIALOG_BASIS),
                 danach_schliessen,
             });
         }

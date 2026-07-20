@@ -132,3 +132,51 @@ fn speedfs_datei_ueberlebt_qemu_neustart() {
     // 5. Sauber aushängen (synct noch einmal) — wie der umount-Befehl.
     fs::unmounten("/platte").expect("umount fehlgeschlagen");
 }
+
+/// DER Demo-Moment als Test: Die EINSTELLUNGEN überleben den echten
+/// QEMU-Neustart. Genau der Mechanismus von "Theme ändern, neustart,
+/// Theme ist noch da" — hier maschinell mit einem Boot-Zähler (und
+/// einem Theme-Schlüssel) statt Klicks.
+#[test_case]
+fn einstellungen_ueberleben_qemu_neustart() {
+    use speed_os::einstellungen;
+
+    // Platte mounten (der vorige Test hat sie formatiert und sauber
+    // ausgehängt) und die Standard-Struktur sicherstellen — wie
+    // fs::platte_automounten es beim echten Boot tut:
+    let platte = ata::daten_platte().expect("keine Daten-Platte erkannt");
+    let speedfs = SpeedFs::mounten(alloc::boxed::Box::new(platte))
+        .map_err(|(fehler, _)| fehler)
+        .expect("Mount fehlgeschlagen (Test 1 haette formatiert?)");
+    fs::mounten("/platte", alloc::boxed::Box::new(speedfs)).expect("VFS-Mount fehlgeschlagen");
+    match fs::mit_fs(|f| f.mkdir("/platte/system")) {
+        Ok(()) | Err(FsFehler::ExistiertBereits) => {}
+        Err(fehler) => panic!("mkdir /platte/system: {:?}", fehler),
+    }
+
+    // Die Einstellungen wohnen jetzt auf der Platte:
+    assert_eq!(einstellungen::pfad(), "/platte/system/einstellungen.txt");
+    einstellungen::laden();
+
+    let zaehler = einstellungen::hole_zahl("test.bootzaehler", 0) + 1;
+    if zaehler > 1 {
+        serial_println!(
+            "[PERSISTENZ-BEWEIS] Einstellungen haben den QEMU-Neustart ueberlebt \
+             (Boot-Zaehler jetzt {}, Theme-Testwert '{}').",
+            zaehler,
+            einstellungen::hole_zahl("test.themewert", -1)
+        );
+        assert_eq!(
+            einstellungen::hole_zahl("test.themewert", -1),
+            7,
+            "Der Theme-Testwert vom vorigen Lauf fehlt"
+        );
+    } else {
+        serial_println!("[PERSISTENZ] Erster Lauf — Boot-Zaehler startet bei 1.");
+    }
+    // setze_zahl speichert SOFORT auf die Platte (inkl. fs::sync):
+    einstellungen::setze_zahl("test.bootzaehler", zaehler);
+    einstellungen::setze_zahl("test.themewert", 7);
+
+    fs::unmounten("/platte").expect("umount fehlgeschlagen");
+}

@@ -90,9 +90,12 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     speed_os::ata::init();
 
     //    Dateisystem: RamFs als Wurzel mounten (mit Demo-Dateien),
-    //    dann die persistenten Einstellungen laden und anwenden
-    //    (Theme, Akzent, Hintergrund — VOR dem Desktop-Start).
+    //    dann die Daten-Platte AUTO-MOUNTEN (SpeedFS auf /platte;
+    //    unformatiert -> nur Hinweis, NIE Auto-Format) und ERST
+    //    DANACH die Einstellungen laden — sie wohnen jetzt auf der
+    //    Platte und überleben so den Neustart (Theme, Skala, Uhr).
     speed_os::fs::init();
+    speed_os::fs::platte_automounten();
     speed_os::einstellungen::laden();
 
     serial_println!("[BOOT] GDT/IDT/PIC, Speicher, Heap, Grafik und RamFs initialisiert.");
@@ -138,6 +141,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         .mit_art(TaskArt::Fenster),
     );
     executor.spawn(Task::new("Konsolen-Cursor", konsole::cursor_blink_task()));
+    executor.spawn(Task::new("Log-Schreiber", speed_os::protokoll::log_task()));
     executor.spawn(Task::new("PS/2-Maus", speed_os::maus::maus_task()));
     executor.spawn(
         Task::new("Compositor", speed_os::fenster::compositor_task()).mit_art(TaskArt::Fenster),

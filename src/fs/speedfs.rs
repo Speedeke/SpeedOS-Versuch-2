@@ -1296,6 +1296,20 @@ impl FileSystem for SpeedFs {
         inner.geraet.sync()?;
         Ok(())
     }
+
+    fn speicher_info(&self) -> FsErgebnis<Option<(u64, u64)>> {
+        // frei = Bitmap-Zählung; gesamt = der DATENbereich (die
+        // Metadaten-Blöcke sind kein nutzbarer Platz).
+        let frei = self.freie_bloecke()?;
+        let gesamt = {
+            let inner = self.inner.borrow();
+            inner.sb.anzahl_bloecke - inner.sb.daten_start
+        };
+        Ok(Some((
+            frei * BLOCK_GROESSE as u64,
+            gesamt * BLOCK_GROESSE as u64,
+        )))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1665,6 +1679,63 @@ mod tests {
             gesamt,
             laeufe_mit_lecks
         );
+    }
+
+    /// Einstellungen überleben einen SIMULIERTEN Neustart
+    /// (umount + mount): Der Wert wird auf die "Platte" (RamDisk am
+    /// globalen /platte-Mount) geschrieben, der RAM-Zustand radiert,
+    /// neu gemountet und geladen — der Wert MUSS zurückkommen.
+    /// Nebenbei der Fallback-Beweis: Ohne Mount zeigt
+    /// einstellungen::pfad() auf das RAM-VFS, mit Mount auf die
+    /// Platte (fs::persistenter_pfad — die EINE Abstraktion).
+    #[test_case]
+    fn test_speedfs_einstellungen_roundtrip_neustart() {
+        use crate::einstellungen;
+
+        // Ohne Platte: der RAM-Fallback-Pfad.
+        assert!(!crate::fs::ist_gemountet(crate::fs::PLATTE));
+        assert_eq!(einstellungen::pfad(), "/system/einstellungen.txt");
+
+        // "Platte" bauen und am ECHTEN globalen VFS mounten:
+        let disk = Arc::new(spin::Mutex::new(RamDisk::neu(512, 4096)));
+        formatieren(&mut *disk.lock()).unwrap();
+        let wrapper = AbsturzDisk {
+            disk: disk.clone(),
+            budget: Arc::new(AtomicI64::new(i64::MAX)),
+        };
+        let fs1 = SpeedFs::mounten(Box::new(wrapper)).map_err(|(f, _)| f).unwrap();
+        crate::fs::mounten(crate::fs::PLATTE, Box::new(fs1)).unwrap();
+        crate::fs::mit_fs(|f| f.mkdir("/platte/system")).unwrap();
+        assert_eq!(einstellungen::pfad(), "/platte/system/einstellungen.txt");
+
+        // Wert setzen — setze_zahl speichert SOFORT (auf die Platte):
+        einstellungen::setze_zahl("test.neustart", 4711);
+        assert!(crate::fs::mit_fs(|f| f.stat("/platte/system/einstellungen.txt")).is_ok());
+
+        // "Neustart": aushängen (FS + Cache weg), RAM-Werte radieren,
+        // vom selben Platten-Zustand neu mounten und laden.
+        crate::fs::unmounten(crate::fs::PLATTE).unwrap();
+        einstellungen::mit_werten(|werte| werte.clear());
+        assert_eq!(einstellungen::hole_zahl("test.neustart", 0), 0); // wirklich weg
+        let wrapper2 = AbsturzDisk {
+            disk,
+            budget: Arc::new(AtomicI64::new(i64::MAX)),
+        };
+        let fs2 = SpeedFs::mounten(Box::new(wrapper2)).map_err(|(f, _)| f).unwrap();
+        crate::fs::mounten(crate::fs::PLATTE, Box::new(fs2)).unwrap();
+        einstellungen::laden();
+        assert_eq!(
+            einstellungen::hole_zahl("test.neustart", 0),
+            4711,
+            "Der Wert muss den simulierten Neustart ueberleben"
+        );
+
+        // Aufräumen: aushängen, RAM-Zustand neutralisieren (laden()
+        // vom RAM-Pfad = Defaults; die Skala bleibt so auf 1.0 —
+        // die bekannte Test-Falle aus CLAUDE.md).
+        crate::fs::unmounten(crate::fs::PLATTE).unwrap();
+        einstellungen::mit_werten(|werte| werte.clear());
+        einstellungen::laden();
     }
 
     /// Wiedermount: aushängen, neu mounten — alles noch da (die

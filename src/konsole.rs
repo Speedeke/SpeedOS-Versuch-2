@@ -255,6 +255,12 @@ pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;
 
     x86_64::instructions::interrupts::without_interrupts(|| {
+        // Seit dem Platten-Log läuft ALLES dreifach: Bildschirm,
+        // seriell — und in den Log-Puffer (reiner Blatt-Lock; der
+        // Log-Task schreibt ihn rotierend nach /platte/system).
+        // Vor der Heap-Initialisierung ist das ein No-Op (siehe
+        // protokoll::anhaengen_args).
+        crate::protokoll::anhaengen_args(args);
         let mut zustand = KONSOLE.lock();
         // Desktop-Modus: Der Bildschirm gehört dem Compositor! Die
         // Ausgabe geht ins Terminal-Fenster ihrer SITZUNG — Shell-

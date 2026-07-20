@@ -58,7 +58,18 @@ const N_BAUM: u32 = 200_000; // + Baumzeilen-Index
 const N_RECHTSKLICK: u32 = 300_000; // + Eintrag-Index (Kontextmenü)
 
 /// Der Papierkorb-Ordner im VFS.
-pub const PAPIERKORB: &str = "/papierkorb";
+/// Der Papierkorb wohnt auf der DATEN-PLATTE, wenn sie gemountet
+/// ist, sonst im RAM — dieselbe zentrale Wahl wie bei den
+/// Einstellungen (fs::persistenter_pfad, kein if-Wildwuchs).
+pub fn papierkorb() -> &'static str {
+    fs::persistenter_pfad("/platte/papierkorb", "/papierkorb")
+}
+
+/// Startordner neuer Explorer-Fenster und der Datei-Dialoge:
+/// das Zuhause /platte/heim, ohne Platte die Wurzel.
+pub fn start_ordner() -> &'static str {
+    fs::persistenter_pfad("/platte/heim", "/")
+}
 
 // ---------------------------------------------------------------------------
 // Papierkorb — Entwurfsentscheidung: Der Ursprungspfad wird in einer
@@ -99,10 +110,12 @@ fn namen_in(pfad: &str) -> Vec<String> {
 /// (Ursprungs-ORDNER) in der Metadaten-Datei. Liefert den Namen im
 /// Papierkorb (bei Konflikt mit " (2)"-Suffix).
 pub fn in_papierkorb(pfad: &str) -> Result<String, fs::FsFehler> {
-    let _ = fs::mit_fs(|f| f.mkdir(PAPIERKORB)); // existiert ggf. schon
+    // papierkorb() nimmt den VFS-Lock — VOR mit_fs auswerten:
+    let korb = papierkorb();
+    let _ = fs::mit_fs(|f| f.mkdir(korb)); // existiert ggf. schon
     let name = pfad.rsplit('/').next().unwrap_or(pfad);
-    let korb_name = eindeutiger_name(&namen_in(PAPIERKORB), name);
-    let ziel = fs::pfad_anhaengen(PAPIERKORB, &korb_name);
+    let korb_name = eindeutiger_name(&namen_in(papierkorb()), name);
+    let ziel = fs::pfad_anhaengen(papierkorb(), &korb_name);
     fs::verschieben_rekursiv(pfad, &ziel)?;
     let herkunft = eltern_pfad(pfad);
     fs::mit_fs(|f| {
@@ -114,7 +127,7 @@ pub fn in_papierkorb(pfad: &str) -> Result<String, fs::FsFehler> {
 /// Stellt einen Papierkorb-Eintrag an seinem Ursprungsort wieder her
 /// (Konflikt -> " (2)"). Liefert den Zielpfad.
 pub fn papierkorb_wiederherstellen(korb_name: &str) -> Result<String, fs::FsFehler> {
-    let quelle = fs::pfad_anhaengen(PAPIERKORB, korb_name);
+    let quelle = fs::pfad_anhaengen(papierkorb(), korb_name);
     let herkunft_datei = format!("{}{}", quelle, HERKUNFT_ENDUNG);
     // Herkunft lesen (fehlt sie: zurück nach /):
     let herkunft = fs::mit_fs(|f| f.lesen(&herkunft_datei))
@@ -129,7 +142,7 @@ pub fn papierkorb_wiederherstellen(korb_name: &str) -> Result<String, fs::FsFehl
 
 /// Löscht einen Papierkorb-Eintrag ENDGÜLTIG (samt Metadaten).
 pub fn papierkorb_endgueltig(korb_name: &str) -> Result<(), fs::FsFehler> {
-    let pfad = fs::pfad_anhaengen(PAPIERKORB, korb_name);
+    let pfad = fs::pfad_anhaengen(papierkorb(), korb_name);
     fs::loeschen_rekursiv(&pfad)?;
     let _ = fs::mit_fs(|f| f.loeschen(&format!("{}{}", pfad, HERKUNFT_ENDUNG)));
     Ok(())
@@ -300,7 +313,7 @@ pub struct ExplorerApp {
 impl ExplorerApp {
     pub fn neu() -> Self {
         let mut app = ExplorerApp {
-            verlauf: Verlauf::neu("/"),
+            verlauf: Verlauf::neu(start_ordner()),
             aufgeklappt: BTreeSet::new(),
             auswahl: None,
             adress_modus: false,
@@ -330,7 +343,7 @@ impl ExplorerApp {
                     .into_iter()
                     // Im Papierkorb die .herkunft-Metadaten ausblenden:
                     .filter(|e| {
-                        !(pfad == PAPIERKORB && e.name.ends_with(HERKUNFT_ENDUNG))
+                        !(pfad == papierkorb() && e.name.ends_with(HERKUNFT_ENDUNG))
                     })
                     .map(|e| DateiEintrag {
                         name: e.name,
@@ -415,7 +428,7 @@ impl ExplorerApp {
     }
 
     fn im_papierkorb(&self) -> bool {
-        self.pfad() == PAPIERKORB
+        self.pfad() == papierkorb()
     }
 
     /// Voller Pfad des ausgewählten Eintrags.
@@ -928,7 +941,7 @@ mod tests {
         // In den Papierkorb (Herkunft = /korbtest):
         let korb_name = in_papierkorb("/korbtest/opfer.txt").unwrap();
         assert!(fs::mit_fs(|f| f.node_typ("/korbtest/opfer.txt")).is_err());
-        let korb_pfad = fs::pfad_anhaengen(PAPIERKORB, &korb_name);
+        let korb_pfad = fs::pfad_anhaengen(papierkorb(), &korb_name);
         assert_eq!(fs::mit_fs(|f| f.lesen(&korb_pfad)).unwrap(), b"weg?");
         let herkunft = fs::mit_fs(|f| f.lesen(&format!("{}{}", korb_pfad, HERKUNFT_ENDUNG))).unwrap();
         assert_eq!(herkunft, b"/korbtest");
@@ -942,7 +955,8 @@ mod tests {
         // Nochmal löschen + endgültig:
         let korb_name = in_papierkorb("/korbtest/opfer.txt").unwrap();
         papierkorb_endgueltig(&korb_name).unwrap();
-        assert!(fs::mit_fs(|f| f.node_typ(&fs::pfad_anhaengen(PAPIERKORB, &korb_name))).is_err());
+        let korb_pfad = fs::pfad_anhaengen(papierkorb(), &korb_name);
+        assert!(fs::mit_fs(|f| f.node_typ(&korb_pfad)).is_err());
 
         fs::loeschen_rekursiv("/korbtest").unwrap();
     }
