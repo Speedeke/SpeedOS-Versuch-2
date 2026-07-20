@@ -54,9 +54,15 @@ fn panic(info: &PanicInfo) -> ! {
     speed_os::test_panic_handler(info)
 }
 
-/// Sektor, in dem der Persistenz-Test sein Muster hinterlässt —
-/// weit weg von Sektor 0 (dort spielt der Roundtrip-Test).
-const PERSISTENZ_LBA: u64 = 1000;
+/// SEIT SPEEDFS: Alle Roh-Sektor-Tests leben am PLATTEN-ENDE!
+/// Am Anfang liegen jetzt SpeedFS-Superblock und -Metadaten
+/// (tests/speedfs_platte.rs) — Sektor 0 zu überschreiben würde das
+/// Dateisystem zerstören. Die letzten ~600 Sektoren bleiben vom
+/// First-Fit-Allokator des SpeedFS praktisch unberührt.
+/// Sektor fürs Persistenz-Muster (Platte hat 131072 Sektoren).
+const PERSISTENZ_LBA: u64 = 131000;
+/// Start des 300-Sektoren-Roundtrip-Bereichs.
+const ROUNDTRIP_LBA: u64 = 130500;
 /// Erkennungszeichen am Sektor-Anfang.
 const MAGIE: &[u8; 8] = b"SPEEDOS!";
 
@@ -122,10 +128,10 @@ fn roundtrip_schreiben_lesen() {
         for (i, byte) in hin.iter_mut().enumerate() {
             *byte = (i % 251) as u8;
         }
-        laufwerk.schreibe_sektoren(0, &hin)?;
+        laufwerk.schreibe_sektoren(ROUNDTRIP_LBA, &hin)?;
 
         let mut zurueck = vec![0u8; 300 * 512];
-        laufwerk.lese_sektoren(0, &mut zurueck)?;
+        laufwerk.lese_sektoren(ROUNDTRIP_LBA, &mut zurueck)?;
         assert_eq!(hin, zurueck, "Gelesenes weicht vom Geschriebenen ab");
 
         // Grenzfälle wie bei der RamDisk: hinterm Ende, krumme Puffer.

@@ -5,6 +5,41 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### SpeedFS: das eigene Dateisystem-Format (Design zuerst!)
+- Neues Design-Dokument `docs/speedfs-format.md` — geschrieben VOR
+  dem Code: Superblock ("SPFS", Version 1) | Block-Bitmap |
+  Inode-Tabelle | Datenblöcke in 4-KiB-Blöcken, alles Little-Endian.
+  Inodes (128 B): Typ, Größe, Zeitstempel, 22 direkte + 1 einfach-
+  indirekter Blockzeiger (max. Dateigröße 1046 Blöcke ≈ 4,09 MiB,
+  Rechnung im Dokument); Verzeichnisse als Byte-Listen
+  [Inode u32 | Länge u8 | Name]. Absturz-Analyse in §7: KEIN
+  Journal, stattdessen Ordering-Disziplin (Belegen vor Benutzen,
+  Inhalt vor Verweis, Entkoppeln vor Freigeben) — nach einem
+  Absturz schlimmstenfalls Block-Lecks, nie falsche Metadaten
+- Neue Implementierung `src/fs/speedfs.rs` auf dem BlockDevice-Trait
+  (läuft auf RamDisk UND ATA): mkfs (formatieren), mounten/aushängen,
+  alle FileSystem-Trait-Methoden (lesen, schreiben, read_at/write_at,
+  liste, mkdir, loeschen, stat, rename, sync). Block-Cache mit
+  WRITE-THROUGH (bewusst einfach und ehrlich — Entscheidung in
+  CLAUDE.md, Write-Back ist Serie-5-Stoff). Neue Fehler: Voll,
+  DateiZuGross, KeinSpeedFs
+- Aus dem Root-Mount wurde eine MOUNT-TABELLE: Wurzel-RamFs plus
+  Präfix-Mounts, selbst ein FileSystem — mit_fs() und alle Befehle
+  blieben unverändert; rename über die Mount-Grenze fällt in
+  fs::verschieben auf kopieren+löschen zurück (MountGrenze)
+- Neue Shell-Befehle: `mkfs.speedfs` (Sicherheitsabfrage: nur mit
+  Argument JA, nie bei gemountetem /platte), `mount`, `umount` —
+  danach arbeiten dir, type, write, copy, tree, cd, SpeedText …
+  transparent auf /platte, ohne einen einzigen Sonderfall
+- 9 neue SpeedFS-Lib-Tests auf der RamDisk (Superblock-/Inode-/
+  Verzeichnis-Roundtrips, Datei über Blockgrenzen, indirekter
+  Block, Verzeichnis-Blocküberlauf, Bitmap-Bilanz beim Löschen,
+  rename-Semantik, Wiedermount) — 127 Lib-Tests gesamt, alle grün
+- Persistenz-Beweis 2.0 (`tests/speedfs_platte.rs`): Eine ECHTE
+  DATEI (/platte/beweis.txt), über das VFS geschrieben, überlebt
+  den QEMU-Neustart; die Roh-Sektor-Tests aus ata_platte.rs leben
+  jetzt am Platten-ENDE, damit sie das Dateisystem nicht anfassen
+
 ### ATA-PIO-Treiber: SpeedOS spricht mit einer echten Platte
 - Neues `src/ata.rs`: ATA im PIO-Modus über die Legacy-Ports des
   Primary-Kanals (0x1F0/0x3F6) — gepollt mit TSC-Timeout, keine

@@ -72,6 +72,10 @@ pub fn alle_befehle() -> Vec<Box<dyn Befehl>> {
         // Massenspeicher-Befehle (ATA-Treiber):
         Box::new(Platten),
         Box::new(Blocktest),
+        // SpeedFS auf der Daten-Platte:
+        Box::new(MkfsSpeedfs),
+        Box::new(Mount),
+        Box::new(Umount),
     ]
 }
 
@@ -719,5 +723,118 @@ fn hexdump_ausgeben(daten: &[u8]) {
             print!("{}", zeichen);
         }
         println!("|");
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+/// Der Mount-Punkt der Daten-Platte — EIN Ort für alle drei Befehle.
+const PLATTE_MOUNT: &str = "/platte";
+
+/// mkfs.speedfs — formatiert die DATEN-Platte mit SpeedFS v1.
+/// Destruktiv! Deshalb die Sicherheitsabfrage: Erst der Aufruf mit
+/// dem Argument JA fuehrt wirklich aus.
+struct MkfsSpeedfs;
+
+impl Befehl for MkfsSpeedfs {
+    fn name(&self) -> &'static str {
+        "mkfs.speedfs"
+    }
+    fn beschreibung(&self) -> &'static str {
+        "Formatiert die Daten-Platte mit SpeedFS: mkfs.speedfs JA"
+    }
+    fn ausfuehren(&self, argumente: &str, _kontext: &mut ShellKontext, _registry: &[Box<dyn Befehl>]) {
+        if crate::fs::ist_gemountet(PLATTE_MOUNT) {
+            konsole::set_color(Color::LightRed, Color::Black);
+            println!("Die Platte ist unter {} gemountet — erst 'umount'.", PLATTE_MOUNT);
+            konsole::set_color(Color::LightGray, Color::Black);
+            return;
+        }
+        // Die Sicherheitsabfrage: ohne das explizite JA nur warnen.
+        if argumente.trim() != "JA" {
+            konsole::set_color(Color::Yellow, Color::Black);
+            println!("ACHTUNG: Formatiert die DATEN-Platte mit SpeedFS —");
+            println!("ALLE Daten darauf gehen verloren!");
+            konsole::set_color(Color::LightGray, Color::Black);
+            println!("Wirklich formatieren: mkfs.speedfs JA");
+            return;
+        }
+        let mut platte = match crate::ata::daten_platte() {
+            Some(platte) => platte,
+            None => {
+                fs_fehler_ausgeben(FsFehler::Io(crate::fs::IoFehler::NichtBereit));
+                return;
+            }
+        };
+        match crate::fs::speedfs::formatieren(&mut platte) {
+            Ok(()) => {
+                use crate::fs::block::BlockDevice;
+                let mib = platte.anzahl_sektoren() * platte.sektor_groesse() as u64 / 1024 / 1024;
+                println!("SpeedFS angelegt ({} MiB). Einhaengen mit: mount", mib);
+            }
+            Err(fehler) => fs_fehler_ausgeben(fehler),
+        }
+    }
+}
+
+/// mount — haengt das SpeedFS der Daten-Platte unter /platte ein.
+/// Danach arbeiten dir, type, write, copy, tree ... dort ganz normal.
+struct Mount;
+
+impl Befehl for Mount {
+    fn name(&self) -> &'static str {
+        "mount"
+    }
+    fn beschreibung(&self) -> &'static str {
+        "Haengt die Daten-Platte (SpeedFS) unter /platte ein"
+    }
+    fn ausfuehren(&self, _argumente: &str, _kontext: &mut ShellKontext, _registry: &[Box<dyn Befehl>]) {
+        if crate::fs::ist_gemountet(PLATTE_MOUNT) {
+            println!("{} ist bereits gemountet.", PLATTE_MOUNT);
+            return;
+        }
+        let platte = match crate::ata::daten_platte() {
+            Some(platte) => platte,
+            None => {
+                fs_fehler_ausgeben(FsFehler::Io(crate::fs::IoFehler::NichtBereit));
+                return;
+            }
+        };
+        let speedfs = match crate::fs::speedfs::SpeedFs::mounten(Box::new(platte)) {
+            Ok(speedfs) => speedfs,
+            Err((fehler, _geraet)) => {
+                fs_fehler_ausgeben(fehler);
+                return;
+            }
+        };
+        match crate::fs::mounten(PLATTE_MOUNT, Box::new(speedfs)) {
+            Ok(()) => println!("Daten-Platte eingehaengt: {}", PLATTE_MOUNT),
+            Err(fehler) => fs_fehler_ausgeben(fehler),
+        }
+    }
+}
+
+/// umount — synct und haengt /platte wieder aus.
+struct Umount;
+
+impl Befehl for Umount {
+    fn name(&self) -> &'static str {
+        "umount"
+    }
+    fn beschreibung(&self) -> &'static str {
+        "Synct und haengt /platte aus"
+    }
+    fn ausfuehren(&self, _argumente: &str, kontext: &mut ShellKontext, _registry: &[Box<dyn Befehl>]) {
+        match crate::fs::unmounten(PLATTE_MOUNT) {
+            Ok(()) => {
+                // Steht die Shell gerade IN /platte, zurueck zur Wurzel —
+                // sonst zeigt der Prompt auf einen leeren Mount-Punkt.
+                if kontext.aktuelles_verzeichnis.starts_with(PLATTE_MOUNT) {
+                    kontext.aktuelles_verzeichnis = String::from("/");
+                }
+                println!("{} ausgehaengt (alles auf der Platte).", PLATTE_MOUNT);
+            }
+            Err(fehler) => fs_fehler_ausgeben(fehler),
+        }
     }
 }

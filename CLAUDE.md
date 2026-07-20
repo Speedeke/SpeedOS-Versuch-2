@@ -77,6 +77,38 @@
   (speedos-daten-test.img), nie gegen speedos-daten.img.
 
 ## Architektur-Entscheidungen
+- **SpeedFS (Juli 2026, `src/fs/speedfs.rs`) — das eigene Disk-
+  Dateisystem:** Das On-Disk-Format ist in docs/speedfs-format.md
+  SPEZIFIZIERT (Dokument vor Code; Format-Änderung = erst Doku,
+  dann Version+1). Kurzform: Superblock "SPFS" | Block-Bitmap |
+  Inode-Tabelle | Daten, 4-KiB-Blöcke, alles Little-Endian; Inodes
+  128 B mit 22 direkten + 1 einfach-indirektem Zeiger (max. Datei
+  ~4,09 MiB); Verzeichnisse = Byte-Listen [Inode u32|Länge u8|Name].
+  KEIN JOURNAL — Konsistenz über die Schreib-Reihenfolge (§7 im
+  Format-Doc): Belegen vor Benutzen, Inhalt vor Verweis, Entkoppeln
+  vor Freigeben; jeder Op hat EINEN sektor-atomaren Commit-Punkt,
+  Absturz hinterlässt höchstens Block-Lecks, nie falsche Zeiger.
+  BLOCK-CACHE: Write-Through (ENTSCHEIDUNG: einfach und ehrlich —
+  Code-Reihenfolge == Platten-Reihenfolge, die Absturz-Analyse gilt
+  ohne Zusatzannahmen; Write-Back + geordnetes Flush wäre schneller
+  und ist Serie-5-Stoff). SpeedFS kennt NUR das BlockDevice-Trait
+  (läuft identisch auf RamDisk-Tests und ATA); Innen-Mutabilität
+  über RefCell (kein Lock — der VFS-Mutex serialisiert schon).
+  MOUNT-TABELLE (fs/mod.rs): Aus dem Root-Mount wurde
+  `MountTabelle` (Wurzel-RamFs + Präfix-Mounts wie /platte), die
+  SELBST FileSystem implementiert und per Pfad-Präfix routet —
+  mit_fs() und ALLE Befehle/Apps blieben unverändert. rename über
+  die Mount-Grenze -> FsFehler::MountGrenze; fs::verschieben(_rekursiv)
+  fällt dann auf kopieren+löschen zurück. fs::mounten legt den
+  Mount-Punkt im Wurzel-FS an; fs::unmounten synct ERST (bei Fehler
+  bleibt gemountet). ata::daten_platte() = besitzbares
+  BlockDevice-Handle, das an die Registry delegiert (Lock-Ordnung
+  VFS -> LAUFWERKE, LAUFWERKE bleibt Blatt). Shell: mkfs.speedfs
+  (nur mit Argument JA, nie bei gemountetem /platte), mount, umount.
+  ACHTUNG TESTS: tests/ata_platte.rs schreibt Roh-Sektoren seit
+  SpeedFS nur noch ans PLATTEN-ENDE (Sektor 130500+), weil vorne
+  der Superblock liegt; tests/speedfs_platte.rs führt den
+  Persistenz-Beweis mit einer echten Datei über das VFS.
 - **ATA-PIO-Treiber (Juli 2026, `src/ata.rs`) — die erste echte
   Platte:** PIO gepollt über die Legacy-Ports des Primary-Kanals
   (0x1F0/0x3F6, fest verdrahtet — bewusst KEINE PCI-Enumeration),

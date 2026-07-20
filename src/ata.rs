@@ -455,6 +455,48 @@ pub fn probe(io_basis: u16, control: u16, slave: bool) -> Result<(), IoFehler> {
 }
 
 // ---------------------------------------------------------------------------
+// DatenPlatte — ein besitzbares BlockDevice-Handle auf die Daten-Platte
+// ---------------------------------------------------------------------------
+
+/// Ein eigenständiges BlockDevice über die DATEN-Platte: delegiert
+/// jeden Zugriff an die Registry (mit_datenlaufwerk) und cached nur
+/// die Geometrie. Damit kann das VFS (SpeedFS-Mount) das Laufwerk
+/// "besitzen", während platten/blocktest weiter über die Registry
+/// laufen. LOCK-ORDNUNG: Das VFS hält seinen Lock, wenn es hier
+/// landet — LAUFWERKE bleibt ein BLATT darunter (VFS -> LAUFWERKE;
+/// niemand nimmt das VFS unter LAUFWERKE).
+pub struct DatenPlatte {
+    sektoren: u64,
+}
+
+/// Liefert das Handle, wenn eine Daten-Platte erkannt wurde.
+pub fn daten_platte() -> Option<DatenPlatte> {
+    let laufwerke = LAUFWERKE.lock();
+    laufwerke
+        .iter()
+        .find(|l| l.beschreibbar)
+        .map(|l| DatenPlatte { sektoren: l.sektoren })
+}
+
+impl BlockDevice for DatenPlatte {
+    fn sektor_groesse(&self) -> usize {
+        SEKTOR_GROESSE
+    }
+    fn anzahl_sektoren(&self) -> u64 {
+        self.sektoren
+    }
+    fn lese_sektoren(&mut self, start: u64, puffer: &mut [u8]) -> Result<(), IoFehler> {
+        mit_datenlaufwerk(|laufwerk| laufwerk.lese_sektoren(start, puffer))
+    }
+    fn schreibe_sektoren(&mut self, start: u64, puffer: &[u8]) -> Result<(), IoFehler> {
+        mit_datenlaufwerk(|laufwerk| laufwerk.schreibe_sektoren(start, puffer))
+    }
+    fn sync(&mut self) -> Result<(), IoFehler> {
+        mit_datenlaufwerk(|laufwerk| laufwerk.sync())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Unit-Tests der reinen Funktionen (laufen in QEMU via cargo test)
 // ---------------------------------------------------------------------------
 
