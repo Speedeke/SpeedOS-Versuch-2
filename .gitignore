@@ -5,3 +5,11 @@
 /target
 # ... auch die des boot/-Runners (eigenständiger Workspace):
 /boot/target
+
+# Persistente Daten-Platten-Images (Nutzerdaten der VM — kein Build-Artefakt,
+# aber auch nichts fuers Repository; werden vom Runner bei Bedarf neu angelegt):
+speedos-daten.img
+speedos-daten-test.img
+
+# Devlog-Screenshots (lokal, nicht im Repository):
+screenshots/

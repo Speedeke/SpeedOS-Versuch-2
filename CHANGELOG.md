@@ -5,6 +5,34 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### ATA-PIO-Treiber: SpeedOS spricht mit einer echten Platte
+- Neues `src/ata.rs`: ATA im PIO-Modus über die Legacy-Ports des
+  Primary-Kanals (0x1F0/0x3F6) — gepollt mit TSC-Timeout, keine
+  PCI-Enumeration, Kanal-Interrupts aus (nIEN). IDENTIFY liest
+  Modell und Kapazität (reine, unit-getestete Dekoder), Lesen/
+  Schreiben über LBA28 (max. 128 GiB; 256 Sektoren pro Kommando,
+  größere Aufträge zerlegt der Treiber), FLUSH CACHE als sync().
+  Implementiert das `BlockDevice`-Trait der Serie-4-Naht
+- SICHERHEITSREGEL: Die Boot-Platte (Primary Master) ist PER
+  KONSTRUKTION schreibgeschützt — nur die Daten-Platte (Primary
+  Slave) bekommt Schreibrechte; Verstöße melden den neuen
+  `IoFehler::Schreibgeschuetzt` (dazu neu: `Zeitueberschreitung`)
+- Runner: `cargo run` hängt automatisch ein persistentes 64-MiB-Image
+  `speedos-daten.img` als zweite IDE-Platte an (beim ersten Start
+  angelegt, gitignored); Tests bekommen ein EIGENES
+  `speedos-daten-test.img`, damit sie nie Nutzerdaten überschreiben
+- Neue Shell-Befehle: `platten` (erkannte Laufwerke mit Modell,
+  Größe, Schreibschutz) und `blocktest <lba>` (klassischer Hexdump
+  eines Sektors der Daten-Platte)
+- ERSTER PERSISTENZ-BEWEIS: tests/ata_platte.rs schreibt ein
+  Generationen-Muster in Sektor 1000, und der nächste Testlauf —
+  nach QEMU-Neustart! — findet es intakt wieder
+  (`[PERSISTENZ-BEWEIS]`-Zeile in der seriellen Ausgabe). Dazu:
+  Roundtrip über die 256-Sektoren-Grenze, Boot-Platten-Schreibschutz,
+  leerer Steckplatz antwortet in ~130 µs statt zu hängen
+- 3 neue Unit-Tests (Laufwerkswahl-Byte, IDENTIFY-Dekoder) und
+  5 Integrationstests — 118 Lib-Tests insgesamt, alle grün
+
 ### Serie-4-Auftakt: BlockDevice-Naht + VFS-Erweiterung
 - Neues `src/fs/block.rs`: das schmale `BlockDevice`-Trait
   (sektor_groesse, anzahl_sektoren, lese_sektoren, schreibe_sektoren,

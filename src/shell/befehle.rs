@@ -69,6 +69,9 @@ pub fn alle_befehle() -> Vec<Box<dyn Befehl>> {
         Box::new(Copy),
         Box::new(Move),
         Box::new(Tree),
+        // Massenspeicher-Befehle (ATA-Treiber):
+        Box::new(Platten),
+        Box::new(Blocktest),
     ]
 }
 
@@ -614,5 +617,107 @@ fn baum_zeichnen(pfad: &str, einrueckung: &str) {
                 println!("{}{}{}", einrueckung, ast, eintrag.name);
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+/// platten — listet die beim Boot erkannten ATA-Laufwerke auf.
+struct Platten;
+
+impl Befehl for Platten {
+    fn name(&self) -> &'static str {
+        "platten"
+    }
+    fn beschreibung(&self) -> &'static str {
+        "Listet die erkannten Laufwerke (Modell, Groesse)"
+    }
+    fn ausfuehren(&self, _argumente: &str, _kontext: &mut ShellKontext, _registry: &[Box<dyn Befehl>]) {
+        crate::ata::mit_laufwerken(|laufwerke| {
+            if laufwerke.is_empty() {
+                println!("Keine ATA-Laufwerke erkannt.");
+                return;
+            }
+            println!("Erkannte ATA-Laufwerke:");
+            println!();
+            for laufwerk in laufwerke.iter_mut() {
+                use crate::fs::block::BlockDevice;
+                let sektoren = laufwerk.anzahl_sektoren();
+                let mib = sektoren * laufwerk.sektor_groesse() as u64 / 1024 / 1024;
+                konsole::set_color(Color::LightCyan, Color::Black);
+                print!("  {:<6}", laufwerk.rolle());
+                konsole::set_color(Color::LightGray, Color::Black);
+                println!(
+                    "{:<20}  {:>9} Sektoren = {:>5} MiB  {}",
+                    laufwerk.modell(),
+                    sektoren,
+                    mib,
+                    if laufwerk.ist_beschreibbar() {
+                        "beschreibbar"
+                    } else {
+                        "schreibgeschuetzt"
+                    }
+                );
+            }
+        });
+    }
+}
+
+/// blocktest — liest einen Sektor der DATEN-Platte und zeigt ihn als
+/// klassischen Hexdump (16 Bytes pro Zeile, Offset + Hex + ASCII).
+struct Blocktest;
+
+impl Befehl for Blocktest {
+    fn name(&self) -> &'static str {
+        "blocktest"
+    }
+    fn beschreibung(&self) -> &'static str {
+        "Hexdump eines Sektors der Daten-Platte: blocktest <lba>"
+    }
+    fn ausfuehren(&self, argumente: &str, _kontext: &mut ShellKontext, _registry: &[Box<dyn Befehl>]) {
+        let lba = match argumente.trim().parse::<u64>() {
+            Ok(lba) => lba,
+            Err(_) => {
+                println!("Aufruf: blocktest <lba>   (Sektornummer, z. B. blocktest 0)");
+                return;
+            }
+        };
+        let mut sektor = [0u8; crate::ata::SEKTOR_GROESSE];
+        let ergebnis = crate::ata::mit_datenlaufwerk(|laufwerk| {
+            use crate::fs::block::BlockDevice;
+            laufwerk.lese_sektoren(lba, &mut sektor)
+        });
+        match ergebnis {
+            Ok(()) => {
+                println!("Daten-Platte, Sektor {} ({} Bytes):", lba, sektor.len());
+                hexdump_ausgeben(&sektor);
+            }
+            Err(fehler) => fs_fehler_ausgeben(FsFehler::Io(fehler)),
+        }
+    }
+}
+
+/// Der klassische Hexdump: Offset (hex), 16 Byte-Werte, ASCII-Spalte
+/// (nur druckbare Zeichen 0x20-0x7E, sonst '.').
+fn hexdump_ausgeben(daten: &[u8]) {
+    for (zeile, bytes) in daten.chunks(16).enumerate() {
+        konsole::set_color(Color::DarkGray, Color::Black);
+        print!("  {:04x}  ", zeile * 16);
+        konsole::set_color(Color::LightGray, Color::Black);
+        for (i, byte) in bytes.iter().enumerate() {
+            // Nach 8 Bytes eine kleine Luecke — so zaehlt das Auge leichter:
+            print!("{:02x}{}", byte, if i == 7 { "  " } else { " " });
+        }
+        konsole::set_color(Color::LightCyan, Color::Black);
+        print!(" |");
+        for byte in bytes {
+            let zeichen = if (0x20..0x7F).contains(byte) {
+                *byte as char
+            } else {
+                '.'
+            };
+            print!("{}", zeichen);
+        }
+        println!("|");
     }
 }

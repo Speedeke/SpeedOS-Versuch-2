@@ -67,7 +67,34 @@
   Explorer in der Statusleiste, SpeedText als Fehler-Dialog
   (`ui::dialog::fehler`, dünner Mantel um bestaetigung()).
 
+## Platten-Sicherheits-Regel (Juli 2026)
+- Der ATA-Treiber weigert sich PER KONSTRUKTION, auf das Boot-Laufwerk
+  zu schreiben: Das Feld `beschreibbar` ist privat, Laufwerke entstehen
+  ausschließlich in `ata::init()`, und nur die konfigurierte DATEN-
+  Platte (Primary Slave) bekommt Schreibrechte — es gibt keinen
+  API-Weg, das zu umgehen (`IoFehler::Schreibgeschuetzt`). Tests
+  laufen zusätzlich gegen ein EIGENES Daten-Image
+  (speedos-daten-test.img), nie gegen speedos-daten.img.
+
 ## Architektur-Entscheidungen
+- **ATA-PIO-Treiber (Juli 2026, `src/ata.rs`) — die erste echte
+  Platte:** PIO gepollt über die Legacy-Ports des Primary-Kanals
+  (0x1F0/0x3F6, fest verdrahtet — bewusst KEINE PCI-Enumeration),
+  Kanal-Interrupts aus (nIEN). Jedes Status-Polling hat einen
+  TSC-Timeout (`IoFehler::Zeitueberschreitung` — nie endlos auf
+  Hardware warten; leerer Steckplatz wird am Status 0x00/0xFF sofort
+  erkannt). IDENTIFY liefert Modell/Kapazität (Dekoder = reine,
+  unit-getestete Funktionen; Modell-Bytes paarweise vertauscht!).
+  LBA28 = max. 128 GiB und 256 Sektoren pro Kommando — der Treiber
+  zerlegt größere Aufträge selbst; LBA48 wäre rein additiv.
+  FLUSH CACHE (0xE7) ist das sync(). Implementiert `BlockDevice`;
+  die Laufwerks-Registry LAUFWERKE ist ein BLATT-Lock (nur aus
+  Task-Kontext). Der Runner hängt speedos-daten.img (64 MiB,
+  persistent, Projekt-Root, gitignored) als Primary Slave an —
+  ata::init() läuft in main.rs NACH zeit::init() (Timeouts brauchen
+  die TSC-Zeit). Shell: `platten` + `blocktest <lba>` (Hexdump).
+  tests/ata_platte.rs führt den PERSISTENZ-BEWEIS: Generationen-
+  Muster in Sektor 1000 überlebt QEMU-Neustarts.
 - **VFS-Abstraktion (Juli 2026, erweitert um die Serie-4-Naht):** Alle
   Dateisysteme implementieren das Trait `FileSystem` in `src/fs/mod.rs`
   (lesen, schreiben, liste, mkdir, loeschen, node_typ, read_at, write_at,

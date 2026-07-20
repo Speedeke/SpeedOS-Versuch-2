@@ -106,6 +106,17 @@ fn main() {
         .arg(format!("if=pflash,format=raw,file={}", vars_pfad.display()));
     qemu.arg("-drive")
         .arg(format!("format=raw,file={}", image_pfad.display()));
+    // Die DATEN-Platte: ein persistentes Roh-Image, das als Primary
+    // SLAVE am emulierten IDE-Controller hängt (die Boot-Platte ist
+    // Primary Master, index=0). Sie überlebt QEMU-Neustarts — das ist
+    // der erste echte persistente Speicher von SpeedOS. Im Test-Modus
+    // nehmen wir bewusst ein EIGENES Image, damit Testläufe nie die
+    // Nutzerdaten der normalen Daten-Platte überschreiben.
+    let daten_pfad = daten_image_sicherstellen(test_modus);
+    qemu.arg("-drive").arg(format!(
+        "format=raw,file={},if=ide,index=1",
+        daten_pfad.display()
+    ));
     // Hardware-Virtualisierung: WHPX (Windows Hypervisor Platform)
     // lässt den Kernel-Code DIREKT auf der CPU laufen statt ihn
     // Befehl für Befehl zu übersetzen (TCG) — der Unterschied ist
@@ -213,6 +224,36 @@ fn aufloesung_waehlen() -> (u64, u64) {
             (1280, 720)
         }
     }
+}
+
+/// Größe der Daten-Platte beim ersten Anlegen: 64 MiB (131072 Sektoren
+/// zu 512 Bytes) — reichlich für die ersten Disk-Dateisystem-Schritte.
+const DATEN_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Stellt sicher, dass das persistente Daten-Platten-Image existiert,
+/// und liefert seinen Pfad. Liegt im Projekt-Root (dem Arbeits-
+/// verzeichnis von cargo run), NICHT im target-Ordner — `cargo clean`
+/// darf die Nutzerdaten nicht löschen. set_len füllt mit Nullen: wie
+/// eine fabrikneue Platte, und NTFS legt das platzsparend (sparse) ab.
+fn daten_image_sicherstellen(test_modus: bool) -> PathBuf {
+    let pfad = PathBuf::from(if test_modus {
+        "speedos-daten-test.img"
+    } else {
+        "speedos-daten.img"
+    });
+    if !pfad.exists() {
+        let datei = std::fs::File::create(&pfad)
+            .expect("Daten-Platten-Image konnte nicht angelegt werden");
+        datei
+            .set_len(DATEN_IMAGE_BYTES)
+            .expect("Daten-Platten-Image konnte nicht auf Groesse gebracht werden");
+        eprintln!(
+            "[Runner] Neue Daten-Platte angelegt: {} ({} MiB)",
+            pfad.display(),
+            DATEN_IMAGE_BYTES / 1024 / 1024
+        );
+    }
+    pfad
 }
 
 /// Wartet auf QEMU, bricht aber nach dem Timeout ab (hängender Test).

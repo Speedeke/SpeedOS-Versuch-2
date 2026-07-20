@@ -83,7 +83,13 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         None => serial_println!("[FB] WARNUNG: Kein Framebuffer — Ausgabe nur seriell!"),
     }
 
-    // 5. Dateisystem: RamFs als Wurzel mounten (mit Demo-Dateien),
+    // 5. Massenspeicher: die ATA-Laufwerke erkennen (IDENTIFY loggt
+    //    Modell und Größe seriell). Braucht die TSC-Zeit aus 1b für
+    //    seine Polling-Timeouts. Die Boot-Platte ist per Konstruktion
+    //    schreibgeschützt; beschreibbar ist nur die Daten-Platte.
+    speed_os::ata::init();
+
+    //    Dateisystem: RamFs als Wurzel mounten (mit Demo-Dateien),
     //    dann die persistenten Einstellungen laden und anwenden
     //    (Theme, Akzent, Hintergrund — VOR dem Desktop-Start).
     speed_os::fs::init();

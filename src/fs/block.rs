@@ -34,6 +34,12 @@ pub enum IoFehler {
     Geraetefehler,
     /// Kein Gerät vorhanden oder (noch) nicht bereit.
     NichtBereit,
+    /// Das Gerät hat nicht innerhalb der Frist geantwortet (Polling-
+    /// Timeout) — Treiber warten NIE endlos auf Hardware.
+    Zeitueberschreitung,
+    /// Das Laufwerk ist schreibgeschützt (z. B. die Boot-Platte —
+    /// siehe Sicherheitsregel im ATA-Treiber).
+    Schreibgeschuetzt,
 }
 
 impl IoFehler {
@@ -46,6 +52,8 @@ impl IoFehler {
             }
             IoFehler::Geraetefehler => "das Geraet meldet einen Hardware-Fehler",
             IoFehler::NichtBereit => "das Geraet ist nicht bereit",
+            IoFehler::Zeitueberschreitung => "das Geraet antwortet nicht (Timeout)",
+            IoFehler::Schreibgeschuetzt => "das Laufwerk ist schreibgeschuetzt",
         }
     }
 }
