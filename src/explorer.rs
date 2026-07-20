@@ -448,8 +448,12 @@ impl ExplorerApp {
     }
 
     /// Strg+V / Kontextmenü "Einfügen": aus der globalen Ablage in
-    /// den aktuellen Ordner (Konflikt -> " (2)"); Ausschneiden löscht
-    /// danach die Quelle und leert die Ablage.
+    /// den aktuellen Ordner (Konflikt -> " (2)"). Ausschneiden ist
+    /// seit SpeedFS ein ECHTES rename (fs::verschieben_rekursiv):
+    /// atomar und ohne die Datei-Inhalte anzufassen — das frühere
+    /// kopieren+löschen wäre auf der Platte untragbar (jedes Byte
+    /// zweimal durch den Treiber). Nur über die Mount-Grenze fällt
+    /// das VFS selbst auf kopieren+löschen zurück.
     fn einfuegen(&mut self) {
         let ablage = match crate::ablage::holen() {
             Some(ablage) => ablage,
@@ -458,14 +462,12 @@ impl ExplorerApp {
         let name = ablage.pfad.rsplit('/').next().unwrap_or(&ablage.pfad);
         let ziel_name = eindeutiger_name(&namen_in(self.pfad()), name);
         let ziel = fs::pfad_anhaengen(self.pfad(), &ziel_name);
-        let ergebnis = fs::kopieren_rekursiv(&ablage.pfad, &ziel).and_then(|()| {
-            if ablage.ausschneiden {
-                crate::ablage::leeren();
-                fs::loeschen_rekursiv(&ablage.pfad)
-            } else {
-                Ok(())
-            }
-        });
+        let ergebnis = if ablage.ausschneiden {
+            crate::ablage::leeren();
+            fs::verschieben_rekursiv(&ablage.pfad, &ziel)
+        } else {
+            fs::kopieren_rekursiv(&ablage.pfad, &ziel)
+        };
         self.fehler_setzen(ergebnis);
         self.neu_laden();
     }

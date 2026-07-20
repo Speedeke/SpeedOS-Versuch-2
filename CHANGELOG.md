@@ -5,6 +5,34 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### SpeedFS wird erwachsen: rename überall, sync-Kette, fsck, Folter-Test
+- Explorer-Ausschneiden+Einfügen nutzt jetzt `fs::verschieben_rekursiv`
+  (echtes atomares rename) statt kopieren+löschen — auf einer echten
+  Platte wäre das Kopieren untragbar gewesen; nur über die
+  Mount-Grenze kopiert weiterhin der VFS-Fallback. Format-Doc §7
+  präzisiert: Nach einem rename-Absturz existiert die Datei IMMER
+  (nie in keinem Ordner), schlimmstenfalls kurz in beiden —
+  `pruefe.speedfs` meldet so einen Doppel-Eintrag als Befund
+- sync-Kette komplett: `fs::sync()` → alle gemounteten Dateisysteme
+  → BlockDevice (ATA FLUSH CACHE). Neuer Shell-Befehl `sync`;
+  SpeedText-Speichern ruft sync automatisch (ein sync-Fehler zählt
+  wie ein Schreibfehler und erscheint als Dialog), die
+  Einstellungen taten es schon
+- `pruefe.speedfs [--repariere]` — unser fsck (Format-Doc §10, nur
+  ungemountet): Baum-Scan ab der Wurzel prüft Verzeichnis-Einträge
+  gegen die Inode-Tabelle, Blockzeiger gegen Datenbereich und
+  Doppel-Referenzen, Größen gegen die Zeiger-Belegung; die Bilanz
+  gegen die Bitmap findet LECKS (belegt, aber unreferenziert —
+  der erlaubte Absturz-Schaden), --repariere gibt sie frei.
+  DEFEKTE werden nur gemeldet, nie automatisch repariert
+- DER FOLTER-TEST: `AbsturzDisk` verwirft alle Schreibvorgänge nach
+  einem Budget N (Präfix-Semantik eines Stromausfalls); eine Serie
+  aus create/write/rename/delete wird an JEDEM N abgeschnitten,
+  neu gemountet und geprüft — Ergebnis: 72 Abschneide-Punkte,
+  58 mit (reparierbaren) Lecks, 0 kaputte Metadaten. Die
+  Ordering-Disziplin aus §7 ist damit maschinell belegt
+- 128 Lib-Tests + alle Integrationstests grün
+
 ### SpeedFS: das eigene Dateisystem-Format (Design zuerst!)
 - Neues Design-Dokument `docs/speedfs-format.md` — geschrieben VOR
   dem Code: Superblock ("SPFS", Version 1) | Block-Bitmap |

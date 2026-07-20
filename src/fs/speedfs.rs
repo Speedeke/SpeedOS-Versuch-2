@@ -810,6 +810,239 @@ impl Inner {
 }
 
 // ---------------------------------------------------------------------------
+// pruefe.speedfs — das Prüfwerkzeug (docs/speedfs-format.md §10)
+// ---------------------------------------------------------------------------
+
+/// Das Ergebnis eines Dateisystem-Checks. LECKS (belegt, aber
+/// unreferenziert) sind der erwartete Absturz-Schaden und
+/// reparierbar; DEFEKTE (Metadaten zeigen auf Falsches) dürfen dank
+/// der Schreib-Reihenfolge nie entstehen und werden NUR gemeldet.
+pub struct PruefBericht {
+    /// Erreichbare (referenzierte) Inodes inkl. Wurzel.
+    pub inodes_erreichbar: u32,
+    /// Vom Baum referenzierte Blöcke (Daten + indirekte).
+    pub bloecke_referenziert: u64,
+    /// Belegte, aber unreferenzierte Blöcke (Absturz-Lecks).
+    pub block_lecks: Vec<u32>,
+    /// Belegte, aber unerreichbare Inodes (Absturz-Lecks).
+    pub inode_lecks: Vec<u32>,
+    /// Inode aus mehreren Verzeichnissen erreichbar (Befund nach
+    /// rename-Absturz, §7) — harmlos, aber sichtbar gemacht.
+    pub doppel_eintraege: Vec<String>,
+    /// Harte Metadaten-Fehler. Werden NIE automatisch repariert.
+    pub defekte: Vec<String>,
+    /// true, wenn Lecks in diesem Lauf repariert wurden.
+    pub repariert: bool,
+}
+
+impl PruefBericht {
+    pub fn hat_lecks(&self) -> bool {
+        !self.block_lecks.is_empty() || !self.inode_lecks.is_empty()
+    }
+}
+
+impl SpeedFs {
+    /// Prüft das komplette Dateisystem (Baum-Scan + Bilanz gegen
+    /// Bitmap und Inode-Tabelle). `reparieren` gibt geleckte Blöcke
+    /// und Inodes wieder frei — aber NUR, wenn es keine Defekte
+    /// gibt (in ein defektes Dateisystem schreibt man nicht).
+    /// Ein Err kommt nur bei ECHTEN Gerätefehlern; alles, was am
+    /// Format kaputt ist, landet als Defekt im Bericht.
+    pub fn pruefen(&self, reparieren: bool) -> FsErgebnis<PruefBericht> {
+        let mut inner = self.inner.borrow_mut();
+        let sb = inner.sb;
+        let mut bericht = PruefBericht {
+            inodes_erreichbar: 0,
+            bloecke_referenziert: 0,
+            block_lecks: Vec::new(),
+            inode_lecks: Vec::new(),
+            doppel_eintraege: Vec::new(),
+            defekte: Vec::new(),
+            repariert: false,
+        };
+
+        // Merkzettel: Welche Blöcke/Inodes erreicht der Baum?
+        let mut block_ref = vec![false; sb.anzahl_bloecke as usize];
+        let mut inode_ref = vec![false; sb.anzahl_inodes as usize];
+        let block_gueltig = |nr: u32| (nr as u64) >= sb.daten_start && (nr as u64) < sb.anzahl_bloecke;
+
+        // --- 1. Baum-Scan ab der Wurzel (iterativ, Pfade für die
+        // --- Meldungen) ---------------------------------------------------
+        let mut stapel: Vec<(u32, String)> = vec![(WURZEL_INODE, String::from("/"))];
+        inode_ref[WURZEL_INODE as usize] = true;
+        while let Some((nr, pfad)) = stapel.pop() {
+            let inode = inner.inode_lesen(nr)?;
+            bericht.inodes_erreichbar += 1;
+            if inode.typ != TYP_DATEI && inode.typ != TYP_VERZEICHNIS {
+                bericht
+                    .defekte
+                    .push(alloc::format!("{}: Inode {} hat Typ {} (frei/unbekannt)", pfad, nr, inode.typ));
+                continue;
+            }
+
+            // Zeiger-Konsistenz zur Größe (§10): genau ⌈Größe/4096⌉
+            // Zeiger, überzählige müssen 0 sein.
+            let benoetigt = (inode.groesse as usize).div_ceil(BLOCK_GROESSE);
+            if benoetigt > DIREKTE + ZEIGER_PRO_BLOCK {
+                bericht
+                    .defekte
+                    .push(alloc::format!("{}: Groesse {} sprengt das Format", pfad, inode.groesse));
+                continue;
+            }
+            let mut zeiger_defekt = false;
+            for (i, zeiger) in inode.direkt.iter().enumerate() {
+                let gebraucht = i < benoetigt.min(DIREKTE);
+                if gebraucht && (*zeiger == 0 || !block_gueltig(*zeiger)) {
+                    bericht.defekte.push(alloc::format!(
+                        "{}: direkter Zeiger {} ungueltig ({})",
+                        pfad, i, zeiger
+                    ));
+                    zeiger_defekt = true;
+                }
+                if !gebraucht && *zeiger != 0 {
+                    bericht.defekte.push(alloc::format!(
+                        "{}: direkter Zeiger {} muesste 0 sein (Groesse {})",
+                        pfad, i, inode.groesse
+                    ));
+                    zeiger_defekt = true;
+                }
+            }
+            if benoetigt > DIREKTE {
+                if inode.indirekt == 0 || !block_gueltig(inode.indirekt) {
+                    bericht.defekte.push(alloc::format!(
+                        "{}: Indirektblock ungueltig ({})",
+                        pfad, inode.indirekt
+                    ));
+                    zeiger_defekt = true;
+                }
+            } else if inode.indirekt != 0 {
+                bericht
+                    .defekte
+                    .push(alloc::format!("{}: Indirektblock ohne Bedarf", pfad));
+                zeiger_defekt = true;
+            }
+            if zeiger_defekt {
+                continue; // kaputte Zeiger nicht auch noch dereferenzieren
+            }
+
+            // Blöcke einsammeln (Indirektblock zählt mit):
+            let liste = inner.blockliste(&inode)?;
+            let mut alle = liste;
+            if inode.indirekt != 0 {
+                alle.push(inode.indirekt);
+            }
+            let mut inhalt_lesbar = true;
+            for block_nr in alle {
+                if !block_gueltig(block_nr) {
+                    bericht.defekte.push(alloc::format!(
+                        "{}: indirekter Zeiger auf Block {} ausserhalb des Datenbereichs",
+                        pfad, block_nr
+                    ));
+                    inhalt_lesbar = false;
+                } else if block_ref[block_nr as usize] {
+                    bericht.defekte.push(alloc::format!(
+                        "{}: Block {} ist doppelt referenziert",
+                        pfad, block_nr
+                    ));
+                } else {
+                    block_ref[block_nr as usize] = true;
+                    bericht.bloecke_referenziert += 1;
+                }
+            }
+
+            // Verzeichnisse: Einträge prüfen und absteigen.
+            if inode.typ == TYP_VERZEICHNIS && inhalt_lesbar {
+                let bytes = inner.inhalt_lesen(&inode)?;
+                let eintraege = match dir_parsen(&bytes) {
+                    Ok(eintraege) => eintraege,
+                    Err(_) => {
+                        bericht
+                            .defekte
+                            .push(alloc::format!("{}: Eintragsliste nicht parsbar", pfad));
+                        continue;
+                    }
+                };
+                for (kind_nr, name) in eintraege {
+                    let kind_pfad = if pfad == "/" {
+                        alloc::format!("/{}", name)
+                    } else {
+                        alloc::format!("{}/{}", pfad, name)
+                    };
+                    if name_pruefen(&name).is_err() {
+                        bericht
+                            .defekte
+                            .push(alloc::format!("{}: ungueltiger Name", kind_pfad));
+                        continue;
+                    }
+                    if kind_nr == 0 || kind_nr >= sb.anzahl_inodes {
+                        bericht.defekte.push(alloc::format!(
+                            "{}: Eintrag zeigt auf Inode {} (ausserhalb der Tabelle)",
+                            kind_pfad, kind_nr
+                        ));
+                        continue;
+                    }
+                    if inode_ref[kind_nr as usize] {
+                        // §7: Doppel-Eintrag nach rename-Absturz —
+                        // ein BEFUND, kein Defekt; nicht erneut absteigen.
+                        bericht
+                            .doppel_eintraege
+                            .push(alloc::format!("{} (Inode {})", kind_pfad, kind_nr));
+                        continue;
+                    }
+                    inode_ref[kind_nr as usize] = true;
+                    stapel.push((kind_nr, kind_pfad));
+                }
+            }
+        }
+
+        // --- 2. Bilanz gegen Bitmap und Inode-Tabelle ---------------------
+        // Die Bitmap EINMAL komplett einlesen (statt je Block durch
+        // den Cache zu gehen):
+        let mut bitmap = Vec::with_capacity((sb.bitmap_bloecke as usize) * BLOCK_GROESSE);
+        for i in 0..sb.bitmap_bloecke {
+            bitmap.extend_from_slice(&inner.block_lesen(sb.bitmap_start + i)?);
+        }
+        for block_nr in 0..sb.anzahl_bloecke {
+            let belegt = bitmap[(block_nr / 8) as usize] & (1 << (block_nr % 8)) != 0;
+            if block_nr < sb.daten_start {
+                if !belegt {
+                    bericht
+                        .defekte
+                        .push(alloc::format!("Metadaten-Block {} als frei markiert", block_nr));
+                }
+                continue;
+            }
+            match (belegt, block_ref[block_nr as usize]) {
+                (true, false) => bericht.block_lecks.push(block_nr as u32),
+                (false, true) => bericht.defekte.push(alloc::format!(
+                    "Block {} referenziert, aber als frei markiert",
+                    block_nr
+                )),
+                _ => {}
+            }
+        }
+        for nr in 1..sb.anzahl_inodes {
+            let inode = inner.inode_lesen(nr)?;
+            if inode.typ != TYP_FREI && !inode_ref[nr as usize] {
+                bericht.inode_lecks.push(nr);
+            }
+        }
+
+        // --- 3. Reparatur: NUR Lecks, und NUR ohne Defekte ---------------
+        if reparieren && bericht.defekte.is_empty() && bericht.hat_lecks() {
+            for nr in &bericht.inode_lecks {
+                let mut frei = inner.inode_lesen(*nr)?;
+                frei.typ = TYP_FREI;
+                inner.inode_schreiben(*nr, &frei)?;
+            }
+            inner.bloecke_freigeben(&bericht.block_lecks)?;
+            bericht.repariert = true;
+        }
+        Ok(bericht)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Die FileSystem-Trait-Implementierung (die VFS-Naht)
 // ---------------------------------------------------------------------------
 
@@ -1292,6 +1525,145 @@ mod tests {
         assert_eq!(
             fs.rename("/ordner", "/ordner/kind"),
             Err(FsFehler::UngueltigerPfad)
+        );
+    }
+
+    // --- Der Folter-Test: Absturz nach N Schreibvorgängen --------------
+
+    use alloc::sync::Arc;
+    use core::sync::atomic::{AtomicI64, Ordering};
+
+    /// Ein BlockDevice, das einen STROMAUSFALL simuliert: Nach dem
+    /// Schreib-Budget verschwinden alle weiteren Writes spurlos
+    /// (Ok, aber nie auf der "Platte") — der Kernel arbeitet ahnungslos
+    /// weiter, genau wie vor einem echten Absturz. Die Platte sieht
+    /// damit ein exaktes PRÄFIX der Schreibfolge. Die RamDisk steckt
+    /// in einem Arc, damit der Test nach dem "Absturz" (Drop des FS
+    /// samt Cache) mit demselben Platten-Zustand neu mounten kann.
+    struct AbsturzDisk {
+        disk: Arc<spin::Mutex<RamDisk>>,
+        budget: Arc<AtomicI64>,
+    }
+
+    impl BlockDevice for AbsturzDisk {
+        fn sektor_groesse(&self) -> usize {
+            512
+        }
+        fn anzahl_sektoren(&self) -> u64 {
+            self.disk.lock().anzahl_sektoren()
+        }
+        fn lese_sektoren(&mut self, start: u64, puffer: &mut [u8]) -> Result<(), IoFehler> {
+            self.disk.lock().lese_sektoren(start, puffer)
+        }
+        fn schreibe_sektoren(&mut self, start: u64, puffer: &[u8]) -> Result<(), IoFehler> {
+            if self.budget.fetch_sub(1, Ordering::Relaxed) <= 0 {
+                return Ok(()); // verworfen — der "Strom ist weg"
+            }
+            self.disk.lock().schreibe_sektoren(start, puffer)
+        }
+        fn sync(&mut self) -> Result<(), IoFehler> {
+            Ok(())
+        }
+    }
+
+    /// Die deterministische Op-Serie: create, write (mehrblöckig +
+    /// read-modify-write), rename in allen Spielarten, delete.
+    /// Ergebnisse bewusst ignoriert — nach dem Abschneide-Punkt ist
+    /// die FS-Sicht Phantom; zählen tut nur, was auf der Platte ist.
+    fn folter_serie(fs: &mut SpeedFs) {
+        let _ = fs.mkdir("/a");
+        let _ = fs.schreiben("/a/eins.txt", b"erste Datei");
+        let _ = fs.schreiben("/gross.bin", &vec![7u8; 3 * BLOCK_GROESSE + 100]);
+        let _ = fs.write_at("/gross.bin", BLOCK_GROESSE - 10, b"mittendrin");
+        let _ = fs.rename("/a/eins.txt", "/a/zwei.txt"); // gleicher Ordner
+        let _ = fs.mkdir("/b");
+        let _ = fs.rename("/a/zwei.txt", "/b/drei.txt"); // ordnerübergreifend
+        let _ = fs.schreiben("/opfer.txt", b"wird ersetzt");
+        let _ = fs.rename("/b/drei.txt", "/opfer.txt"); // Ziel ersetzen
+        let _ = fs.loeschen("/gross.bin");
+        let _ = fs.schreiben("/b/vier.txt", b"noch eine");
+        let _ = fs.loeschen("/a"); // leer -> weg
+    }
+
+    /// Ein Folterlauf: frisches FS, Serie mit Schreib-Budget,
+    /// "Absturz" (Drop), Wiedermount, pruefen. Liefert (verbrauchte
+    /// Schreibvorgänge des Laufs, Bericht VOR der Reparatur).
+    fn folter_lauf(budget_start: i64) -> (i64, PruefBericht) {
+        let disk = Arc::new(spin::Mutex::new(RamDisk::neu(512, 4096))); // 2 MiB
+        // mkfs VOR dem Budget: Ein Absturz mittendrin ist per
+        // "Superblock zuletzt" ohnehin unsichtbar (§7).
+        formatieren(&mut *disk.lock()).expect("mkfs fehlgeschlagen");
+        let budget = Arc::new(AtomicI64::new(budget_start));
+        {
+            let wrapper = AbsturzDisk {
+                disk: disk.clone(),
+                budget: budget.clone(),
+            };
+            let mut fs = SpeedFs::mounten(Box::new(wrapper))
+                .map_err(|(f, _)| f)
+                .expect("Mount fehlgeschlagen");
+            folter_serie(&mut fs);
+            // Drop des FS = der Absturz: Cache und RAM-Sicht sind weg.
+        }
+        let verbraucht = budget_start - budget.load(Ordering::Relaxed);
+
+        // Wiedermount vom rohen Platten-Stand, dann der Check:
+        let frisch = AbsturzDisk {
+            disk,
+            budget: Arc::new(AtomicI64::new(i64::MAX)),
+        };
+        let fs = SpeedFs::mounten(Box::new(frisch))
+            .map_err(|(f, _)| f)
+            .expect("Wiedermount nach Absturz fehlgeschlagen");
+        let bericht = fs.pruefen(false).expect("pruefen fehlgeschlagen");
+
+        // Wenn die Metadaten heil sind: Reparatur muss alle Lecks
+        // tilgen und danach sauber sein.
+        if bericht.defekte.is_empty() {
+            fs.pruefen(true).expect("Reparatur fehlgeschlagen");
+            let danach = fs.pruefen(false).expect("Kontroll-Lauf fehlgeschlagen");
+            assert!(
+                danach.defekte.is_empty() && !danach.hat_lecks(),
+                "Nach der Reparatur muss das FS sauber sein"
+            );
+        }
+        (verbraucht, bericht)
+    }
+
+    /// DER Folter-Test (§7-Beweis): Die Schreibfolge an JEDER Stelle
+    /// abschneiden — Lecks sind erlaubt, kaputte Metadaten NIE.
+    #[test_case]
+    fn test_speedfs_folter_absturz() {
+        // Referenzlauf ohne Absturz: zählt die Schreibvorgänge und
+        // muss völlig sauber sein (keine Lecks im Normalbetrieb!).
+        let (gesamt, sauber) = folter_lauf(1_000_000);
+        assert!(sauber.defekte.is_empty(), "Referenzlauf defekt: {:?}", sauber.defekte);
+        assert!(!sauber.hat_lecks(), "Referenzlauf leckt: {:?}", sauber.block_lecks);
+        assert!(sauber.doppel_eintraege.is_empty());
+        assert!(gesamt > 50, "Serie zu kurz fuer einen ernsten Foltertest");
+
+        // Jetzt die Folter: jeden Abschneide-Punkt durchprobieren.
+        let mut laeufe_mit_lecks = 0;
+        for n in 0..gesamt {
+            let (_, bericht) = folter_lauf(n);
+            assert!(
+                bericht.defekte.is_empty(),
+                "Absturz nach {} Schreibvorgaengen hinterlaesst DEFEKTE: {:?}",
+                n,
+                bericht.defekte
+            );
+            if bericht.hat_lecks() {
+                laeufe_mit_lecks += 1;
+            }
+        }
+        // Plausibilität: Irgendwo MUSS es Lecks gegeben haben (sonst
+        // testet der Test nichts) — die Ordering-Disziplin erzeugt
+        // sie ja absichtlich statt kaputter Metadaten.
+        assert!(laeufe_mit_lecks > 0, "Kein einziger Lauf leckte — Test wirkungslos?");
+        crate::serial_println!(
+            "[FOLTER] {} Abschneide-Punkte geprueft, {} mit (reparierten) Lecks, 0 Defekte.",
+            gesamt,
+            laeufe_mit_lecks
         );
     }
 

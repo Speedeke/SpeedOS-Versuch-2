@@ -109,6 +109,25 @@
   SpeedFS nur noch ans PLATTEN-ENDE (Sektor 130500+), weil vorne
   der Superblock liegt; tests/speedfs_platte.rs führt den
   Persistenz-Beweis mit einer echten Datei über das VFS.
+  ERWACHSEN-PASS (Juli 2026): (1) Explorer-Ausschneiden+Einfügen
+  läuft über fs::verschieben_rekursiv = echtes rename (das alte
+  kopieren+löschen ist tot; nur die Mount-Grenze kopiert noch —
+  im VFS-Fallback). (2) sync-KETTE: fs::sync -> alle Mounts ->
+  BlockDevice-Flush (ATA 0xE7); der Shell-Befehl sync,
+  SpeedText-Speichern und einstellungen::speichern rufen sie —
+  "gespeichert" heißt "auf dem Medium", ein sync-Fehler wird wie
+  ein Schreibfehler angezeigt. (3) pruefe.speedfs = unser fsck
+  (SpeedFs::pruefen, Format-Doc §10): Baum-Scan + Bilanz gegen
+  Bitmap/Inode-Tabelle; LECKS (belegt-unreferenziert, der
+  erlaubte Absturz-Schaden) sind mit --repariere reparierbar,
+  DEFEKTE werden NUR gemeldet (nie automatisch "repariert" —
+  das würde Daten zerstören); Doppel-Eintrag nach rename-Absturz
+  ist ein BEFUND, kein Defekt. Läuft nur ungemountet. (4) Der
+  FOLTER-TEST (test_speedfs_folter_absturz) schneidet die
+  Schreibfolge per AbsturzDisk (verwirft Writes nach Budget N —
+  Präfix-Semantik wie echter Stromausfall) an JEDER Stelle ab:
+  Lecks erlaubt, Defekte nie — der maschinelle Beweis der §7-
+  Ordering-Disziplin.
 - **ATA-PIO-Treiber (Juli 2026, `src/ata.rs`) — die erste echte
   Platte:** PIO gepollt über die Legacy-Ports des Primary-Kanals
   (0x1F0/0x3F6, fest verdrahtet — bewusst KEINE PCI-Enumeration),

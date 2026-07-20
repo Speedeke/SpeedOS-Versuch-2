@@ -76,6 +76,8 @@ pub fn alle_befehle() -> Vec<Box<dyn Befehl>> {
         Box::new(MkfsSpeedfs),
         Box::new(Mount),
         Box::new(Umount),
+        Box::new(SyncBefehl),
+        Box::new(PruefeSpeedfs),
     ]
 }
 
@@ -835,6 +837,105 @@ impl Befehl for Umount {
                 println!("{} ausgehaengt (alles auf der Platte).", PLATTE_MOUNT);
             }
             Err(fehler) => fs_fehler_ausgeben(fehler),
+        }
+    }
+}
+
+/// sync — die komplette Kette: VFS -> alle Dateisysteme (Write-
+/// Through-Caches sind schon unten, SpeedFS reicht durch) ->
+/// BlockDevice (ATA FLUSH CACHE aufs Medium).
+struct SyncBefehl;
+
+impl Befehl for SyncBefehl {
+    fn name(&self) -> &'static str {
+        "sync"
+    }
+    fn beschreibung(&self) -> &'static str {
+        "Schreibt alle Puffer aufs Medium (VFS -> FS -> Platte)"
+    }
+    fn ausfuehren(&self, _argumente: &str, _kontext: &mut ShellKontext, _registry: &[Box<dyn Befehl>]) {
+        match crate::fs::sync() {
+            Ok(()) => println!("Alle Puffer auf dem Medium."),
+            Err(fehler) => fs_fehler_ausgeben(fehler),
+        }
+    }
+}
+
+/// pruefe.speedfs — unser fsck (docs/speedfs-format.md §10).
+/// Laeuft nur auf der UNGEMOUNTETEN Platte; --repariere gibt
+/// gefundene Lecks (Absturz-Rueckstaende) wieder frei.
+struct PruefeSpeedfs;
+
+impl Befehl for PruefeSpeedfs {
+    fn name(&self) -> &'static str {
+        "pruefe.speedfs"
+    }
+    fn beschreibung(&self) -> &'static str {
+        "Prueft das SpeedFS der Daten-Platte: pruefe.speedfs [--repariere]"
+    }
+    fn ausfuehren(&self, argumente: &str, _kontext: &mut ShellKontext, _registry: &[Box<dyn Befehl>]) {
+        if crate::fs::ist_gemountet(PLATTE_MOUNT) {
+            konsole::set_color(Color::LightRed, Color::Black);
+            println!("Die Platte ist unter {} gemountet — erst 'umount'.", PLATTE_MOUNT);
+            konsole::set_color(Color::LightGray, Color::Black);
+            return;
+        }
+        let reparieren = argumente.trim() == "--repariere";
+        let platte = match crate::ata::daten_platte() {
+            Some(platte) => platte,
+            None => {
+                fs_fehler_ausgeben(FsFehler::Io(crate::fs::IoFehler::NichtBereit));
+                return;
+            }
+        };
+        let speedfs = match crate::fs::speedfs::SpeedFs::mounten(Box::new(platte)) {
+            Ok(speedfs) => speedfs,
+            Err((fehler, _)) => {
+                fs_fehler_ausgeben(fehler);
+                return;
+            }
+        };
+        let bericht = match speedfs.pruefen(reparieren) {
+            Ok(bericht) => bericht,
+            Err(fehler) => {
+                fs_fehler_ausgeben(fehler);
+                return;
+            }
+        };
+
+        println!(
+            "SpeedFS geprueft: {} Inodes erreichbar, {} Bloecke referenziert.",
+            bericht.inodes_erreichbar, bericht.bloecke_referenziert
+        );
+        for eintrag in &bericht.doppel_eintraege {
+            konsole::set_color(Color::Yellow, Color::Black);
+            println!("Befund: Doppel-Eintrag {} (rename-Absturz, harmlos)", eintrag);
+        }
+        if bericht.hat_lecks() {
+            konsole::set_color(Color::Yellow, Color::Black);
+            println!(
+                "Lecks: {} Block/Bloecke, {} Inode(s) belegt aber unreferenziert.",
+                bericht.block_lecks.len(),
+                bericht.inode_lecks.len()
+            );
+            konsole::set_color(Color::LightGray, Color::Black);
+            if bericht.repariert {
+                println!("Repariert: Lecks wieder freigegeben.");
+            } else {
+                println!("Reparieren mit: pruefe.speedfs --repariere");
+            }
+        }
+        if bericht.defekte.is_empty() {
+            if !bericht.hat_lecks() && bericht.doppel_eintraege.is_empty() {
+                println!("Keine Befunde — das Dateisystem ist sauber.");
+            }
+        } else {
+            konsole::set_color(Color::LightRed, Color::Black);
+            println!("DEFEKTE ({}) — werden NICHT automatisch repariert:", bericht.defekte.len());
+            for defekt in &bericht.defekte {
+                println!("  {}", defekt);
+            }
+            konsole::set_color(Color::LightGray, Color::Black);
         }
     }
 }

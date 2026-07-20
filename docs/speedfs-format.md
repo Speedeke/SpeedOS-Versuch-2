@@ -165,14 +165,20 @@ Konkrete Abläufe (Schreibvorgänge in dieser Reihenfolge):
 | **write_at in bestehende Blöcke** | Datenblock(e) direkt überschreiben (in place) | Wie bei ext2: der überschriebene BEREICH kann halb alt/halb neu sein (Daten, nie Metadaten). Wer das nicht will, braucht ein Journal — Serie 5+ |
 | **delete** | 1. **Commit:** Verzeichnis-Umstellung ohne den Eintrag (= neue Dir-Blöcke, wie create) · 2. Inode als frei schreiben · 3. Blöcke in Bitmap freigeben | Leck — die Datei ist ab dem Commit weg, die Blöcke schlimmstenfalls noch belegt |
 | **rename** (gleiches Verzeichnis) | Verzeichnis-Umstellung mit neuem Namen (EIN Commit) | alter oder neuer Name — nie beides, nie keins |
-| **rename** (über Verzeichnisse) | 1. Ziel-Verzeichnis-Commit (Eintrag zeigt auf den Inode) · 2. Quell-Verzeichnis-Commit (Eintrag weg) | Schlimmstenfalls ist der Eintrag kurz in BEIDEN Verzeichnissen sichtbar (beide zeigen auf denselben, konsistenten Inode). Die umgekehrte Reihenfolge würde die Datei verlieren — darum diese. |
+| **rename** (über Verzeichnisse) | 1. Ziel-Verzeichnis-Commit (Eintrag zeigt auf den Inode) · 2. Quell-Verzeichnis-Commit (Eintrag weg) | **Die Datei existiert nach einem Absturz IMMER — nie in keinem Ordner.** Zwischen den beiden Commits existiert der Eintrag in beiden Verzeichnissen (beide zeigen auf denselben, konsistenten Inode); `pruefe.speedfs` meldet so einen Doppel-Eintrag als Befund. Die umgekehrte Reihenfolge (erst Quelle raus) könnte die Datei verlieren — darum ist sie verboten. |
 | **rename** (Ziel-Datei ersetzen) | 1. Ziel-Commit (Eintrag zeigt auf den neuen Inode) · 2. Quelle raus · 3. alten Inode + Blöcke freigeben | Leck des alten Inodes |
 | **mkfs** | 1. Bitmap, Inode-Tabelle, Wurzel-Inode schreiben · 2. **zuletzt** den Superblock (Magic) | Ohne fertigen Superblock ist die Platte einfach "kein SpeedFS" — halbes mkfs ist unsichtbar |
 
-Lecks sind bewusst der akzeptierte Schaden: Ein späteres
-`fsck.speedfs` (Serie 5+) kann sie durch einen Baum-Scan wieder
-einsammeln. Verlorene oder falsch verkettete Daten kann es NICHT
-reparieren — deshalb schließt die Reihenfolge genau das aus.
+Lecks sind bewusst der akzeptierte Schaden: `pruefe.speedfs`
+(Abschnitt 10) sammelt sie durch einen Baum-Scan wieder ein.
+Verlorene oder falsch verkettete Daten kann es NICHT reparieren —
+deshalb schließt die Reihenfolge genau das aus.
+
+Diese Analyse gilt, weil ein Absturz die Schreibfolge als PRÄFIX
+abschneidet: Alles bis Schreibvorgang N ist auf der Platte, alles
+danach nicht. Der Folter-Test (`test_speedfs_folter_absturz`)
+prüft genau das maschinell — er schneidet die Folge an JEDER
+Stelle N ab, mountet neu und verlangt: Lecks erlaubt, Defekte nie.
 
 **Block-Cache:** Write-Through — jeder Block-Schreibvorgang geht
 sofort ans Gerät, der Cache beschleunigt nur Lesezugriffe
@@ -196,7 +202,33 @@ das FLUSH CACHE ans Gerät durch (dessen interner Schreib-Cache).
 
 * Max. Dateigröße ≈ 4,09 MiB (einfach-indirekt, Abschnitt 5).
 * Keine harten Links, keine Rechte/Besitzer, keine Symlinks.
-* Kein Journal — Lecks nach Absturz möglich (Abschnitt 7),
-  kein fsck in v1.
+* Kein Journal — Lecks nach Absturz möglich (Abschnitt 7);
+  `pruefe.speedfs` findet und repariert sie (Abschnitt 10).
 * Verzeichnis-Umschreiben ist O(Verzeichnisgröße) je Änderung.
 * Ein Mount pro Gerät; kein gleichzeitiger Zugriff von außen.
+
+## 10. pruefe.speedfs — das Prüfwerkzeug (fsck)
+
+Läuft nur auf dem UNGEMOUNTETEN Gerät (Shell-Befehl
+`pruefe.speedfs`, optional `--repariere`). Der Scan läuft in zwei
+Schritten:
+
+1. **Baum-Scan** ab der Wurzel: sammelt alle erreichbaren Inodes
+   und alle von ihnen referenzierten Blöcke (Daten + indirekte).
+   Dabei geprüft: Verzeichnis-Einträge zeigen auf gültige, belegte
+   Inodes; Blockzeiger liegen im Datenbereich; kein Block ist
+   doppelt referenziert; die Zeiger-Belegung passt exakt zur
+   Inode-Größe (⌈Größe/4096⌉ Zeiger, überzählige sind 0). Ein
+   Inode, der aus zwei Verzeichnissen erreichbar ist, ist ein
+   BEFUND (Doppel-Eintrag nach rename-Absturz, Abschnitt 7) —
+   kein Defekt.
+2. **Bilanz gegen die Platte:** Metadaten-Blöcke müssen belegt
+   sein; belegte, aber unreferenzierte Blöcke/Inodes sind LECKS
+   (reparierbar: Bitmap-Bit löschen bzw. Inode freigeben);
+   referenzierte, aber als frei markierte Blöcke sind DEFEKTE
+   (nicht automatisch reparierbar — sie dürfen dank der
+   Schreib-Reihenfolge nie entstehen).
+
+Repariert werden NUR Lecks. Defekte werden gemeldet und lassen
+das Dateisystem unangetastet — wer hier automatisch "repariert",
+zerstört Daten.

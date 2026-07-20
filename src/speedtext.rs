@@ -112,9 +112,13 @@ impl SpeedTextApp {
     }
 
     /// Speichert unter dem bekannten Pfad. true = erfolgreich.
+    /// Nach dem Schreiben ein fs::sync(): "Gespeichert" heißt seit
+    /// SpeedFS "auf dem Medium" — auch der ATA-Schreib-Cache wird
+    /// geflusht. Ein sync-Fehler zählt wie ein Schreibfehler
+    /// (Dialog), denn die Daten sind dann eben NICHT sicher.
     fn speichern_nach(&mut self, pfad: &str) -> bool {
         let text = self.mit_puffer(|p| p.als_text());
-        match fs::mit_fs(|f| f.schreiben(pfad, text.as_bytes())) {
+        match fs::mit_fs(|f| f.schreiben(pfad, text.as_bytes())).and_then(|()| fs::sync()) {
             Ok(()) => {
                 self.mit_puffer(|p| p.geaendert = false);
                 self.pfad = Some(String::from(pfad));
