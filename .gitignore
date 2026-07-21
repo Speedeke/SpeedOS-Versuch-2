@@ -14,3 +14,7 @@ speedos-daten-test.img
 # Devlog-Screenshots (lokal, nicht im Repository):
 screenshots/
 speedos-fat.img
+
+# Das USB-Live-Image (Build-Artefakt von `cargo image`, jederzeit neu
+# baubar — gehoert nicht ins Repository):
+speedos-live.img

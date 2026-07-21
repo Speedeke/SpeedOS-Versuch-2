@@ -15,6 +15,26 @@
 [build]
 target = "x86_64-unknown-none"
 
+# `cargo image` baut das USB-LIVE-Image (speedos-live.img) — ein
+# bootfähiges UEFI-GPT-Image ohne QEMU/Platten, das man auf einen
+# Stick schreibt (Anleitung: docs/usb-boot.md). Das Host-Programm
+# live-image (im boot/-Workspace) baut den Kernel selbst und ruft
+# bootloader::UefiBoot; --target zwingt es aufs Windows-Target (sonst
+# würde das [build]-Bare-Metal-Target auch dafür gelten). `--` reicht
+# eigene Argumente durch, z. B. `cargo image -- --release`.
+[alias]
+image = [
+    "run",
+    "--quiet",
+    "--manifest-path",
+    "boot/Cargo.toml",
+    "--bin",
+    "live-image",
+    "--target",
+    "x86_64-pc-windows-msvc",
+    "--",
+]
+
 [target.'cfg(target_os = "none")']
 runner = [
     "cargo",

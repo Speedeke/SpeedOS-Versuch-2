@@ -8,6 +8,11 @@
 name = "boot"
 version = "0.1.0"
 edition = "2021"
+# Der Runner (.cargo/config.toml) ruft `cargo run --manifest-path
+# boot/Cargo.toml` OHNE --bin auf. Seit es ein zweites Binary gibt
+# (live-image, das USB-Live-Image), muss default-run festlegen, welches
+# `cargo run` ohne --bin meint — sonst ist der Aufruf mehrdeutig.
+default-run = "boot"
 
 [dependencies]
 # Die Host-Seite des Bootloader-Projekts (nur UEFI!).
