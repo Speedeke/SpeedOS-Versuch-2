@@ -84,8 +84,22 @@ fn main() {
     boot_config.frame_buffer_logging = false;
 
     let image_pfad = kernel_pfad.with_extension("img");
-    bootloader::UefiBoot::new(&kernel_pfad)
-        .set_boot_config(&boot_config)
+    let mut image_bauer = bootloader::UefiBoot::new(&kernel_pfad);
+    image_bauer.set_boot_config(&boot_config);
+    // SPEEDOS_DIAGNOSE=1: den Diagnose-Modus per RAMDISK-SIGNAL anstoßen.
+    // Der Bootloader hängt eine winzige Ramdisk ins Image; der Kernel
+    // erkennt sie an boot_info.ramdisk_addr und schaltet die Boot-
+    // Diagnose scharf (Boot-Schritte + Hardware auf dem Bildschirm).
+    // So braucht QEMU keinen echten Tastendruck — auf echter Hardware
+    // löst stattdessen die Taste D beim Boot denselben Modus aus.
+    if std::env::var("SPEEDOS_DIAGNOSE").map(|v| v == "1").unwrap_or(false) {
+        let ramdisk_pfad = kernel_pfad.with_extension("diagnose-ramdisk");
+        std::fs::write(&ramdisk_pfad, b"D")
+            .expect("Diagnose-Ramdisk-Marker konnte nicht geschrieben werden");
+        image_bauer.set_ramdisk(&ramdisk_pfad);
+        eprintln!("[Runner] SPEEDOS_DIAGNOSE=1 — Diagnose-Modus per Ramdisk-Signal aktiv.");
+    }
+    image_bauer
         .create_disk_image(&image_pfad)
         .expect("Disk-Image konnte nicht erstellt werden");
 

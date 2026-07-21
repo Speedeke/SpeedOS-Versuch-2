@@ -421,9 +421,11 @@ fn aurora(t: u8) -> Farbe {
     }
 }
 
-/// Zeichnet den SpeedOS-Boot-Screen und zeigt ihn `dauer_ms` lang.
-/// (Der Timer läuft zu diesem Zeitpunkt schon — speed_os::init()!)
-pub fn bootscreen_zeigen(dauer_ms: u64) {
+/// Malt den SpeedOS-Boot-Screen (Aurora auf Obsidian) EINMAL. Das
+/// Verweilen übernimmt der Aufrufer — so kann kernel_main während der
+/// Verweilzeit auf die D-Taste (Diagnose-Modus) lauschen, ohne dass
+/// der Framebuffer die Tastatur kennen muss (saubere Schichtung).
+pub fn bootscreen_malen() {
     mit_framebuffer(|fb| {
         let breite = fb.info().width;
         let hoehe = fb.info().height;
@@ -485,8 +487,49 @@ pub fn bootscreen_zeigen(dauer_ms: u64) {
 
         fb.present();
     });
+}
 
+/// Zeichnet den Boot-Screen und zeigt ihn `dauer_ms` lang (Malen +
+/// Verweilen). Wird für den normalen, nicht-Diagnose-Boot benutzt.
+pub fn bootscreen_zeigen(dauer_ms: u64) {
+    bootscreen_malen();
     // Den Moment wirken lassen (hlt-freundlich, Timer weckt uns):
+    let start = crate::zeit::ms_seit_boot();
+    while crate::zeit::ms_seit_boot() < start + dauer_ms {
+        x86_64::instructions::hlt();
+    }
+}
+
+/// Zeigt eine zentrierte Text-Meldung auf dunklem Obsidian-Grund und
+/// hält sie `dauer_ms` lang (hlt-freundlich). Für Hinweise, die es
+/// NICHT auf die serielle Schnittstelle schaffen müssen, sondern die
+/// der Nutzer auf echter Hardware am Bildschirm sehen soll — etwa
+/// „keine PS/2-Eingabe gefunden". Die erste Zeile wird hervorgehoben.
+pub fn meldung_zeigen(zeilen: &[&str], dauer_ms: u64) {
+    mit_framebuffer(|fb| {
+        let breite = fb.info().width;
+        let hoehe = fb.info().height;
+        fb.fuellen(OBSIDIAN);
+
+        let zeilen_hoehe = 26usize;
+        let block_hoehe = zeilen.len() * zeilen_hoehe;
+        let mut y = hoehe.saturating_sub(block_hoehe) / 2;
+        for (i, zeile) in zeilen.iter().enumerate() {
+            // Erste Zeile fett/hell (Aurora-Cyan), Rest dezent grau:
+            let (gewicht, farbe) = if i == 0 {
+                (FontWeight::Bold, AURORA_CYAN)
+            } else {
+                (FontWeight::Regular, Farbe::neu(0xb8, 0xc0, 0xd0))
+            };
+            let zeichen_breite = get_raster_width(gewicht, RasterHeight::Size16);
+            let text_breite = zeile.chars().count() * zeichen_breite;
+            let x = breite.saturating_sub(text_breite) / 2;
+            fb.text_zeichnen(x, y, zeile, RasterHeight::Size16, gewicht, farbe, OBSIDIAN);
+            y += zeilen_hoehe;
+        }
+        fb.present();
+    });
+
     let start = crate::zeit::ms_seit_boot();
     while crate::zeit::ms_seit_boot() < start + dauer_ms {
         x86_64::instructions::hlt();

@@ -65,11 +65,59 @@ pub struct ScancodeStream {
 #[allow(clippy::new_without_default)]
 impl ScancodeStream {
     pub fn new() -> Self {
-        SCANCODE_QUEUE
-            .try_init_once(|| ArrayQueue::new(100))
-            .expect("ScancodeStream::new darf nur einmal aufgerufen werden");
+        // Idempotent über queue_bereitstellen(): Die Queue wird schon
+        // FRÜH im Boot angelegt (für die D-Taste des Diagnose-Modus),
+        // also darf der spätere Aufruf aus dem Tastatur-Task sie
+        // einfach vorfinden.
+        queue_bereitstellen();
         ScancodeStream { _private: () }
     }
+}
+
+/// Legt die Scancode-Queue an, falls das noch nicht geschehen ist.
+/// IDEMPOTENT — darf mehrfach gerufen werden: einmal ganz früh in
+/// kernel_main (damit die D-Taste auf dem Bootscreen nicht verloren
+/// geht), später erneut aus ScancodeStream::new(). Nur aus Task-
+/// Kontext aufrufen (alloziert!), NIE aus einem Interrupt-Handler.
+pub fn queue_bereitstellen() {
+    let _ = SCANCODE_QUEUE.try_init_once(|| ArrayQueue::new(100));
+}
+
+/// Prüft (und leert dabei die Queue), ob beim Boot die Taste D
+/// gedrückt wurde — der Auslöser für den Diagnose-Modus auf echter
+/// Hardware. 'D' hat im Scancode-Set 1 den Make-Code 0x20 (ein
+/// PHYSISCHER Code, layout-unabhängig — die D-Taste liegt bei QWERTZ
+/// wie bei QWERTY an derselben Stelle). Am Boot verworfene Scancodes
+/// sind egal; der eigentliche Eingabe-Betrieb beginnt erst später.
+pub fn diagnose_taste_beim_boot() -> bool {
+    let queue = match SCANCODE_QUEUE.try_get() {
+        Ok(q) => q,
+        Err(_) => return false,
+    };
+    let mut gefunden = false;
+    while let Some(scancode) = queue.pop() {
+        if scancode == 0x20 {
+            gefunden = true;
+        }
+    }
+    gefunden
+}
+
+/// Wurde IRGENDEINE Taste gedrückt (Make-Code)? Leert dabei die Queue.
+/// Für den „Taste zum Fortfahren"-Moment am Ende des Diagnose-Schirms.
+/// Make-Codes sind im Set 1 < 0x80 (Break-Codes haben Bit 7 gesetzt).
+pub fn boot_taste_vorhanden() -> bool {
+    let queue = match SCANCODE_QUEUE.try_get() {
+        Ok(q) => q,
+        Err(_) => return false,
+    };
+    let mut gedrueckt = false;
+    while let Some(scancode) = queue.pop() {
+        if scancode < 0x80 {
+            gedrueckt = true;
+        }
+    }
+    gedrueckt
 }
 
 impl Stream for ScancodeStream {
