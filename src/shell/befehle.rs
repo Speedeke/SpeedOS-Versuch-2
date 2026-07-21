@@ -69,6 +69,8 @@ pub fn alle_befehle() -> Vec<Box<dyn Befehl>> {
         Box::new(Copy),
         Box::new(Move),
         Box::new(Tree),
+        // Hardware-Befehle:
+        Box::new(Pci),
         // Massenspeicher-Befehle (ATA-Treiber):
         Box::new(Platten),
         Box::new(Blocktest),
@@ -78,6 +80,7 @@ pub fn alle_befehle() -> Vec<Box<dyn Befehl>> {
         Box::new(Umount),
         Box::new(SyncBefehl),
         Box::new(PruefeSpeedfs),
+        Box::new(Plattentest),
     ]
 }
 
@@ -628,6 +631,58 @@ fn baum_zeichnen(pfad: &str, einrueckung: &str) {
 
 // ---------------------------------------------------------------------------
 
+/// pci — listet alle beim Boot enumerierten PCI-Geraete.
+struct Pci;
+
+impl Befehl for Pci {
+    fn name(&self) -> &'static str {
+        "pci"
+    }
+    fn beschreibung(&self) -> &'static str {
+        "Listet die PCI-Geraete (Vendor/Device, Klasse, BARs)"
+    }
+    fn ausfuehren(&self, _argumente: &str, _kontext: &mut ShellKontext, _registry: &[Box<dyn Befehl>]) {
+        crate::pci::mit_geraeten(|geraete| {
+            if geraete.is_empty() {
+                println!("Keine PCI-Geraete gefunden.");
+                return;
+            }
+            println!("PCI-Geraete:");
+            for g in geraete {
+                konsole::set_color(Color::LightCyan, Color::Black);
+                print!("  {:02x}:{:02x}.{}  ", g.bus, g.geraet, g.funktion);
+                konsole::set_color(Color::LightGray, Color::Black);
+                println!(
+                    "{:04x}:{:04x}  {}",
+                    g.vendor_id,
+                    g.device_id,
+                    g.klasse_text()
+                );
+                // BARs, die belegt sind, eingerückt darunter:
+                for (i, bar) in g.bars.iter().enumerate() {
+                    match bar {
+                        crate::pci::Bar::Port(p) => {
+                            konsole::set_color(Color::DarkGray, Color::Black);
+                            println!("            BAR{}: I/O-Port 0x{:04x}", i, p);
+                        }
+                        crate::pci::Bar::Speicher { basis, bit64 } => {
+                            konsole::set_color(Color::DarkGray, Color::Black);
+                            println!(
+                                "            BAR{}: MMIO 0x{:x}{}",
+                                i,
+                                basis,
+                                if *bit64 { " (64-Bit)" } else { "" }
+                            );
+                        }
+                        crate::pci::Bar::Leer => {}
+                    }
+                }
+                konsole::set_color(Color::LightGray, Color::Black);
+            }
+        });
+    }
+}
+
 /// platten — listet die beim Boot erkannten ATA-Laufwerke auf.
 struct Platten;
 
@@ -787,16 +842,15 @@ impl Befehl for MkfsSpeedfs {
             println!("Wirklich formatieren: mkfs.speedfs JA");
             return;
         }
-        let mut platte = match crate::ata::daten_platte() {
+        let mut platte = match crate::fs::daten_geraet() {
             Some(platte) => platte,
             None => {
                 fs_fehler_ausgeben(FsFehler::Io(crate::fs::IoFehler::NichtBereit));
                 return;
             }
         };
-        match crate::fs::speedfs::formatieren(&mut platte) {
+        match crate::fs::speedfs::formatieren(platte.as_mut()) {
             Ok(()) => {
-                use crate::fs::block::BlockDevice;
                 let mib = platte.anzahl_sektoren() * platte.sektor_groesse() as u64 / 1024 / 1024;
                 println!("SpeedFS angelegt ({} MiB). Einhaengen mit: mount", mib);
             }
@@ -821,14 +875,14 @@ impl Befehl for Mount {
             println!("{} ist bereits gemountet.", PLATTE_MOUNT);
             return;
         }
-        let platte = match crate::ata::daten_platte() {
+        let platte = match crate::fs::daten_geraet() {
             Some(platte) => platte,
             None => {
                 fs_fehler_ausgeben(FsFehler::Io(crate::fs::IoFehler::NichtBereit));
                 return;
             }
         };
-        let speedfs = match crate::fs::speedfs::SpeedFs::mounten(Box::new(platte)) {
+        let speedfs = match crate::fs::speedfs::SpeedFs::mounten(platte) {
             Ok(speedfs) => speedfs,
             Err((fehler, _geraet)) => {
                 fs_fehler_ausgeben(fehler);
@@ -907,14 +961,14 @@ impl Befehl for PruefeSpeedfs {
             return;
         }
         let reparieren = argumente.trim() == "--repariere";
-        let platte = match crate::ata::daten_platte() {
+        let platte = match crate::fs::daten_geraet() {
             Some(platte) => platte,
             None => {
                 fs_fehler_ausgeben(FsFehler::Io(crate::fs::IoFehler::NichtBereit));
                 return;
             }
         };
-        let speedfs = match crate::fs::speedfs::SpeedFs::mounten(Box::new(platte)) {
+        let speedfs = match crate::fs::speedfs::SpeedFs::mounten(platte) {
             Ok(speedfs) => speedfs,
             Err((fehler, _)) => {
                 fs_fehler_ausgeben(fehler);
@@ -963,5 +1017,135 @@ impl Befehl for PruefeSpeedfs {
             }
             konsole::set_color(Color::LightGray, Color::Black);
         }
+    }
+}
+
+/// plattentest — Benchmark der Daten-Platte (sequenziell + zufaellig,
+/// lesen + schreiben, MiB/s). Braucht die Platte AUSGEHAENGT (die
+/// Schreib-Tests wuerden ein gemountetes SpeedFS zerstoeren) und misst
+/// das ROHE BlockDevice — so vergleichbar zwischen IDE und virtio.
+struct Plattentest;
+
+impl Plattentest {
+    /// Wandelt (Bytes, Mikrosekunden) in "X,YZ MiB/s"-Text.
+    fn mibs(bytes: u64, us: u64) -> String {
+        if us == 0 {
+            return String::from("(zu schnell zu messen)");
+        }
+        // bytes/us * 1e6 / 2^20  -> mit *100 fuer zwei Nachkommastellen:
+        let hundertstel = bytes.saturating_mul(1_000_000) * 100 / (us * 1024 * 1024);
+        format!("{},{:02} MiB/s", hundertstel / 100, hundertstel % 100)
+    }
+}
+
+impl Befehl for Plattentest {
+    fn name(&self) -> &'static str {
+        "plattentest"
+    }
+    fn beschreibung(&self) -> &'static str {
+        "Benchmark der Daten-Platte (seq+zufaellig, lesen/schreiben)"
+    }
+    fn ausfuehren(&self, _argumente: &str, _kontext: &mut ShellKontext, _registry: &[Box<dyn Befehl>]) {
+        use crate::fs::block::IoFehler;
+        if crate::fs::ist_gemountet(PLATTE_MOUNT) {
+            konsole::set_color(Color::LightRed, Color::Black);
+            println!("Die Platte ist gemountet — erst 'umount' (der Schreibtest wuerde");
+            println!("das Dateisystem ueberschreiben!).");
+            konsole::set_color(Color::LightGray, Color::Black);
+            return;
+        }
+        let mut platte = match crate::fs::daten_geraet() {
+            Some(platte) => platte,
+            None => {
+                fs_fehler_ausgeben(FsFehler::Io(IoFehler::NichtBereit));
+                return;
+            }
+        };
+        let sektor = platte.sektor_groesse();
+        let anzahl_sektoren = platte.anzahl_sektoren();
+
+        // Parameter: 2 MiB sequenziell in 64-KiB-Bloecken, 100
+        // Zufalls-Zugriffe zu 4 KiB. Alles bleibt in der ersten Haelfte
+        // der Platte (Reserve fuer die Geometrie). BEWUSST klein: der
+        // gepollte IDE-PIO-Pfad schafft nur ~0,2 MiB/s (Port-I/O-VM-
+        // Exits pro 16-Bit-Wort) — mehr waere quaelend langsam. Die
+        // MiB/s-RATE ist von der Groesse unabhaengig, also fair.
+        let block = 64 * 1024; // 64 KiB je Transfer
+        let bloecke = 32; // 32 * 64 KiB = 2 MiB
+        let gesamt = (block * bloecke) as u64;
+        let block_sektoren = (block / sektor) as u64;
+        let zufall_bytes = 4096;
+        let zufall_sektoren = (zufall_bytes / sektor) as u64;
+        let zufall_anzahl = 100u64;
+        let max_lba = anzahl_sektoren / 2;
+
+        if max_lba < block_sektoren * bloecke as u64 {
+            println!("Platte zu klein fuer den Benchmark.");
+            return;
+        }
+        let mut puffer = vec![0u8; block];
+        // Erkennbares Muster fuer den Schreibtest:
+        for (i, b) in puffer.iter_mut().enumerate() {
+            *b = (i % 251) as u8;
+        }
+
+        println!("Plattentest ({} MiB seq, {} x 4 KiB zufaellig):", gesamt / 1024 / 1024, zufall_anzahl);
+        let messen = |name: &str, f: &mut dyn FnMut() -> Result<u64, IoFehler>| {
+            let start = crate::zeit::us_seit_boot();
+            match f() {
+                Ok(bytes) => {
+                    let us = crate::zeit::us_seit_boot() - start;
+                    konsole::set_color(Color::LightCyan, Color::Black);
+                    print!("  {:<22}", name);
+                    konsole::set_color(Color::LightGray, Color::Black);
+                    println!("{}", Plattentest::mibs(bytes, us));
+                }
+                Err(fehler) => fs_fehler_ausgeben(FsFehler::Io(fehler)),
+            }
+        };
+
+        // 1. Sequenziell schreiben:
+        messen("seq. schreiben:", &mut || {
+            let mut lba = 0u64;
+            for _ in 0..bloecke {
+                platte.schreibe_sektoren(lba, &puffer)?;
+                lba += block_sektoren;
+            }
+            platte.sync()?;
+            Ok(gesamt)
+        });
+        // 2. Sequenziell lesen:
+        messen("seq. lesen:", &mut || {
+            let mut lba = 0u64;
+            for _ in 0..bloecke {
+                platte.lese_sektoren(lba, &mut puffer)?;
+                lba += block_sektoren;
+            }
+            Ok(gesamt)
+        });
+        // 3. Zufaellig schreiben (LCG-"Zufall", 4-KiB-Haeppchen):
+        let mut zbuf = vec![0u8; zufall_bytes];
+        let mut rng = 0x1234_5678u64;
+        let naechster = |rng: &mut u64| {
+            *rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (*rng >> 33) % (max_lba - zufall_sektoren)
+        };
+        messen("zufaellig schreiben:", &mut || {
+            for _ in 0..zufall_anzahl {
+                let lba = naechster(&mut rng);
+                platte.schreibe_sektoren(lba, &zbuf)?;
+            }
+            platte.sync()?;
+            Ok(zufall_anzahl * zufall_bytes as u64)
+        });
+        // 4. Zufaellig lesen:
+        messen("zufaellig lesen:", &mut || {
+            for _ in 0..zufall_anzahl {
+                let lba = naechster(&mut rng);
+                platte.lese_sektoren(lba, &mut zbuf)?;
+            }
+            Ok(zufall_anzahl * zufall_bytes as u64)
+        });
+        println!("Fertig. (Backend: siehe 'platten' — IDE oder virtio.)");
     }
 }

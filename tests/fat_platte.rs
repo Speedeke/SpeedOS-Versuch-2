@@ -46,6 +46,10 @@ fn main(boot_info: &'static mut BootInfo) -> ! {
     allocator::heap_erweitern(256).expect("Heap-Erweiterung fehlgeschlagen");
     fs::init();
     ata::init();
+    // PCI + virtio-blk aufsetzen — dann findet fs::daten_geraet die
+    // Daten-Platte egal ob der Runner sie per IDE oder virtio anhaengt:
+    speed_os::pci::init();
+    speed_os::virtio::blk::init();
 
     test_main();
     speed_os::hlt_loop();
@@ -174,8 +178,8 @@ fn fat_kopieren_nach_platte() {
     fat_mounten();
 
     // /platte (SpeedFS) bereitstellen — formatieren, falls nötig:
-    let platte = ata::daten_platte().expect("keine Daten-Platte");
-    let speedfs = match speed_os::fs::speedfs::SpeedFs::mounten(alloc::boxed::Box::new(platte)) {
+    let platte = fs::daten_geraet().expect("keine Daten-Platte");
+    let speedfs = match speed_os::fs::speedfs::SpeedFs::mounten(platte) {
         Ok(fs) => fs,
         Err((FsFehler::KeinSpeedFs, mut geraet)) => {
             speed_os::fs::speedfs::formatieren(geraet.as_mut()).expect("mkfs");

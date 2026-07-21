@@ -77,6 +77,35 @@
   (speedos-daten-test.img), nie gegen speedos-daten.img.
 
 ## Architektur-Entscheidungen
+- **PCI + virtio-blk (Juli 2026) — die para-virtualisierte Platte:**
+  `src/pci.rs` enumeriert den PCI-Bus über die Legacy-Ports
+  0xCF8/0xCFC (Config-Space; keine PCI-Bridge-Rekursion — QEMU legt
+  alles auf Bus 0), dekodiert Vendor/Device/Klasse/BARs (reine,
+  unit-getestete Funktionen) und ist die Grundlage jedes modernen
+  Treibers. Shell: `pci`. `src/virtio/virtqueue.rs` ist die
+  Split-Virtqueue (Deskriptoren + Avail-/Used-Ring in physisch
+  zusammenhängendem Speicher via memory::allocate_pages, Physik-
+  Adresse per uebersetzen) — BEWUSST geräte- UND transport-unabhängig
+  und ausführlich kommentiert, weil virtio-net (Serie 5) sie
+  UNVERÄNDERT weiterbenutzt (nur der Transport unterscheidet sich).
+  `src/virtio/blk.rs` ist der virtio-blk-Treiber über den PCI-LEGACY-
+  Transport (Port-I/O-BAR): ENTSCHEIDUNG Legacy statt Modern, weil
+  QEMUs transitional device es anbietet, wir Port-I/O vom ATA-Treiber
+  kennen und die Virtqueue (der wiederverwendbare Teil) bei beiden
+  identisch ist. Feature-Negotiation (nur FLUSH), eine Virtqueue,
+  Requests gepollt mit TSC-Timeout, DMA über einen BOUNCE-Puffer
+  (der Heap-Puffer des Aufrufers ist nicht physisch zusammenhängend).
+  Implementiert BlockDevice inkl. sync (FLUSH). BACKEND-WAHL:
+  `SPEEDOS_PLATTE=ide|virtio` im Runner; `fs::daten_geraet()` ist DIE
+  Stelle, die virtio ODER ATA als Daten-Platte liefert (virtio hat
+  Vorrang) — alle Aufrufer sehen nur `Box<dyn BlockDevice>`. STANDARD
+  ist virtio (plattentest misst es ~1000x schneller als IDE-PIO, weil
+  PIO pro 16-Bit-Wort einen Port-I/O-VM-Exit kostet); IDE bleibt
+  wählbar, u. a. weil tests/ata_platte.rs den ATA-Treiber direkt
+  testet und dafür eine IDE-Daten-Platte braucht (unter virtio
+  überspringt es seine Daten-Tests sauber). main.rs: pci::init +
+  virtio::blk::init laufen NACH der Heap-Erweiterung (die Virtqueue
+  alloziert), VOR den Auto-Mounts.
 - **FAT32-Treiber (Juli 2026, `src/fs/fat32.rs`) — NUR LESEN:**
   SpeedOS liest fremde FAT32-Medien ("der USB-Stick"), schreibt sie
   aber NIE (jeder Schreib-Weg -> `IoFehler::NurLesen`). Kein/kaputtes

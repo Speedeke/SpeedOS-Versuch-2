@@ -80,6 +80,14 @@ fn muster_byte(generation: u64, position: usize) -> u8 {
 /// (64-MiB-Image = 131072 Sektoren zu 512 Bytes).
 #[test_case]
 fn daten_platte_erkannt() {
+    // Uebersprungen, wenn die Daten-Platte ueber virtio laeuft (dann
+    // gibt es kein ATA-Daten-Laufwerk). Volle ATA-Abdeckung:
+    // SPEEDOS_PLATTE=ide cargo test --test ata_platte
+    if ata::daten_platte().is_none() {
+        serial_println!("[ATA-TEST] uebersprungen — Daten-Platte laeuft ueber virtio.");
+        return;
+    }
+
     ata::mit_datenlaufwerk(|laufwerk| {
         assert_eq!(laufwerk.sektor_groesse(), 512);
         assert_eq!(laufwerk.anzahl_sektoren(), 131072);
@@ -117,6 +125,14 @@ fn boot_platte_ist_schreibgeschuetzt() {
 /// 256-Sektoren-Grenze eines einzelnen ATA-Kommandos hinweg.
 #[test_case]
 fn roundtrip_schreiben_lesen() {
+    // Uebersprungen, wenn die Daten-Platte ueber virtio laeuft (dann
+    // gibt es kein ATA-Daten-Laufwerk). Volle ATA-Abdeckung:
+    // SPEEDOS_PLATTE=ide cargo test --test ata_platte
+    if ata::daten_platte().is_none() {
+        serial_println!("[ATA-TEST] uebersprungen — Daten-Platte laeuft ueber virtio.");
+        return;
+    }
+
     // Zwei 150-KiB-Puffer passen nicht in den Start-Heap — nach
     // Projektregel VOR großen Puffern bewusst erweitern (128 Pages
     // = 512 KiB dazu):
@@ -153,6 +169,14 @@ fn roundtrip_schreiben_lesen() {
 /// vorigen Laufs, prüft es Byte für Byte und legt das eigene ab.
 #[test_case]
 fn persistenz_ueber_qemu_neustart() {
+    // Uebersprungen, wenn die Daten-Platte ueber virtio laeuft (dann
+    // gibt es kein ATA-Daten-Laufwerk). Volle ATA-Abdeckung:
+    // SPEEDOS_PLATTE=ide cargo test --test ata_platte
+    if ata::daten_platte().is_none() {
+        serial_println!("[ATA-TEST] uebersprungen — Daten-Platte laeuft ueber virtio.");
+        return;
+    }
+
     ata::mit_datenlaufwerk(|laufwerk| {
         let mut sektor = [0u8; 512];
         laufwerk.lese_sektoren(PERSISTENZ_LBA, &mut sektor)?;

@@ -43,6 +43,7 @@ pub mod interrupts;
 pub mod konsole;
 pub mod maus;
 pub mod memory;
+pub mod pci;
 pub mod protokoll;
 pub mod rtc;
 pub mod serial;
@@ -52,6 +53,7 @@ pub mod task;
 pub mod taskmanager;
 pub mod theme;
 pub mod ui;
+pub mod virtio;
 pub mod zeit;
 
 /// Die gemeinsame Bootloader-Konfiguration für den Kernel und alle

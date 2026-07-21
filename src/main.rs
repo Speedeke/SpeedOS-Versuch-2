@@ -92,8 +92,16 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     //    Der Heap wächst später in desktop_starten auf Bildschirm-
     //    größe — aber die Auto-Mounts hier davor brauchen schon Luft
     //    (der FAT32-Treiber liest die ganze FAT in den RAM, ~256 KiB;
-    //    dazu die SpeedFS-Block-Caches). 1 MiB vorab reicht bequem.
+    //    dazu die SpeedFS-Block-Caches). 1 MiB vorab reicht bequem —
+    //    und der virtio-blk-Treiber braucht den Heap für seine
+    //    Virtqueue-Verwaltung, also VOR pci/virtio wachsen lassen.
     allocator::heap_erweitern(256).expect("Heap-Erweiterung vor den Mounts fehlgeschlagen");
+
+    //    PCI enumerieren und den virtio-blk-Treiber aufsetzen (falls
+    //    QEMU die Daten-Platte per virtio statt IDE anbietet). Danach
+    //    entscheidet fs::daten_geraet(), welches Backend /platte trägt.
+    speed_os::pci::init();
+    speed_os::virtio::blk::init();
 
     //    Dateisystem: RamFs als Wurzel mounten (mit Demo-Dateien),
     //    dann die Daten-Platte AUTO-MOUNTEN (SpeedFS auf /platte;

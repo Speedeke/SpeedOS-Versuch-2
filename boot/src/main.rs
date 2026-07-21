@@ -118,11 +118,48 @@ fn main() {
     if ohne_platte {
         eprintln!("[Runner] SPEEDOS_OHNE_DATENPLATTE=1 — es haengt KEINE Daten-/FAT-Platte an.");
     } else {
+        // SPEEDOS_PLATTE waehlt das Backend der Daten-Platte:
+        //   ide    = IDE Primary Slave (der klassische ATA-Treiber),
+        //   virtio = virtio-blk-pci (der para-virtualisierte Treiber).
+        // SpeedFS liegt bei beiden identisch auf demselben Image —
+        // derselbe Persistenz-/Folter-Test laeuft gegen beide Backends.
+        // Standard: virtio — der Benchmark (plattentest) zeigt es ~1000x
+        // schneller als der gepollte IDE-PIO-Pfad, und derselbe
+        // Persistenz-Beweis besteht dort. IDE bleibt per SPEEDOS_PLATTE=ide
+        // waehlbar (der ata_platte-Test braucht es fuer volle ATA-Abdeckung).
+        let backend = std::env::var("SPEEDOS_PLATTE").unwrap_or_else(|_| String::from("virtio"));
         let daten_pfad = daten_image_sicherstellen(test_modus);
-        qemu.arg("-drive").arg(format!(
-            "format=raw,file={},if=ide,index=1",
-            daten_pfad.display()
-        ));
+        match backend.as_str() {
+            "ide" => {
+                qemu.arg("-drive").arg(format!(
+                    "format=raw,file={},if=ide,index=1",
+                    daten_pfad.display()
+                ));
+            }
+            "virtio" => {
+                // Zweistufig: das Roh-Image als anonymes Blockgeraet
+                // (if=none) plus ein virtio-blk-pci-Geraet davor.
+                qemu.arg("-drive").arg(format!(
+                    "format=raw,file={},if=none,id=datenplatte",
+                    daten_pfad.display()
+                ));
+                qemu.arg("-device").arg("virtio-blk-pci,drive=datenplatte");
+            }
+            anderes => {
+                eprintln!(
+                    "[Runner] SPEEDOS_PLATTE='{anderes}' unbekannt — nutze virtio \
+                     (erlaubt: ide, virtio)."
+                );
+                qemu.arg("-drive").arg(format!(
+                    "format=raw,file={},if=none,id=datenplatte",
+                    daten_pfad.display()
+                ));
+                qemu.arg("-device").arg("virtio-blk-pci,drive=datenplatte");
+            }
+        }
+        if !test_modus {
+            eprintln!("[Runner] Daten-Platte als {backend} (SPEEDOS_PLATTE=ide|virtio).");
+        }
         // Die dritte Platte: ein FAT32-Beispiel-Image am Secondary
         // Master ("der USB-Stick"). SpeedOS liest es NUR — deshalb
         // teilen sich Run- und Test-Modus dasselbe Image. Fehlt das

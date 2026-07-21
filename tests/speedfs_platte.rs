@@ -47,6 +47,10 @@ fn main(boot_info: &'static mut BootInfo) -> ! {
     allocator::heap_erweitern(256).expect("Heap-Erweiterung fehlgeschlagen");
     fs::init();
     ata::init();
+    // PCI + virtio-blk aufsetzen — dann findet fs::daten_geraet die
+    // Daten-Platte egal ob der Runner sie per IDE oder virtio anhaengt:
+    speed_os::pci::init();
+    speed_os::virtio::blk::init();
 
     test_main();
     speed_os::hlt_loop();
@@ -67,8 +71,8 @@ fn speedfs_datei_ueberlebt_qemu_neustart() {
     //    sie noch kein SpeedFS -> formatieren. Selbstheilend, und
     //    genau der Weg, den auch mkfs.speedfs/mount in der Shell
     //    nehmen.
-    let platte = ata::daten_platte().expect("keine Daten-Platte erkannt");
-    let speedfs = match SpeedFs::mounten(alloc::boxed::Box::new(platte)) {
+    let platte = fs::daten_geraet().expect("keine Daten-Platte erkannt");
+    let speedfs = match SpeedFs::mounten(platte) {
         Ok(gemountet) => gemountet,
         Err((FsFehler::KeinSpeedFs, mut geraet)) => {
             serial_println!("[SPEEDFS] Kein Dateisystem auf der Platte — mkfs ...");
@@ -144,8 +148,8 @@ fn einstellungen_ueberleben_qemu_neustart() {
     // Platte mounten (der vorige Test hat sie formatiert und sauber
     // ausgehängt) und die Standard-Struktur sicherstellen — wie
     // fs::platte_automounten es beim echten Boot tut:
-    let platte = ata::daten_platte().expect("keine Daten-Platte erkannt");
-    let speedfs = SpeedFs::mounten(alloc::boxed::Box::new(platte))
+    let platte = fs::daten_geraet().expect("keine Daten-Platte erkannt");
+    let speedfs = SpeedFs::mounten(platte)
         .map_err(|(fehler, _)| fehler)
         .expect("Mount fehlgeschlagen (Test 1 haette formatiert?)");
     fs::mounten("/platte", alloc::boxed::Box::new(speedfs)).expect("VFS-Mount fehlgeschlagen");

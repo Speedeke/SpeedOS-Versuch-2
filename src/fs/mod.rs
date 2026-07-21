@@ -395,6 +395,22 @@ pub fn persistenter_pfad(platten_pfad: &'static str, ram_pfad: &'static str) -> 
     }
 }
 
+/// Liefert das DATEN-Platten-BlockDevice — egal ob es hinter virtio-
+/// blk oder ATA (Primary Slave) steckt. virtio hat Vorrang: Wenn der
+/// Runner die Platte per virtio anhängt, gibt es KEINE ATA-Daten-
+/// Platte, und umgekehrt. DIE eine Stelle, an der die Backend-Wahl
+/// zusammenläuft — alle Aufrufer (mkfs/mount/pruefe/automount/
+/// Einstellungen) fragen hier und sehen nur ein `dyn BlockDevice`.
+pub fn daten_geraet() -> Option<Box<dyn BlockDevice>> {
+    if let Some(v) = crate::virtio::blk::daten_platte() {
+        return Some(Box::new(v));
+    }
+    if let Some(a) = crate::ata::daten_platte() {
+        return Some(Box::new(a));
+    }
+    None
+}
+
 /// AUTO-MOUNT beim Boot (main.rs, nach ata::init und fs::init,
 /// VOR einstellungen::laden — die Einstellungen wohnen ja auf der
 /// Platte). Erkennt die Daten-Platte, mountet ihr SpeedFS unter
@@ -405,7 +421,7 @@ pub fn persistenter_pfad(platten_pfad: &'static str, ram_pfad: &'static str) -> 
 pub fn platte_automounten() {
     use crate::konsole::{self, Color};
 
-    let platte = match crate::ata::daten_platte() {
+    let platte = match daten_geraet() {
         Some(platte) => platte,
         None => {
             crate::serial_println!(
@@ -414,7 +430,7 @@ pub fn platte_automounten() {
             return;
         }
     };
-    match speedfs::SpeedFs::mounten(Box::new(platte)) {
+    match speedfs::SpeedFs::mounten(platte) {
         Ok(gemountet) => {
             if let Err(fehler) = mounten(PLATTE, Box::new(gemountet)) {
                 crate::serial_println!("[PLATTE] Mount fehlgeschlagen: {}", fehler.meldung());

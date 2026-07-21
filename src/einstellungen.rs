@@ -757,9 +757,9 @@ fn speedfs_pruefen_text(reparieren: bool) -> String {
     }
 
     let ergebnis = (|| -> Result<String, FsFehler> {
-        let platte = crate::ata::daten_platte()
+        let platte = crate::fs::daten_geraet()
             .ok_or(FsFehler::Io(IoFehler::NichtBereit))?;
-        let speedfs = SpeedFs::mounten(Box::new(platte)).map_err(|(fehler, _)| fehler)?;
+        let speedfs = SpeedFs::mounten(platte).map_err(|(fehler, _)| fehler)?;
         let bericht = speedfs.pruefen(reparieren)?;
 
         let mut text = format!(
@@ -802,9 +802,9 @@ fn speedfs_pruefen_text(reparieren: bool) -> String {
     };
 
     if war_gemountet {
-        let wieder = crate::ata::daten_platte()
+        let wieder = crate::fs::daten_geraet()
             .ok_or(FsFehler::Io(IoFehler::NichtBereit))
-            .and_then(|platte| SpeedFs::mounten(Box::new(platte)).map_err(|(fehler, _)| fehler))
+            .and_then(|platte| SpeedFs::mounten(platte).map_err(|(fehler, _)| fehler))
             .and_then(|speedfs| fs::mounten(fs::PLATTE, Box::new(speedfs)));
         if let Err(fehler) = wieder {
             text.push_str(&format!(

@@ -5,6 +5,51 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### PCI + virtio-blk: die schnelle Platte (Infrastruktur für virtio-net)
+- Neues PCI-Modul `src/pci.rs`: Config-Space-Enumeration über die
+  Legacy-Ports 0xCF8/0xCFC, Bus/Gerät/Funktion durchgehen, Vendor/
+  Device/Klasse und BARs (I/O- und 64-Bit-MMIO) dekodieren.
+  Shell-Befehl `pci` listet alles lesbar. Reine Dekoder-Funktionen
+  unit-getestet — die Grundlage für jeden künftigen modernen Treiber
+- Neues virtqueue-Modul `src/virtio/virtqueue.rs`: die Split-Virtqueue
+  (Deskriptor-Tabelle + Available-/Used-Ring in physisch
+  zusammenhängendem Speicher) — GERÄTE- UND TRANSPORT-UNABHÄNGIG und
+  ausführlich kommentiert als BLAUPAUSE für virtio-net (Serie 5).
+  Speicher-Barrieren an den Übergabepunkten, Schleifen-Schutz beim
+  Kettenfreigeben, Freiliste-Verwaltung
+- Neuer virtio-blk-Treiber `src/virtio/blk.rs`: virtio über den
+  PCI-LEGACY-Transport (Port-I/O-BAR — Begründung im Code: QEMUs
+  transitional device bietet es an, wir kennen Port-I/O vom
+  ATA-Treiber, und die Virtqueue bleibt für Modern/virtio-net gleich).
+  Feature-Negotiation (FLUSH), eine Virtqueue, Requests gepollt mit
+  Timeout, Bounce-Puffer für DMA. Implementiert BlockDevice inkl.
+  sync (FLUSH)
+- Runner: `SPEEDOS_PLATTE=ide|virtio` wählt das Backend der
+  Daten-Platte; `fs::daten_geraet()` liefert das richtige BlockDevice
+  (virtio hat Vorrang), alle Aufrufer (mkfs/mount/pruefe/automount/
+  Einstellungen) laufen unverändert darüber. SpeedFS funktioniert auf
+  beiden Backends identisch — der Persistenz-Beweis besteht auf beiden
+- Neuer Shell-Befehl `plattentest`: Benchmark der rohen Daten-Platte
+  (sequenziell + zufällig, lesen + schreiben, MiB/s). GEMESSEN
+  (2 MiB seq, 100×4 KiB zufällig, QEMU/WHPX):
+
+  | Zugriff             | IDE (PIO) | virtio-blk | Faktor |
+  |---------------------|-----------|------------|--------|
+  | seq. schreiben      | 0,70 MiB/s | 1810 MiB/s | ~2600× |
+  | seq. lesen          | 0,70 MiB/s | 4819 MiB/s | ~6900× |
+  | zufällig schreiben  | 0,69 MiB/s |  144 MiB/s |  ~200× |
+  | zufällig lesen      | 0,70 MiB/s |  298 MiB/s |  ~425× |
+
+  Der IDE-PIO-Pfad ist so langsam, weil jedes 16-Bit-Wort einen
+  Port-I/O-VM-Exit kostet; virtio nutzt DMA + Virtqueue. virtio
+  gewinnt klar -> **Standard jetzt virtio** (IDE bleibt per
+  SPEEDOS_PLATTE=ide wählbar, u. a. für die volle ATA-Test-Abdeckung)
+- Tests: PCI-Dekoder (config_adresse, BAR, Klasse), virtqueue-Layout
+  und Ring-Ablauf ohne Gerät; die Persistenz-Tests laufen über
+  fs::daten_geraet und bestehen auf BEIDEN Backends (ata_platte
+  überspringt seine ATA-Daten-Tests unter virtio sauber). 140
+  Lib-Tests + alle Integrationstests grün
+
 ### FAT32 lesen: SpeedOS versteht fremde Medien (nur lesend)
 - Neuer FAT32-Treiber `src/fs/fat32.rs` (NUR LESEN) auf dem
   BlockDevice-Trait: Bootsektor/BPB parsen und streng validieren
