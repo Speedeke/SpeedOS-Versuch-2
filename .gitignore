@@ -18,3 +18,5 @@ speedos-fat.img
 # Das USB-Live-Image (Build-Artefakt von `cargo image`, jederzeit neu
 # baubar — gehoert nicht ins Repository):
 speedos-live.img
+# Die beschreibbare NVRAM-Kopie, die tools/live_qemu.ps1 pro QEMU-Lauf anlegt:
+speedos-live.vars.fd

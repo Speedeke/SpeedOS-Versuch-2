@@ -5,6 +5,36 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### SpeedOS bootet vom USB-Stick (Live-System) + Diagnose-Modus
+- `cargo image` (neuer Alias + Host-Binary `boot/src/bin/live-image.rs`)
+  baut **`speedos-live.img`** — ein bootfähiges UEFI-GPT-Image mit
+  EFI-System-Partition, OHNE QEMU-Start und OHNE Daten-/FAT-Platte.
+  BEWUSST ohne erzwungene Mindestauflösung (Unterschied zum Runner):
+  auf echter Hardware nimmt die Firmware ihren nativen GOP-Modus, der
+  Kernel ist ohnehin auflösungsunabhängig + skaliert HiDPI automatisch
+- Robustheit gegen fehlende Geräte (ohne Übertreibung):
+  - **Keine PS/2-Tastatur** wird per nicht-intrusiver Probe erkannt
+    (First-Port-Test 0xAB, ändert KEINE Controller-Config — die Regel
+    "Tastatur-Bits 0/4/6 nie anfassen" bleibt gewahrt); statt still zu
+    hängen erscheint die Bildschirm-Meldung „keine PS/2-Eingabe
+    gefunden — USB-Eingabe kommt in einer künftigen Version"
+  - **Keine PS/2-Maus** → Desktop läuft per Tastatur (war schon so;
+    jetzt als Presence-Flag gemerkt)
+  - **Keine Platte** → RAM-VFS-Fallback (war schon so; nun sichtbar)
+- **Diagnose-Modus** (`src/diagnose.rs`): auf echter Hardware gibt es
+  keine serielle Ausgabe — Taste **D** beim Boot (oder `SPEEDOS_DIAGNOSE=1`
+  im Runner via `set_ramdisk`) zeigt die Boot-Schritte [1/4]..[4/4] und
+  eine Hardware-Zusammenfassung (Bildschirm, Tastatur/Maus, Laufwerke,
+  Mounts) auf dem Bildschirm
+- QEMU-Generalprobe (`tools/live_qemu.ps1`, UEFI/OVMF) für alle Fälle
+  verifiziert (Screendumps in `docs/screenshots/live-*.png`): Normal-
+  Desktop, `i8042=off` → Eingabe-Meldung, Taste D → Diagnose-Schirm,
+  2560×1440 → HiDPI-Skalierung. `cargo test` bleibt grün
+- Anleitungen: [`docs/usb-boot.md`](docs/usb-boot.md) (auf Stick
+  schreiben inkl. Laufwerks-Warnung, BIOS/UEFI-Einstellungen, Erst-Boot)
+  und [`docs/hardware-log.md`](docs/hardware-log.md) (Vorlage für echte
+  Geräte-Tests mit Fotos)
+
 ### Feinkörniges Dirty-Rect: das Voll-Zeichnen pro Taste stirbt
 - Widgets melden jetzt SCHADENS-RECHTECKE statt "ganzes Fenster neu":
   `UiReaktion.schaden: Option<Rechteck>` (Fensterinhalt-Koordinaten),
