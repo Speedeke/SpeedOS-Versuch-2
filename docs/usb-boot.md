@@ -56,7 +56,27 @@ Das Image ist ein **komplettes Datenträger-Abbild** (mit Partitions-
 tabelle). Es muss **roh auf das ganze USB-Gerät** geschrieben werden —
 nicht in eine Partition, nicht per „kopieren", nicht per Formatieren.
 
-### Variante A — Rufus (empfohlen, einfach)
+### Variante 0 — mitgeliefertes Skript (Windows, am einfachsten)
+
+`tools/usb_schreiben.ps1` erledigt alles automatisch und abgesichert: Es
+wählt **nur** eine USB-Wechselplatte (die interne System-Platte kann es
+nicht treffen), zeigt Modell + Größe und fragt vor dem Löschen nach.
+
+1. Startmenü → **PowerShell** → Rechtsklick → **„Als Administrator
+   ausführen"** (Rohzugriff auf die Platte braucht Admin-Rechte).
+2. ```powershell
+   cd <Projektordner>
+   Set-ExecutionPolicy -Scope Process Bypass -Force
+   .\tools\usb_schreiben.ps1
+   ```
+3. Zur Sicherheit **`LOESCHEN`** eintippen, wenn der richtige Stick
+   (an Modell + Größe erkennbar) angezeigt wird.
+
+> Danach zeigt der Explorer den Stick als „leer/weg" — das ist **normal**:
+> Ein UEFI-Boot-Stick hat nur eine EFI-System-Partition, die Windows
+> ohne Laufwerksbuchstaben ausblendet.
+
+### Variante A — Rufus (grafisch)
 
 1. [Rufus](https://rufus.ie) starten (portabel, keine Installation nötig).
 2. **Laufwerk** oben: den USB-Stick auswählen — **an der Größe prüfen!**
