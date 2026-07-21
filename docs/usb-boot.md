@@ -133,9 +133,34 @@ Dann neu starten und ins **Boot-Menü** (oft **F12**, **F10** oder
 **Esc**) — dort den USB-Stick als **UEFI**-Eintrag wählen (er steht
 meist als „UEFI: <Stick-Name>" da).
 
+> **Bleibt mein Windows unberührt?** Ja. SpeedOS läuft komplett im RAM
+> und schreibt **nie** auf die interne Platte (der Treiber verweigert
+> das per Konstruktion). Vom Stick booten ist eine **einmalige** Wahl im
+> Boot-Menü — sie ändert nichts dauerhaft. Stick abziehen, neu starten →
+> Windows kommt normal zurück. Es wird **nichts installiert**.
+
+### Acer-Besonderheiten (BIOS-Taste F2)
+
+Bei Acer-Laptops:
+
+1. **F2** beim Einschalten (Acer-Logo) → BIOS-Setup.
+2. Reiter **Main** → **„F12 Boot Menu" = Enabled** (bei Acer ab Werk
+   AUS — sonst gibt es kein Boot-Menü mit F12).
+3. Reiter **Boot** → **Boot Mode = UEFI** (nicht Legacy).
+4. **Secure Boot lässt sich erst abschalten, wenn ein
+   Supervisor-Passwort gesetzt ist** (Acer-Eigenheit): Reiter
+   **Security** → **Set Supervisor Password** → Passwort vergeben
+   (merken!). Danach **Secure Boot → Disabled**.
+5. **F10** (Speichern & Beenden). Neustart → **F12** → den
+   „UEFI: <Stick>"-Eintrag wählen.
+
+Das Supervisor-Passwort kannst du später im BIOS wieder entfernen
+(Security → Passwort leer setzen).
+
 Tipp: Wenn es zickt, einen **USB-2.0-Port** (oft die schwarzen, nicht
 die blauen) probieren — manche Firmwares mögen die xHCI-Handoff-Phase
-mit unserem schlanken Bootloader nicht.
+mit unserem schlanken Bootloader nicht. Und **vor** dem Neustart Windows
+„Schnellstart" umgehen: einfach **Neu starten** statt Herunterfahren.
 
 ---
 
