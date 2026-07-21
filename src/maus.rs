@@ -143,6 +143,46 @@ pub fn paket_parsen(kopf: u8, x_byte: u8, y_byte: u8, rad: Option<u8>) -> Option
 /// Läuft die Maus im IntelliMouse-Modus (4-Byte-Pakete mit Rad)?
 static RAD_MODUS: AtomicBool = AtomicBool::new(false);
 
+/// Leert den Ausgabepuffer des 8042 (Reste der Firmware/BAT), damit
+/// ein anschließender Test-Result eindeutig zugeordnet werden kann.
+/// Gedeckelt, damit es nie hängt (0xFF ohne Controller = Bit 0 immer
+/// gesetzt).
+fn ausgabe_leeren() {
+    let mut status: Port<u8> = Port::new(0x64);
+    let mut daten: Port<u8> = Port::new(0x60);
+    for _ in 0..32 {
+        // unsafe (Port-I/O): Status- und Datenport des 8042, nur lesen.
+        if unsafe { status.read() } & 0b01 == 0 {
+            break;
+        }
+        let _ = unsafe { daten.read() };
+    }
+}
+
+/// Prüft NICHT-INTRUSIV, ob eine PS/2-Tastatur (genauer: ein
+/// funktionierender erster 8042-Port) vorhanden ist. Nutzt den
+/// First-Port-Interface-Test (Controller-Kommando 0xAB): Antwort 0x00
+/// = Port in Ordnung. Ändert KEINE Controller-Konfiguration und setzt
+/// nichts zurück — der in QEMU funktionierende Tastatur-Pfad bleibt
+/// völlig unberührt (die heikle Regel „Tastatur-Bits 0/4/6 nie
+/// anfassen" gilt weiter).
+///
+/// Auf einem Board ohne 8042 (reines USB) lesen die Ports 0xFF: der
+/// Handshake läuft in seinen Timeout und wir liefern sauber `false`,
+/// statt zu hängen — genau dafür haben alle Warteschleifen Timeouts.
+///
+/// MUSS mit deaktivierten Interrupts laufen (lib::init(), vor sti) und
+/// VOR maus::initialisieren(), damit kein Maus-Byte den Test stört.
+pub fn tastatur_vorhanden() -> bool {
+    // Firmware-Reste wegräumen, damit maus_antwort() wirklich das
+    // Test-Ergebnis liest und nicht ein altes Byte:
+    ausgabe_leeren();
+    if !controller_kommando(0xAB) {
+        return false;
+    }
+    matches!(maus_antwort(), Some(0x00))
+}
+
 /// Wartet, bis der Controller Daten HAT (Status-Bit 0). false = Timeout.
 fn warte_auf_daten() -> bool {
     let mut status: Port<u8> = Port::new(0x64);

@@ -32,6 +32,7 @@ pub mod ablage;
 pub mod allocator;
 pub mod apps;
 pub mod ata;
+pub mod diagnose;
 pub mod einstellungen;
 pub mod explorer;
 pub mod fenster;
@@ -103,10 +104,26 @@ pub fn init() {
     // Den Timer selbst programmieren (unter UEFI macht das sonst
     // niemand — siehe Kommentar an pit_initialisieren).
     interrupts::pit_initialisieren();
+    // PS/2-TASTATUR erkennen — BEVOR wir die Maus anfassen, damit der
+    // First-Port-Test ein sauberes Ergebnis liefert (die Maus-Init
+    // aktiviert am Ende die Daten-Meldung und könnte sonst ein Byte
+    // in den Ausgabepuffer legen). Die Probe ist bewusst nicht-
+    // intrusiv (nur Interface-Test 0xAB, kein Reset, keine Config-
+    // Änderung) und mit Timeout: ein USB-only-Board (kein 8042) liest
+    // 0xFF und wird sauber als "keine Tastatur" erkannt, statt zu
+    // hängen. Das Ergebnis merkt sich diagnose für die Bildschirm-
+    // Meldung und die Hardware-Zusammenfassung.
+    let tastatur_da = maus::tastatur_vorhanden();
+    diagnose::tastatur_setzen(tastatur_da);
+    if !tastatur_da {
+        serial_println!("[BOOT] WARNUNG: Keine PS/2-Tastatur erkannt.");
+    }
     // Die PS/2-Maus initialisieren — VOR dem sti, denn die ACK-
     // Handshakes werden gepollt (alle Warteschleifen mit Timeout:
     // fehlt die Maus, bootet SpeedOS trotzdem).
-    if !maus::initialisieren() {
+    let maus_da = maus::initialisieren();
+    diagnose::maus_setzen(maus_da);
+    if !maus_da {
         serial_println!("[BOOT] WARNUNG: Keine PS/2-Maus gefunden.");
     }
     // Interrupts auf der CPU aktivieren (sti-Befehl): Ab jetzt können
