@@ -114,7 +114,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // auf den Bildschirm (sonst wie bisher nur seriell).
     if d_beim_boot || diagnose_ramdisk {
         speed_os::diagnose::aktivieren();
-        speed_os::diagnose::schritt(format_args!("=== SpeedOS Live — Diagnose-Modus ==="));
+        speed_os::diagnose::schritt(format_args!("=== SpeedOS Live - Diagnose-Modus ==="));
         speed_os::diagnose::schritt(format_args!(
             "Ausgeloest durch {}.",
             if d_beim_boot { "Taste D" } else { "SPEEDOS_DIAGNOSE" }
@@ -171,7 +171,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         // verweilen (Taste zum Fortfahren, sonst ~8 s Timeout).
         speed_os::diagnose::hardware_zusammenfassung();
         speed_os::diagnose::schritt(format_args!(
-            "Weiter zum Desktop — Taste druecken oder ~8 s warten ..."
+            "Weiter zum Desktop - Taste druecken oder ~8 s warten ..."
         ));
         let start = speed_os::zeit::ms_seit_boot();
         while speed_os::zeit::ms_seit_boot() < start + 8000 {
