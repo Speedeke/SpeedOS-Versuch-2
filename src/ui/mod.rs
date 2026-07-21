@@ -109,34 +109,86 @@ impl UiEreignis {
 /// Ein Klick auf einen Button ist verbraucht UND will neu gezeichnet
 /// werden UND trägt eine Nachricht — das sind kombinierbare Wirkungen,
 /// keine Alternativen.
+///
+/// SCHADENS-RECHTECK (Performance-Pass): `neu_zeichnen` allein bedeutet
+/// "das GANZE Fenster neu" (der ehrliche Fallback — Korrektheit vor
+/// Eleganz). Ein Widget, das genau weiß, WELCHE Fläche es geändert
+/// hat, meldet sie über `schaden` (in Fensterinhalt-Koordinaten, wie
+/// `bereich` im ereignis()) — dann rendert und komponiert das Fenster
+/// nur diesen Bereich statt der ganzen Fläche. Container reichen die
+/// Meldung unverändert nach oben (die Koordinaten sind schon
+/// fenster-absolut, weil jedem Widget sein `bereich` übergeben wird).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct UiReaktion {
     /// Das Ereignis ist behandelt — nicht weiterreichen.
     pub verbraucht: bool,
     /// Der Fenster-Inhalt muss neu gezeichnet werden.
     pub neu_zeichnen: bool,
+    /// Der GEÄNDERTE Bereich (Fensterinhalt-Koordinaten), wenn das
+    /// Widget ihn kennt. None + neu_zeichnen = ganzes Fenster.
+    pub schaden: Option<Rechteck>,
     /// Eine Nachricht an die App (Widget-abhängige ID).
     pub nachricht: Option<u32>,
 }
 
 impl UiReaktion {
     pub const fn ignoriert() -> Self {
-        UiReaktion { verbraucht: false, neu_zeichnen: false, nachricht: None }
+        UiReaktion { verbraucht: false, neu_zeichnen: false, schaden: None, nachricht: None }
     }
     pub const fn verbraucht() -> Self {
-        UiReaktion { verbraucht: true, neu_zeichnen: false, nachricht: None }
+        UiReaktion { verbraucht: true, neu_zeichnen: false, schaden: None, nachricht: None }
     }
+    /// Neuzeichnen des GANZEN Fensters (der Fallback ohne Schadens-Info).
     pub const fn neu_zeichnen() -> Self {
-        UiReaktion { verbraucht: true, neu_zeichnen: true, nachricht: None }
+        UiReaktion { verbraucht: true, neu_zeichnen: true, schaden: None, nachricht: None }
+    }
+    /// Neuzeichnen NUR des gemeldeten Bereichs (Fensterinhalt-Koords).
+    pub const fn neu_zeichnen_bereich(bereich: Rechteck) -> Self {
+        UiReaktion {
+            verbraucht: true,
+            neu_zeichnen: true,
+            schaden: Some(bereich),
+            nachricht: None,
+        }
     }
     pub const fn nachricht(id: u32) -> Self {
-        UiReaktion { verbraucht: true, neu_zeichnen: true, nachricht: Some(id) }
+        UiReaktion { verbraucht: true, neu_zeichnen: true, schaden: None, nachricht: Some(id) }
     }
+
+    /// Setzt das Schadens-Rechteck einer Nachricht-Reaktion (damit auch
+    /// ein `nachricht(id)` gezielt statt vollflächig neu zeichnet).
+    pub const fn mit_schaden(mut self, bereich: Rechteck) -> Self {
+        self.schaden = Some(bereich);
+        self
+    }
+
+    /// Der Schadens-BEITRAG dieser Reaktion beim Kombinieren:
+    ///   None              = trägt nichts bei (zeichnet nicht neu),
+    ///   Some(None)        = Vollbild-Beitrag (neu, aber ohne Rect),
+    ///   Some(Some(rect))  = genau dieser Bereich.
+    fn schaden_beitrag(&self) -> Option<Option<Rechteck>> {
+        if self.neu_zeichnen {
+            Some(self.schaden)
+        } else {
+            None
+        }
+    }
+
     /// Kombiniert zwei Reaktionen (Container sammeln Kind-Reaktionen).
+    /// Der Schaden wird zur Bounding-Box vereint; sobald ein Beteiligter
+    /// vollflächig neu will (Some(None)), gewinnt das Vollbild.
     pub fn und(self, andere: UiReaktion) -> UiReaktion {
+        let schaden = match (self.schaden_beitrag(), andere.schaden_beitrag()) {
+            (None, None) => None,
+            (Some(x), None) | (None, Some(x)) => x,
+            (Some(Some(a)), Some(Some(b))) => Some(a.umschliessen(&b)),
+            // mindestens einer will Vollbild:
+            (Some(_), Some(_)) => None,
+        };
         UiReaktion {
             verbraucht: self.verbraucht || andere.verbraucht,
             neu_zeichnen: self.neu_zeichnen || andere.neu_zeichnen,
+            schaden,
             nachricht: self.nachricht.or(andere.nachricht),
         }
     }
@@ -489,6 +541,24 @@ impl UiFenster {
         self.wurzel.zeichnen(&mut z, bereich);
     }
 
+    /// Zeichnet NUR den Schadensbereich neu (Performance-Pfad). Der
+    /// Zeichner bekommt `schaden` als Clip — der Baum-Durchlauf ist
+    /// derselbe, aber es werden nur Pixel INNERHALB des Schadens
+    /// geschrieben (und clip-bewusste Widgets wie der Editor sparen
+    /// sich die Zeilen außerhalb ganz). Der Hintergrund wird nur im
+    /// Schadensbereich neu gefüllt.
+    pub fn zeichnen_bereich(&self, puffer: &mut FensterPuffer, schaden: Rechteck) {
+        use crate::grafik::Rgba;
+
+        let thema = crate::theme::aktuell();
+        let bereich = Self::wurzel_bereich(puffer);
+        let mut z = Zeichner::neu(puffer);
+        z.clip_setzen(Some(schaden));
+        let hintergrund = thema.inhalt_hintergrund;
+        z.rechteck_fuellen(schaden, Rgba::neu(hintergrund.r, hintergrund.g, hintergrund.b));
+        self.wurzel.zeichnen(&mut z, bereich);
+    }
+
     /// Ein Maus-Ereignis in Fenster-Koordinaten. Erkennt Doppelklicks.
     pub fn maus(&mut self, ereignis: UiEreignis, puffer: &FensterPuffer) -> UiReaktion {
         let bereich = Self::wurzel_bereich(puffer);
@@ -722,5 +792,31 @@ mod tests {
         // Sofortiger zweiter Klick (µs-Abstand): Doppelklick gewinnt.
         let zweiter = ui.maus(UiEreignis::Klick { x: 51, y: 31 }, &puffer);
         assert_eq!(zweiter.nachricht, Some(60));
+    }
+
+    /// Die Schadens-Kombination in UiReaktion::und (der Performance-
+    /// Pass): zwei Bereichs-Schäden vereinen sich zur Bounding-Box,
+    /// ein Vollschaden-Beitrag (neu_zeichnen ohne Rect) gewinnt.
+    #[test_case]
+    fn test_reaktion_schaden_kombination() {
+        let a = Rechteck::neu(0, 0, 10, 10);
+        let b = Rechteck::neu(20, 20, 10, 10);
+        // Zwei Bereiche -> Bounding-Box.
+        let kombi = UiReaktion::neu_zeichnen_bereich(a).und(UiReaktion::neu_zeichnen_bereich(b));
+        assert_eq!(kombi.schaden, Some(a.umschliessen(&b)));
+        assert!(kombi.neu_zeichnen);
+        // Bereich + Vollschaden (neu_zeichnen() ohne Rect) -> Voll (None).
+        let mit_voll = UiReaktion::neu_zeichnen_bereich(a).und(UiReaktion::neu_zeichnen());
+        assert!(mit_voll.neu_zeichnen);
+        assert_eq!(mit_voll.schaden, None);
+        // Bereich + ignoriert (kein neu_zeichnen) -> nur der Bereich.
+        let mit_ignoriert = UiReaktion::neu_zeichnen_bereich(a).und(UiReaktion::ignoriert());
+        assert_eq!(mit_ignoriert.schaden, Some(a));
+        // Zweimal ignoriert -> kein Schaden, kein Neuzeichnen.
+        let leer = UiReaktion::ignoriert().und(UiReaktion::ignoriert());
+        assert!(!leer.neu_zeichnen);
+        assert_eq!(leer.schaden, None);
+        // mit_schaden setzt den Bereich auch auf einer Nachricht-Reaktion.
+        assert_eq!(UiReaktion::nachricht(7).mit_schaden(a).schaden, Some(a));
     }
 }

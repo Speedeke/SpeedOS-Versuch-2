@@ -99,6 +99,19 @@ impl Rechteck {
             None
         }
     }
+
+    /// Kleinstes Rechteck, das BEIDE umschließt (Bounding-Box-Union).
+    /// Die Dirty-Rect-Mechanik nutzt das, um zwei Schadensmeldungen
+    /// eines Frames zu EINER zusammenzufassen — reine, getestete
+    /// Funktion. Über-Deckung ist erlaubt (Korrektheit vor Optimum):
+    /// zwei weit auseinanderliegende Schäden ergeben ein großes Rect.
+    pub fn umschliessen(&self, anderes: &Rechteck) -> Rechteck {
+        let x = self.x.min(anderes.x);
+        let y = self.y.min(anderes.y);
+        let rechts = (self.x + self.breite).max(anderes.x + anderes.breite);
+        let unten = (self.y + self.hoehe).max(anderes.y + anderes.hoehe);
+        Rechteck::neu(x, y, rechts - x, unten - y)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -176,6 +189,14 @@ impl<'a, F: Zeichenflaeche> Zeichner<'a, F> {
     /// Setzt das Clip-Rechteck für alle folgenden Operationen.
     pub fn clip_setzen(&mut self, clip: Option<Rechteck>) {
         self.clip = clip;
+    }
+
+    /// Das aktuelle Clip-Rechteck (falls gesetzt). Widgets lesen es
+    /// beim partiellen Neuzeichnen aus, um Arbeit außerhalb des
+    /// Schadensbereichs zu SPAREN (der Editor überspringt so ganze
+    /// Textzeilen, statt jeden Glyph-Pixel gegen den Clip zu prüfen).
+    pub fn clip(&self) -> Option<Rechteck> {
+        self.clip
     }
 
     /// Der eine Pixel-Pfad, durch den ALLES läuft: Clip prüfen,
@@ -1006,6 +1027,20 @@ mod tests {
         // Nur Kante berührt (Breite 0) zählt NICHT als Schnitt:
         let kante = Rechteck::neu(100, 0, 50, 50);
         assert_eq!(a.schneiden(&kante), None);
+    }
+
+    /// umschliessen: kleinste Bounding-Box beider Rechtecke.
+    #[test_case]
+    fn test_rechteck_umschliessen() {
+        let a = Rechteck::neu(10, 10, 20, 20); // 10..30
+        let b = Rechteck::neu(50, 5, 10, 10); // x 50..60, y 5..15
+        // Bounding-Box: x 10..60, y 5..30.
+        assert_eq!(a.umschliessen(&b), Rechteck::neu(10, 5, 50, 25));
+        // Mit sich selbst = unverändert:
+        assert_eq!(a.umschliessen(&a), a);
+        // Ein enthaltenes Rechteck ändert nichts:
+        let innen = Rechteck::neu(15, 15, 5, 5);
+        assert_eq!(a.umschliessen(&innen), a);
     }
 
     /// enthaelt: Grenzen sind halb-offen ([x, x+breite)).

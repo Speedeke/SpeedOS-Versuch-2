@@ -194,6 +194,16 @@ pub struct Fenster {
     /// Komponieren neu in den Puffer gerendert werden (gebündelt pro
     /// Frame — ein Terminal rendert nicht bei jedem print! neu).
     inhalt_neu: bool,
+    /// Die SCHADENSBEREICHE für das nächste Render (Fensterinhalt-
+    /// Koordinaten). MEHRERE Rechtecke, KEINE Bounding-Box: Cursorzeile
+    /// (oben) und Statusstreifen (unten) sind weit auseinander — eine
+    /// Bounding-Box würde fast das ganze Fenster umfassen. Jedes Rect
+    /// wird getrennt gerendert und gemeldet. Überlauf -> inhalt_voll.
+    inhalt_schaden: Vec<Rechteck>,
+    /// Fällt der Schaden vollflächig aus (ein Widget ohne Bereichs-
+    /// Meldung, Theme-Wechsel, Neuaufbau)? Dann das GANZE Fenster —
+    /// der ehrliche Fallback, Korrektheit vor Eleganz.
+    inhalt_voll: bool,
     minimiert: bool,
     /// Vor dem Maximieren/Snappen gespeicherte Geometrie (Rückkehr).
     vorher: Option<(i32, i32, usize, usize)>,
@@ -650,6 +660,8 @@ impl FensterManager {
             inhalt,
             dirty: true,
             inhalt_neu: false,
+            inhalt_schaden: Vec::new(),
+            inhalt_voll: false,
             minimiert: false,
             vorher: None,
         };
@@ -936,6 +948,30 @@ impl FensterManager {
         }
     }
 
+    /// Merkt einen Schadensbereich eines Ui-/App-Fensters für das
+    /// nächste Render vor (Fensterinhalt-Koordinaten). Ohne Bereich
+    /// (None) oder wenn schon ein Vollschaden ansteht: das ganze
+    /// Fenster. Mehrere Meldungen pro Frame werden zur Bounding-Box
+    /// vereint — der Compositor bekommt am Ende ein Rechteck.
+    fn schaden_akkumulieren(&mut self, index: usize, schaden: Option<Rechteck>) {
+        // Höchstens so viele Einzel-Rects — darüber lohnt der
+        // Vollschaden mehr als viele Streifen.
+        const MAX_INHALT_SCHAEDEN: usize = 8;
+        let f = &mut self.fenster[index];
+        f.inhalt_neu = true;
+        match schaden {
+            Some(bereich) if !f.inhalt_voll && f.inhalt_schaden.len() < MAX_INHALT_SCHAEDEN => {
+                f.inhalt_schaden.push(bereich);
+            }
+            _ => {
+                // Kein Bereich, Überlauf oder schon voll: der ehrliche
+                // Vollschaden-Fallback.
+                f.inhalt_voll = true;
+                f.inhalt_schaden.clear();
+            }
+        }
+    }
+
     /// Rendert alle geänderten Inhalte (inhalt_neu) in ihre Puffer —
     /// ruft der Compositor EINMAL pro Frame, vor dem Komponieren.
     /// TERMINALS gehen den schlanken Weg: nur die geänderten
@@ -944,23 +980,51 @@ impl FensterManager {
     /// präzise per dirty_melden angemeldet (Performance-Pass:
     /// eine Prompt-Zeile komponiert 16 px statt der Fensterfläche).
     fn inhalte_rendern(&mut self) {
+        // Sub-Bereichs-Meldungen erst sammeln, dann nach der Schleife
+        // dirty_melden — sonst borgt man self.fenster und self zugleich.
+        let mut teil_schaeden: Vec<Rechteck> = Vec::new();
         for index in 0..self.fenster.len() {
-            if self.fenster[index].inhalt_neu {
-                self.fenster[index].inhalt_neu = false;
-                let fenster = &mut self.fenster[index];
-                if let Inhalt::Terminal { term, .. } = &mut fenster.inhalt {
-                    let zeichen_breite =
-                        get_raster_width(FontWeight::Regular, metrik().schrift_ui);
-                    let spalten = (fenster.puffer.breite / zeichen_breite).max(1);
-                    let zeilen =
-                        (fenster.puffer.hoehe / metrik().zeilen_hoehe as usize).max(1);
-                    term.groesse_setzen(spalten, zeilen);
-                    terminal_rendern(term, &mut fenster.puffer);
-                } else {
-                    inhalt_zeichnen(fenster);
-                    self.fenster[index].dirty = true;
+            if !self.fenster[index].inhalt_neu {
+                continue;
+            }
+            self.fenster[index].inhalt_neu = false;
+            let fenster = &mut self.fenster[index];
+            if let Inhalt::Terminal { term, .. } = &mut fenster.inhalt {
+                let zeichen_breite = get_raster_width(FontWeight::Regular, metrik().schrift_ui);
+                let spalten = (fenster.puffer.breite / zeichen_breite).max(1);
+                let zeilen = (fenster.puffer.hoehe / metrik().zeilen_hoehe as usize).max(1);
+                term.groesse_setzen(spalten, zeilen);
+                terminal_rendern(term, &mut fenster.puffer);
+                continue;
+            }
+            // Ui-/App-Inhalt: partiell rendern, wenn Schadensbereiche
+            // vorliegen (und nicht als Vollschaden markiert).
+            if fenster.inhalt_voll || fenster.inhalt_schaden.is_empty() {
+                // Vollflächig (Fallback): ganzen Inhalt zeichnen,
+                // fenster.dirty meldet die Fläche + Schatten.
+                fenster.inhalt_voll = false;
+                fenster.inhalt_schaden.clear();
+                inhalt_zeichnen(fenster);
+                self.fenster[index].dirty = true;
+            } else {
+                // Jeden Schadensbereich EINZELN neu rendern und GENAU
+                // ihn (in Bildschirm-Koordinaten) dem Compositor melden.
+                let bereiche = core::mem::take(&mut fenster.inhalt_schaden);
+                let (fx, fy) = (fenster.x, fenster.y);
+                let titel_h = metrik().titel_hoehe;
+                for bereich in bereiche {
+                    inhalt_zeichnen_bereich(fenster, bereich);
+                    teil_schaeden.push(Rechteck::neu(
+                        fx + bereich.x,
+                        fy + titel_h + bereich.y,
+                        bereich.breite,
+                        bereich.hoehe,
+                    ));
                 }
             }
+        }
+        for rect in teil_schaeden {
+            self.dirty_melden(rect);
         }
     }
 
@@ -1237,8 +1301,7 @@ impl FensterManager {
     /// an App::nachricht (unter dem Lock, Regeln siehe ui/app.rs).
     fn ui_reaktion(&mut self, index: usize, reaktion: crate::ui::UiReaktion) -> NachLock {
         if reaktion.neu_zeichnen {
-            self.fenster[index].inhalt_neu = true;
-            self.fenster[index].dirty = true;
+            self.schaden_akkumulieren(index, reaktion.schaden);
         }
         let id = match reaktion.nachricht {
             Some(id) => id,
@@ -1261,7 +1324,11 @@ impl FensterManager {
             if let Inhalt::App(app_fenster) = &mut self.fenster[index].inhalt {
                 app_fenster.neu_aufbauen();
             }
+            // Baum-Neuaufbau = ganzer Inhalt neu: inhalt_voll erzwingen,
+            // damit ein etwaiger Teilschaden aus derselben Reaktion nicht
+            // fälschlich nur einen Ausschnitt rendert.
             self.fenster[index].inhalt_neu = true;
+            self.fenster[index].inhalt_voll = true;
             self.fenster[index].dirty = true;
         }
         if let Some(titel) = app_reaktion.titel {
@@ -1269,6 +1336,24 @@ impl FensterManager {
                 self.fenster[index].titel = titel;
                 // Die Titelleiste malt der Compositor — Fläche melden:
                 self.fenster[index].dirty = true;
+            }
+        }
+        if app_reaktion.status_neu {
+            // Untere Statuszeile: ein Schadensstreifen am Content-Rand,
+            // aus den Fenstermaßen berechnet (die App kennt sie nicht).
+            // Großzügig zwei Zeilenhöhen plus Rand — deckt die Statuszeile
+            // samt Padding sicher ab. Nur wenn nicht ohnehin Vollschaden.
+            let f = &self.fenster[index];
+            if !f.inhalt_voll {
+                let hoehe = f.puffer.hoehe as i32;
+                let breite = f.puffer.breite as i32;
+                // Genau eine Statuszeile plus Rand — knapp halten, sonst
+                // kostet der Streifen bei 4K/Skala 2.0 unnötig viel
+                // (jeder überflüssige Pixel wird gefüllt, komponiert,
+                // übertragen).
+                let streifen_h = metrik().zeilen_hoehe + 2 * metrik().ui_rand;
+                let streifen = Rechteck::neu(0, (hoehe - streifen_h).max(0), breite, streifen_h.min(hoehe));
+                self.schaden_akkumulieren(index, Some(streifen));
             }
         }
         if let Some(eintraege) = app_reaktion.kontextmenue {
@@ -1688,6 +1773,7 @@ impl FensterManager {
                     _ => return NachLock::Keine,
                 }
                 self.fenster[index].inhalt_neu = true;
+                self.fenster[index].inhalt_voll = true;
                 self.fenster[index].dirty = true;
             }
         }
@@ -1792,19 +1878,22 @@ impl FensterManager {
             // Widget-Fenster: Cursor-Blinken (fokussiertes Textfeld)
             // und der Tick von Trait-Apps (Live-Inhalte).
             let minimiert = fenster.minimiert;
-            let Fenster { inhalt, dirty, inhalt_neu, .. } = fenster;
+            let Fenster { inhalt, dirty, inhalt_neu, inhalt_voll, .. } = fenster;
             match inhalt {
                 Inhalt::Ui(ui) if !minimiert && ui.blinkt() => {
                     *inhalt_neu = true;
+                    *inhalt_voll = true;
                     *dirty = true;
                 }
                 Inhalt::App(app_fenster) if !minimiert => {
                     if app_fenster.app.tick() {
                         app_fenster.neu_aufbauen();
                         *inhalt_neu = true;
+                        *inhalt_voll = true;
                         *dirty = true;
                     } else if app_fenster.ui.blinkt() {
                         *inhalt_neu = true;
+                        *inhalt_voll = true;
                         *dirty = true;
                     }
                 }
@@ -2191,6 +2280,20 @@ fn terminal_rendern(term: &mut terminal::Terminal, puffer: &mut FensterPuffer) {
 }
 
 /// Zeichnet den Inhalt eines Fensters in SEINEN Puffer.
+/// Zeichnet NUR den Schadensbereich eines Ui-/App-Fensters neu
+/// (Performance-Pfad, Fensterinhalt-Koordinaten). Terminals gehen
+/// hier nie durch — die haben ihren eigenen Zeilen-Streifen-Pfad.
+fn inhalt_zeichnen_bereich(fenster: &mut Fenster, bereich: Rechteck) {
+    if let Inhalt::Ui(ui) = &fenster.inhalt {
+        ui.zeichnen_bereich(&mut fenster.puffer, bereich);
+        return;
+    }
+    if let Inhalt::App(app_fenster) = &fenster.inhalt {
+        app_fenster.ui.zeichnen_bereich(&mut fenster.puffer, bereich);
+    }
+    // Andere Inhalte melden nie einen Sub-Bereich (nur Ui/App tun das).
+}
+
 fn inhalt_zeichnen(fenster: &mut Fenster) {
     // Widget-Fenster: Der Baum zeichnet sich selbst (ui-Modul).
     if let Inhalt::Ui(ui) = &fenster.inhalt {
@@ -2944,10 +3047,17 @@ mod tests {
             "Task-Manager", 200, 140, 640, 460,
             Inhalt::App(crate::ui::AppFenster::neu(alloc::boxed::Box::new(tm))),
         );
-        let editor_text = "Der schnelle braune Fuchs springt ueber den faulen Hund.\n".repeat(60);
+        // Genug Zeilen, um auch ein 4K-großes Editorfenster zu füllen
+        // (sonst wäre der ALT-Voll-Redraw bei 4K künstlich billig):
+        let editor_text = "Der schnelle braune Fuchs springt ueber den faulen Hund.\n".repeat(250);
         let _ = crate::fs::mit_fs(|f| f.schreiben("/messung_s3.txt", editor_text.as_bytes()));
+        // SpeedText GROSS (fast bildschirmfüllend) und ganz oben — so
+        // misst "Editor-Tippen" die Kosten bei der jeweiligen Auflösung
+        // (720p vs. 4K), nicht bei einem Mini-Fenster.
+        let st_breite = (breite - 200).max(400) as usize;
+        let st_hoehe = (hoehe - 240).max(300) as usize;
         manager.fenster_erstellen(
-            "SpeedText", 340, 200, 560, 420,
+            "SpeedText", 40, 60, st_breite, st_hoehe,
             Inhalt::App(crate::ui::AppFenster::neu(alloc::boxed::Box::new(
                 crate::speedtext::SpeedTextApp::mit_datei("/messung_s3.txt"),
             ))),
@@ -3002,7 +3112,11 @@ mod tests {
             if let Inhalt::App(app_fenster) = &mut m.fenster[index].inhalt {
                 app_fenster.neu_aufbauen();
             }
+            // inhalt_voll erzwingt das VOLLE Neuzeichnen (der alte Weg) —
+            // sonst würde der vom taste_event gemeldete Cursor-Schaden
+            // hier fälschlich partiell rendern und ALT/NEU verwischen.
             m.fenster[index].inhalt_neu = true;
+            m.fenster[index].inhalt_voll = true;
             m.fenster[index].dirty = true;
         });
         szenario("Editor-Tippen NEU", &mut manager, &mut |m, _| {

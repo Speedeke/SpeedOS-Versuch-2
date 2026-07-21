@@ -44,6 +44,12 @@ pub struct AppReaktion {
     /// Das Fenster nach dieser Reaktion SCHLIESSEN (die App hat z. B.
     /// im Nachfrage-Dialog "Verwerfen" bestätigt bekommen).
     pub schliessen: bool,
+    /// Auch die untere STATUSZEILE des Inhalts neu zeichnen — für
+    /// Apps, deren Statusleiste sich bei jeder Eingabe ändert
+    /// (SpeedText: Zeile/Spalte/Zeichen), ohne den ganzen Baum
+    /// neu zu bauen. Der Manager übersetzt das mit den Fenstermaßen
+    /// in einen Schadensstreifen am unteren Rand (Performance-Pass).
+    pub status_neu: bool,
 }
 
 impl AppReaktion {
@@ -76,6 +82,11 @@ impl AppReaktion {
     /// Builder: zusätzlich den Fenster-Titel aktualisieren.
     pub fn mit_titel(mut self, titel: alloc::string::String) -> Self {
         self.titel = Some(titel);
+        self
+    }
+    /// Builder: auch die untere Statuszeile neu zeichnen lassen.
+    pub fn mit_status_neu(mut self) -> Self {
+        self.status_neu = true;
         self
     }
 }

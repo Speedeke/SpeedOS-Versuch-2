@@ -5,6 +5,42 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### Feinkörniges Dirty-Rect: das Voll-Zeichnen pro Taste stirbt
+- Widgets melden jetzt SCHADENS-RECHTECKE statt "ganzes Fenster neu":
+  `UiReaktion.schaden: Option<Rechteck>` (Fensterinhalt-Koordinaten),
+  neu über `neu_zeichnen_bereich()` / `mit_schaden()`. Ohne Rect
+  bleibt der ehrliche Vollbild-Fallback (Korrektheit vor Eleganz).
+  Fenster sammeln MEHRERE Schadens-Rects (keine Bounding-Box —
+  Cursorzeile oben und Statuszeile unten würden sonst fast das ganze
+  Fenster umfassen); der Compositor rendert/komponiert je Rect nur den
+  gemeldeten Streifen (die Dirty-Rect-Mechanik bekam feinere Meldungen)
+- Heiße Pfade umgestellt: SpeedText-Tippen (nur Cursorzeile +
+  Statusstreifen; der Editor CULLT Zeilen außerhalb des Clips — ohne
+  das würde `text()` bei 4K Millionen Glyph-Pixel gegen den Clip
+  prüfen), Textfelder, ScrollListen (Scrollen = Listenfläche),
+  Button-/Checkbox-Hover (nur der Button). Der Task-Manager bleibt
+  bewusst Vollbild (er tickt nur 1×/s und aktualisiert Zahlen + Graph
+  + Liste gemeinsam — kein interaktiver Hot-Path)
+- BEWEIS (Berichts-Test messung_serie3, ALT/NEU im selben Lauf —
+  immun gegen die WHPX/TCG-Lotterie), großes SpeedText-Fenster:
+
+  | Szenario                | 720p ALT | 720p NEU | 4K ALT   | 4K NEU |
+  |-------------------------|----------|----------|----------|--------|
+  | Editor-Tippen (µs/Taste)| 2553     | 350      | 15430    | **417** |
+  | Terminal-Ausgabe (µs)   | 1713     | 1017     | 1325     | 744    |
+
+  ZIEL ERREICHT: Editor-Tippen bei 4K **417 µs** (< 500 µs) — vorher
+  15,4 ms/Taste (unbenutzbar), jetzt ~37× schneller. Der größte
+  Rest-Fresser (ein zu großzügiger Statusstreifen) wurde analysiert
+  und auf eine Zeilenhöhe geschrumpft (502 µs -> 417 µs)
+- Keine sichtbaren Artefakte: per QMP-Screenshots an den heiklen
+  Stellen geprüft (überlappende Fenster, Terminal-Streifen-Ausgabe
+  unter/über anderem Fenster) — der Compositor komponiert je Rect
+  alle Fenster in Z-Ordnung, Überlappung bleibt korrekt
+- 142 Lib-Tests (inkl. neuer Schadens-Kombinations- und
+  umschliessen-Tests) + alle Integrationstests grün; die
+  Routing-Tests unverändert bestanden
+
 ### PCI + virtio-blk: die schnelle Platte (Infrastruktur für virtio-net)
 - Neues PCI-Modul `src/pci.rs`: Config-Space-Enumeration über die
   Legacy-Ports 0xCF8/0xCFC, Bus/Gerät/Funktion durchgehen, Vendor/

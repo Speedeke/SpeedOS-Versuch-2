@@ -256,12 +256,17 @@ impl App for SpeedTextApp {
             // nur, wenn er sich WIRKLICH ändert (einmal pro
             // Geändert-Wechsel statt bei jedem Tastendruck).
             N_EDITOR => {
+                // Die Statuszeile (Zeile/Spalte/Zeichen) ändert sich bei
+                // JEDER Editor-Nachricht — sie liegt aber unten, außerhalb
+                // des Cursor-Schadens, den der Editor gemeldet hat. Also
+                // zusätzlich den Statusstreifen neu zeichnen lassen (kein
+                // Baum-Neuaufbau — der Puffer ist geteilt).
                 let titel = self.titel();
                 if titel != self.letzter_titel {
                     self.letzter_titel = titel.clone();
-                    AppReaktion::keine().mit_titel(titel)
+                    AppReaktion::keine().mit_titel(titel).mit_status_neu()
                 } else {
-                    AppReaktion::keine()
+                    AppReaktion::keine().mit_status_neu()
                 }
             }
             // Schließen-Dialog:

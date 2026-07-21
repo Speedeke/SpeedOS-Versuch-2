@@ -194,19 +194,21 @@ impl Widget for Button {
         if self.deaktiviert {
             return UiReaktion::ignoriert();
         }
+        // Ein Button ändert bei Hover/Klick NUR seine eigene Fläche —
+        // er meldet exakt `bereich` als Schaden (statt das Fenster).
         match ereignis {
             UiEreignis::MausRein => {
                 self.hover = true;
-                UiReaktion::neu_zeichnen()
+                UiReaktion::neu_zeichnen_bereich(bereich)
             }
             UiEreignis::MausRaus => {
                 self.hover = false;
                 self.gedrueckt = false;
-                UiReaktion::neu_zeichnen()
+                UiReaktion::neu_zeichnen_bereich(bereich)
             }
             UiEreignis::Klick { x, y } if bereich.enthaelt(*x, *y) => {
                 self.gedrueckt = true;
-                UiReaktion::neu_zeichnen()
+                UiReaktion::neu_zeichnen_bereich(bereich)
             }
             UiEreignis::Losgelassen { x, y } => {
                 // Nur ein Loslassen ÜBER dem gedrückten Button klickt —
@@ -214,9 +216,12 @@ impl Widget for Button {
                 let war_gedrueckt = self.gedrueckt;
                 self.gedrueckt = false;
                 if war_gedrueckt && bereich.enthaelt(*x, *y) {
+                    // Die Klick-Nachricht kann den ganzen Baum umbauen
+                    // (App-Reaktion) — hier KEIN Bereichs-Schaden, das
+                    // entscheidet die App/der Manager (Voll-Fallback).
                     UiReaktion::nachricht(self.nachricht)
                 } else if war_gedrueckt {
-                    UiReaktion::neu_zeichnen()
+                    UiReaktion::neu_zeichnen_bereich(bereich)
                 } else {
                     UiReaktion::ignoriert()
                 }
@@ -281,11 +286,11 @@ impl Widget for Checkbox {
         match ereignis {
             UiEreignis::MausRein => {
                 self.hover = true;
-                UiReaktion::neu_zeichnen()
+                UiReaktion::neu_zeichnen_bereich(bereich)
             }
             UiEreignis::MausRaus => {
                 self.hover = false;
-                UiReaktion::neu_zeichnen()
+                UiReaktion::neu_zeichnen_bereich(bereich)
             }
             UiEreignis::Klick { x, y } if bereich.enthaelt(*x, *y) => {
                 self.an = !self.an;
@@ -384,20 +389,22 @@ impl Widget for Textfeld {
     }
 
     fn ereignis(&mut self, ereignis: &UiEreignis, bereich: Rechteck) -> UiReaktion {
+        // Ein einzeiliges Textfeld ändert nur seine eigene Fläche —
+        // `bereich` als Schaden statt das ganze Fenster (Tippen!).
         match ereignis {
             UiEreignis::Klick { x, y } if bereich.enthaelt(*x, *y) => {
                 // Klick fokussiert (das UiFenster hat vorher allen
                 // Fokus entfernt).
                 self.fokus = true;
-                UiReaktion::neu_zeichnen()
+                UiReaktion::neu_zeichnen_bereich(bereich)
             }
             UiEreignis::FokusRein => {
                 self.fokus = true;
-                UiReaktion::neu_zeichnen()
+                UiReaktion::neu_zeichnen_bereich(bereich)
             }
             UiEreignis::FokusRaus => {
                 self.fokus = false;
-                UiReaktion::neu_zeichnen()
+                UiReaktion::neu_zeichnen_bereich(bereich)
             }
             UiEreignis::Taste(taste) if self.fokus => {
                 let editor_taste = match taste {
@@ -410,12 +417,17 @@ impl Widget for Textfeld {
                 };
                 let text_vorher = alloc::string::String::from(self.editor.zeile());
                 match self.editor.taste(editor_taste, "/", &KeineVervollstaendigung) {
-                    Reaktion::Fertig(_) => UiReaktion::nachricht(self.nachricht),
+                    // Enter/Änderungs-Nachricht können anderswo (Filter,
+                    // App) größere Umbauten auslösen — die Schadensfläche
+                    // trägt das eigene Feld bei; der Empfänger ergänzt.
+                    Reaktion::Fertig(_) => {
+                        UiReaktion::nachricht(self.nachricht).mit_schaden(bereich)
+                    }
                     _ => match self.nachricht_geaendert {
                         Some(id) if self.editor.zeile() != text_vorher => {
-                            UiReaktion::nachricht(id)
+                            UiReaktion::nachricht(id).mit_schaden(bereich)
                         }
-                        _ => UiReaktion::neu_zeichnen(),
+                        _ => UiReaktion::neu_zeichnen_bereich(bereich),
                     },
                 }
             }
@@ -754,13 +766,13 @@ impl Widget for ScrollListe {
                     self.inhalt_hoehe(),
                     bereich.hoehe,
                 ));
-                UiReaktion::neu_zeichnen()
+                UiReaktion::neu_zeichnen_bereich(bereich)
             }
             UiEreignis::Klick { x, y } => {
                 if let Some(griff) = self.balken_rechteck(bereich) {
                     if griff.enthaelt(*x, *y) {
                         self.balken_griff = Some(*y - griff.y);
-                        return UiReaktion::neu_zeichnen();
+                        return UiReaktion::neu_zeichnen_bereich(bereich);
                     }
                     // Klick auf die Balken-Spur: Seite springen.
                     if *x >= griff.x && bereich.enthaelt(*x, *y) {
@@ -770,7 +782,7 @@ impl Widget for ScrollListe {
                             self.inhalt_hoehe(),
                             bereich.hoehe,
                         ));
-                        return UiReaktion::neu_zeichnen();
+                        return UiReaktion::neu_zeichnen_bereich(bereich);
                     }
                 }
                 if let Some(index) = self.eintrag_bei(bereich, *x, *y) {
@@ -811,14 +823,14 @@ impl Widget for ScrollListe {
                     self.auswahl_bewegen(-1, bereich.hoehe);
                     match self.auswahl {
                         Some(index) => UiReaktion::nachricht(self.auswahl_nachricht(index)),
-                        None => UiReaktion::neu_zeichnen(),
+                        None => UiReaktion::neu_zeichnen_bereich(bereich),
                     }
                 }
                 DecodedKey::RawKey(KeyCode::ArrowDown) => {
                     self.auswahl_bewegen(1, bereich.hoehe);
                     match self.auswahl {
                         Some(index) => UiReaktion::nachricht(self.auswahl_nachricht(index)),
-                        None => UiReaktion::neu_zeichnen(),
+                        None => UiReaktion::neu_zeichnen_bereich(bereich),
                     }
                 }
                 DecodedKey::Unicode('\n') | DecodedKey::Unicode('\r') => match self.auswahl {
@@ -830,13 +842,13 @@ impl Widget for ScrollListe {
             UiEreignis::Bewegt { x: _, y } => {
                 if let Some(griff_versatz) = self.balken_griff {
                     self.scroll.set(self.scroll_aus_griff(bereich, *y - griff_versatz));
-                    return UiReaktion::neu_zeichnen();
+                    return UiReaktion::neu_zeichnen_bereich(bereich);
                 }
                 UiReaktion::ignoriert()
             }
             UiEreignis::Losgelassen { .. } | UiEreignis::MausRaus => {
                 if self.balken_griff.take().is_some() {
-                    return UiReaktion::neu_zeichnen();
+                    return UiReaktion::neu_zeichnen_bereich(bereich);
                 }
                 UiReaktion::ignoriert()
             }

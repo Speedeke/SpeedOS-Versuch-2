@@ -277,6 +277,16 @@ impl TextEditor {
         ))
     }
 
+    /// Fenster-Rechteck der Textzeilen von der `von`. bis zur `bis`.
+    /// sichtbaren Zeile (relativ zum Scroll) — die Einheit der
+    /// Schadensmeldung beim Tippen.
+    fn zeilen_streifen(bereich: Rechteck, von_sicht: i32, bis_sicht: i32) -> Rechteck {
+        let zh = metrik().zeilen_hoehe;
+        let y_oben = bereich.y + 2 + von_sicht.max(0) * zh;
+        let y_unten = (bereich.y + 2 + (bis_sicht + 1) * zh).min(bereich.y + bereich.hoehe);
+        Rechteck::neu(bereich.x, y_oben, bereich.breite, (y_unten - y_oben).max(zh))
+    }
+
     /// Verarbeitet eine Taste im Puffer. true = verarbeitet.
     fn taste_im_puffer(puffer: &mut TextPuffer, taste: DecodedKey, sicht: usize) -> bool {
         match taste {
@@ -355,15 +365,34 @@ impl Widget for TextEditor {
         );
         z.rechteck_rahmen(bereich, if self.fokus { thema.akzent } else { thema.rahmen_passiv });
 
-        z.clip_setzen(Some(Rechteck::neu(
-            bereich.x + 1,
-            bereich.y + 1,
-            bereich.breite - 2,
-            bereich.hoehe - 2,
-        )));
+        // Der ÄUSSERE Clip des Zeichners (beim partiellen Neuzeichnen
+        // ist das der Schadensbereich) — wir lesen ihn, um Textzeilen
+        // AUSSERHALB davon ganz zu überspringen. Das ist der Kern des
+        // Performance-Passes: Ohne dieses Culling würde `text()` bei
+        // 4K für JEDE sichtbare Zeile alle Glyph-Pixel gegen den Clip
+        // prüfen (Millionen No-Op-Vergleiche pro Taste); mit Culling
+        // zeichnet ein Tastendruck nur die eine geänderte Zeile.
+        let aeusserer_clip = z.clip();
+        // Effektiver Clip = Editor-Innenfläche GESCHNITTEN mit dem
+        // äußeren Schadensbereich (der Zeichner kennt nur EIN Clip-
+        // Rechteck, kein Stack — also selbst schneiden). None-Schnitt
+        // = der Editor liegt ganz außerhalb des Schadens: nichts tun.
+        let innen = Rechteck::neu(bereich.x + 1, bereich.y + 1, bereich.breite - 2, bereich.hoehe - 2);
+        let effektiv = match aeusserer_clip {
+            Some(aussen) => aussen.schneiden(&innen),
+            None => Some(innen),
+        };
+        z.clip_setzen(effektiv);
         let text_x = bereich.x + nummern + metrik().abstand;
         for (i, zeile) in zeilen.iter().enumerate() {
             let y = bereich.y + 2 + i as i32 * zh;
+            // Liegt diese Zeile ganz außerhalb des Schadens? Dann weg.
+            let zeilen_rect = Rechteck::neu(bereich.x, y, bereich.breite, zh);
+            if let Some(clip) = aeusserer_clip {
+                if clip.schneiden(&zeilen_rect).is_none() {
+                    continue;
+                }
+            }
             let nummer = von + i + 1;
             z.text(
                 bereich.x + metrik().abstand,
@@ -387,7 +416,9 @@ impl Widget for TextEditor {
             let cy = bereich.y + 2 + (cursor_zeile - von) as i32 * zh;
             z.rechteck_fuellen(Rechteck::neu(cx, cy, 2, zh), thema.akzent);
         }
-        z.clip_setzen(None);
+        // Den ÄUSSEREN Clip wiederherstellen (nicht None!) — sonst
+        // zeichnen die Geschwister-Widgets über den Schaden hinaus.
+        z.clip_setzen(aeusserer_clip);
 
         // Scrollbalken:
         if let Some(griff) = self.balken_rechteck(bereich, gesamt, scroll) {
@@ -407,13 +438,42 @@ impl Widget for TextEditor {
         let sicht = Self::sicht_zeilen(bereich);
         match ereignis {
             UiEreignis::Taste(taste) if self.fokus => {
-                let verarbeitet = x86_64::instructions::interrupts::without_interrupts(|| {
-                    Self::taste_im_puffer(&mut self.puffer.lock(), *taste, sicht)
-                });
-                if verarbeitet {
-                    UiReaktion::nachricht(self.nachricht)
-                } else {
-                    UiReaktion::verbraucht() // fokussiert: schlucken
+                // Vorher-/Nachher-Schnappschuss, um GENAU den geänderten
+                // Bereich zu melden (statt das ganze Fenster):
+                let (verarbeitet, schaden) =
+                    x86_64::instructions::interrupts::without_interrupts(|| {
+                        let mut p = self.puffer.lock();
+                        let alte_zeile = p.cursor_zeile;
+                        let alter_scroll = p.scroll_zeile;
+                        let alte_anzahl = p.zeilen_anzahl();
+                        let verarbeitet = Self::taste_im_puffer(&mut p, *taste, sicht);
+                        let schaden = if !verarbeitet {
+                            None
+                        } else if p.scroll_zeile != alter_scroll {
+                            // Gescrollt: die ganze Textfläche ändert sich.
+                            Some(bereich)
+                        } else if p.zeilen_anzahl() != alte_anzahl {
+                            // Zeile(n) eingefügt/entfernt: ab der oberen
+                            // betroffenen Zeile bis zum Editor-Ende (die
+                            // Zeilen darunter sind verrutscht).
+                            let von = (alte_zeile.min(p.cursor_zeile) as i32 - alter_scroll as i32).max(0);
+                            let bis = (bereich.hoehe / metrik().zeilen_hoehe).max(1);
+                            Some(Self::zeilen_streifen(bereich, von, bis))
+                        } else {
+                            // Reine Bearbeitung/Cursorbewegung: nur die
+                            // alte UND die neue Cursorzeile (Bounding-Box).
+                            let a = alte_zeile as i32 - alter_scroll as i32;
+                            let b = p.cursor_zeile as i32 - p.scroll_zeile as i32;
+                            Some(Self::zeilen_streifen(bereich, a.min(b), a.max(b)))
+                        };
+                        (verarbeitet, schaden)
+                    });
+                if !verarbeitet {
+                    return UiReaktion::verbraucht(); // fokussiert: schlucken
+                }
+                match schaden {
+                    Some(rect) => UiReaktion::nachricht(self.nachricht).mit_schaden(rect),
+                    None => UiReaktion::nachricht(self.nachricht),
                 }
             }
             UiEreignis::Klick { x, y } if bereich.enthaelt(*x, *y) => {
@@ -465,7 +525,7 @@ impl Widget for TextEditor {
                                 (ziel * (zeilen - sicht) as i32 / weg).max(0) as usize;
                         }
                     });
-                    return UiReaktion::neu_zeichnen();
+                    return UiReaktion::neu_zeichnen_bereich(bereich);
                 }
                 UiReaktion::ignoriert()
             }
@@ -482,7 +542,7 @@ impl Widget for TextEditor {
                     let neu = p.scroll_zeile as i64 - *delta as i64 * 3;
                     p.scroll_zeile = neu.clamp(0, max_scroll as i64) as usize;
                 });
-                UiReaktion::neu_zeichnen()
+                UiReaktion::neu_zeichnen_bereich(bereich)
             }
             UiEreignis::FokusRein => {
                 self.fokus = true;

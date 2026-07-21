@@ -262,6 +262,31 @@
   LANGSAMER als der alte Gradient!); das Flag manager.hintergrund_neu
   lässt den Compositor ihn beim ersten Frame/Theme-Wechsel neu
   rendern. Gemessen: Uhr-Tick bei 4K 0,31 ms statt 9,3 ms Vollbild.
+- **Widget-Schadensmeldung (Juli 2026, Performance-Pass):** Die
+  Dirty-Rect-Mechanik bekommt jetzt bis in die Widgets FEINE
+  Meldungen. `UiReaktion.schaden: Option<Rechteck>` (Fensterinhalt-
+  Koordinaten; None + neu_zeichnen = Vollbild-Fallback, KORREKTHEIT
+  vor Eleganz) über `neu_zeichnen_bereich()`/`mit_schaden()`;
+  Container reichen es via `und()` nach oben (Bounding-Box; die
+  Koordinaten sind schon fenster-absolut, weil jedem Widget sein
+  `bereich` übergeben wird). Das Fenster sammelt MEHRERE Rects
+  (`inhalt_schaden: Vec<Rechteck>`, kein Bounding-Box-Union — sonst
+  würden Cursorzeile OBEN und Statuszeile UNTEN fast das ganze
+  Fenster umfassen!); `inhalte_rendern` rendert JEDES Rect einzeln
+  geclippt (`ui.zeichnen_bereich`) und meldet nur den Streifen per
+  dirty_melden statt fenster.dirty. Wer VOLL neu will
+  (neu_aufbauen, Textfeld-Modi, blink, Theme), setzt `inhalt_voll`
+  (gewinnt über Teilschäden). KRITISCH für 4K: Der Editor CULLT im
+  zeichnen Textzeilen außerhalb von `z.clip()` — ohne das prüft
+  `text()` bei 4K Millionen Glyph-Pixel gegen den Clip. Die
+  Statuszeile (unten, außerhalb des Cursor-Schadens) meldet die App
+  über `AppReaktion.status_neu`; der Manager macht daraus mit den
+  Fenstermaßen einen Streifen am Content-Rand (knapp EINE Zeilenhöhe
+  — jeder Extra-Pixel kostet bei 4K Füllen+Komponieren+Übertragen).
+  GEMESSEN (messung_serie3, ALT/NEU im selben Lauf): Editor-Tippen
+  bei 4K 417 µs statt 15,4 ms (~37x), bei 720p 350 µs statt 2,55 ms.
+  Der Task-Manager bleibt bewusst Vollbild (tickt nur 1x/s, ändert
+  Zahlen+Graph+Liste gemeinsam — kein interaktiver Hot-Path).
 - **Fenster & Compositor (Juli 2026):** `src/fenster/mod.rs`. JEDES
   Fenster = eigener Pixel-Puffer (`FensterPuffer`, Vec<Farbe>) +
   Metadaten (Position, Größe, Titel, Fokus). Z-Ordnung = Reihenfolge
