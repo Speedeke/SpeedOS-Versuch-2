@@ -49,6 +49,16 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
   (LBA48-DMA/Bus-Master wäre ein eigenes Projekt). Da virtio der
   Standard ist und IDE nur der Test-Abdeckung dient, bleibt es bewusst
   stehen — benannt, nicht „gefixt".
+- **unsafe-Audit** der Port-I/O-Treiber: 50 `unsafe {`-Blöcke in
+  `pci.rs` (2), `virtio/blk.rs` (18), `virtio/virtqueue.rs` (20) und
+  `ata.rs` (10) durchgesehen — **alle** sind Port-I/O (Legacy-Register)
+  oder `read_volatile` auf validierten Deskriptor-Indizes, jeder mit
+  „warum safe"-Begründung (Gruppen-Kommentar bei wiederholtem Muster);
+  **0 `unsafe fn`** (keine fehlenden `# Safety`-Abschnitte). Zwei
+  verwaiste Blöcke in blk.rs nachdokumentiert. `cargo clippy
+  --all-targets` ist **warnungsfrei**.
+- README/CLAUDE.md auf Serie-4-Stand: Persistenz-Stack, Live-USB
+  (Acer-Boot verifiziert), aktualisierter Feature-/Roadmap-Stand.
 
 ### SpeedOS bootet vom USB-Stick (Live-System) + Diagnose-Modus
 - `cargo image` (neuer Alias + Host-Binary `boot/src/bin/live-image.rs`)

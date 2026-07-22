@@ -313,10 +313,11 @@ pub fn init() {
 
     // --- virtio-Init-Sequenz (Legacy) ---
     let status_port = || Port::<u8>::new(io_basis + REG_STATUS);
-    // 1. Reset (Status = 0):
-    // unsafe (Port-I/O): Legacy-Status-Register.
+    // 1. Reset (Status = 0), 2. ACKNOWLEDGE, 3. DRIVER.
+    // unsafe (Port-I/O): alle drei schreiben nur ins Legacy-Status-
+    // Register (io_basis + REG_STATUS) — reine Gerätesteuerung, kann
+    // keinen Kernel-Speicher berühren.
     unsafe { status_port().write(0) };
-    // 2. ACKNOWLEDGE, 3. DRIVER:
     unsafe { status_port().write(STATUS_ACKNOWLEDGE) };
     unsafe { status_port().write(STATUS_ACKNOWLEDGE | STATUS_DRIVER) };
 
@@ -335,6 +336,7 @@ pub fn init() {
     let queue_size = unsafe { Port::<u16>::new(io_basis + REG_QUEUE_SIZE).read() };
     if queue_size == 0 || !queue_size.is_power_of_two() {
         serial_println!("[virtio-blk] Ungueltige Queue-Groesse {} — abgebrochen.", queue_size);
+        // unsafe (Port-I/O): FAILED ins Legacy-Status-Register (dito).
         unsafe { status_port().write(STATUS_FAILED) };
         return;
     }

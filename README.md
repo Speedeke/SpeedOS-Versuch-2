@@ -65,6 +65,12 @@ Cursor), ScrollListe mit Scrollbalken — das Fundament für Explorer & Co.*
 ![SpeedShell](docs/screenshots/shell.png)
 *Die SpeedShell auf der Framebuffer-Konsole: help, farbtest, blinkender Cursor.*
 
+![Live-USB-Diagnose](docs/screenshots/live-diagnose.png)
+*SpeedOS als Live-System vom USB-Stick — der Diagnose-Modus (Taste D beim
+Boot) zeigt Boot-Schritte und erkannte Hardware direkt auf dem Bildschirm.
+Auf echter Hardware verifiziert (siehe [docs/hardware-log.md](docs/hardware-log.md)),
+da es dort keine serielle Debug-Ausgabe gibt.*
+
 ## Features (Stand: Juli 2026)
 
 - **Eigenständiger Boot:** `no_std`-Kernel (Target `x86_64-unknown-none`),
@@ -110,11 +116,27 @@ Cursor), ScrollListe mit Scrollbalken — das Fundament für Explorer & Co.*
   sofort nach /system/einstellungen.txt schreibt und beim Boot lädt —
   die API-Naht, über die später das Disk-Dateisystem echte
   Neustart-Persistenz liefert
-- **Dateisystem:** RAM-Dateisystem hinter einer VFS-Abstraktion
-  (Trait `FileSystem`) — vorbereitet für FAT32/Disk-Dateisysteme
-- **Tests:** 100+ Unit-/Integrationstests, die als eigene Mini-Kernel
-  in QEMU booten (inkl. Frame-Zeit-Messung, Speicherleck-Test und
-  Clipping-Prüfung der Grafik-Schnellpfade)
+- **Dateisystem + Persistenz (Serie 4):** VFS-Abstraktion (Trait
+  `FileSystem`) über einem RamFs und **echten Disk-Dateisystemen**.
+  Darunter die schmale `BlockDevice`-Naht mit einem eigenen
+  **ATA-PIO**-Treiber und einem **virtio-blk**-Treiber (PCI-Enumeration
+  + wiederverwendbare Split-Virtqueue). **SpeedFS** ist das eigene
+  Disk-Dateisystem (Superblock/Bitmap/Inodes, spezifiziert in
+  [docs/speedfs-format.md](docs/speedfs-format.md); Crash-Konsistenz
+  ohne Journal, bewiesen durch einen Absturz-Folter-Test + den fsck
+  `pruefe.speedfs`). **FAT32** (nur Lesen) liest fremde USB-Sticks; ein
+  rotierendes Log liegt auf der Platte. Dateien und Einstellungen
+  überleben den Neustart
+- **Live-USB-Boot:** `cargo image` baut `speedos-live.img` — ein
+  bootfähiges UEFI-Image für echte Hardware (verifiziert auf einem
+  **Acer Aspire A515-51**: Boot, Desktop, Tastatur, native 1080p).
+  Robust gegen fehlende Geräte (keine PS/2-Eingabe → klare
+  Bildschirm-Meldung, keine Platte → RAM-Fallback) plus ein
+  Boot-Diagnose-Modus (Taste D). Anleitung: [docs/usb-boot.md](docs/usb-boot.md)
+- **Tests:** 146 Lib- plus mehrere Integrationstests, die als eigene
+  Mini-Kernel in QEMU booten — inkl. Persistenz-Beweis über den echten
+  QEMU-Neustart, großem End-to-End-Test gegen RamDisk/IDE/virtio,
+  Absturz-Folter-Test, Frame-Zeit-Messung und Grafik-Clipping-Prüfung
 
 ## Bauen & Starten
 
@@ -228,11 +250,20 @@ docs/                Migrationsplan bootloader 0.9 -> 0.11, Screenshots
       Einstellungen-App mit persistentem Einstellungs-Store (VFS),
       Task-Manager (benannte Tasks, CPU-Metrik, kooperatives Beenden),
       SpeedText-Editor + Terminal-Sitzungen (eine Shell pro Fenster)
-- [ ] **Persistenz (Serie 4):** Block-Device-Treiber + Disk-Dateisystem
-      (VFS und Einstellungs-Store sind bereit — Plan und ehrliche
-      Bestandsaufnahme in [docs/serie4-bestandsaufnahme.md](docs/serie4-bestandsaufnahme.md))
-- [ ] **User Space:** Ring-3-Prozesse, Syscalls, präemptiver Scheduler
-- [ ] Ferner: eigene Programme laden (ELF), Netzwerk, Sound
+- [x] **Persistenz (Serie 4):** `BlockDevice`-Naht, ATA-PIO- und
+      virtio-blk-Treiber (PCI + wiederverwendbare Virtqueue), **SpeedFS**
+      (eigenes Disk-Dateisystem mit fsck + Absturz-Folter-Test), FAT32
+      (Lesen), rotierendes Platten-Log — Dateien und Einstellungen
+      überleben den Neustart (Plan: [docs/serie4-bestandsaufnahme.md](docs/serie4-bestandsaufnahme.md))
+- [x] **Live-USB-Boot:** `cargo image` → bootfähiges UEFI-Image für
+      echte Hardware (auf einem Acer verifiziert), robust gegen fehlende
+      Geräte, mit Diagnose-Modus ([docs/usb-boot.md](docs/usb-boot.md))
+- [ ] **Netzwerk (Serie 5):** virtio-net auf der Virtqueue-Basis,
+      eigener TCP/IP-Stack — ehrliche Bestandsaufnahme + Architektur-
+      Empfehlung in [docs/serie5-netzwerk.md](docs/serie5-netzwerk.md)
+- [ ] **User Space (Serie 6):** Ring-3-Prozesse, Syscalls, präemptiver
+      Scheduler
+- [ ] Ferner: eigene Programme laden (ELF), DNS/TLS/HTTP, Sound
 
 ## Lizenz
 

@@ -578,6 +578,43 @@
   aus, prüft, hängt wieder ein; Ergebnis als Dialog im
   SpeedText-Muster). Runner: SPEEDOS_OHNE_DATENPLATTE=1 startet
   ohne Daten-Platte (RAM-Fallback-Test).
+- **Live-USB-Boot + Diagnose (Serie-4-Abschluss, Juli 2026):**
+  `cargo image` (Alias -> `boot/src/bin/live-image.rs`) baut
+  `speedos-live.img`: ein UEFI-GPT-Image OHNE QEMU/Platten, BEWUSST
+  ohne erzwungene Mindestauflösung (der Kernel nimmt den größten
+  GOP-Modus der Firmware -> auf 4K-fähiger Hardware 4K, sonst nativ).
+  `tools/live_qemu.ps1` bootet es in OVMF (Schalter -KeinePS2 =
+  i8042=off, -Qmp für Screendumps); `tools/usb_schreiben.ps1` schreibt
+  es (nur Admin, wählt nur eine USB-Wechselplatte) roh auf den Stick —
+  ein bootfähiger UEFI-Stick hat nur die EFI-System-Partition und ist
+  im Windows-Explorer deshalb UNSICHTBAR (normal!). ACHTUNG: .ps1 in
+  diesem Repo ASCII-only halten (PowerShell 5.1 liest UTF-8-ohne-BOM
+  als ANSI -> Umlaute/Gedankenstriche zerlegen den Parser). Robustheit
+  gegen fremde Hardware: `maus::tastatur_vorhanden()` ist eine
+  NICHT-intrusive PS/2-Probe (First-Port-Test 0xAB, ändert KEINE
+  8042-Config); fehlt die Tastatur, zeigt `framebuffer::meldung_zeigen`
+  vor dem Desktop eine klare Meldung statt still zu hängen; keine Maus
+  -> Tastatur-Desktop; keine Platte -> RAM-VFS. Der DIAGNOSE-Modus
+  (`src/diagnose.rs`, Auslöser: Taste D auf dem Bootscreen ODER
+  `SPEEDOS_DIAGNOSE=1` -> Runner hängt per `UefiBoot::set_ramdisk` ein
+  Marker-Ramdisk an, Kernel prüft `boot_info.ramdisk_addr`) schreibt
+  die Boot-Schritte + `hardware_zusammenfassung()` auf den Schirm (auf
+  echter Hardware gibt es keine serielle Ausgabe). ACHTUNG Framebuffer-
+  Konsole ist Latin-1: Em-Dash/Smart-Quotes werden zu '?'. Verifiziert:
+  Acer Aspire A515-51, 1080p (docs/hardware-log.md, docs/usb-boot.md).
+- **Serie-4-Abschluss-Tests (Juli 2026):** Neben dem Folter- und dem
+  Persistenz-Beweis prüfen jetzt: `test_speedfs_mount_fehlerpfade`
+  (jeder Mount-Fehler sauber), `test_speedfs_voll_sauber` (volle Platte
+  -> `FsFehler::Voll`, NICHT das nicht existierende `IoFehler::KeinPlatz`
+  -- ein fixes Blockgerät ist nie "voll", nur das FS; die
+  alles-oder-nichts-`bloecke_allozieren` korrumpiert nichts),
+  `test_speedfs_folter_fast_voll` (Folter auf fast voller Platte). Der
+  große E2E liegt als geteilte `speedfs::e2e_ops`/`e2e_verifizieren`
+  (doc(hidden) pub, damit auch das Integrationstest-Crate sie sieht):
+  Unit-Test gegen RamDisk (inkl. Absturz-Sim), `tests/e2e_speedfs.rs`
+  gegen IDE+virtio NON-DESTRUKTIV im Unterbaum /platte/e2e (schützt die
+  geteilten Test-Images). plattentest gemessen: virtio ~1500x (seq) bis
+  ~8600x schneller als IDE-PIO (0,21 MiB/s, architektonisch).
 - **Deadlock-Regeln:** (1) Ausgabe-Locks (WRITER, SERIAL1) werden nur mit
   deaktivierten Interrupts gehalten (`without_interrupts` in den _print-
   Funktionen). (2) Interrupt-Handler sind minimal: nie blockieren, nie
@@ -665,6 +702,10 @@
 - **unsafe-Politik:** Jede unsafe-Funktion dokumentiert ihre Bedingungen in
   einem `# Safety`-Abschnitt; jeder unsafe-Block hat einen Kommentar, WARUM
   er safe ist. `cargo clippy --all-targets` muss warnungsfrei sein.
+  Audit Serie-4-Abschluss: die 50 unsafe-Blöcke der Port-I/O-Treiber
+  (pci/virtio-blk/virtqueue/ata) sind ausnahmslos Port-I/O auf
+  Legacy-Registern oder `read_volatile` auf validierten Indizes,
+  0 `unsafe fn` — die riskante Fläche ist bewusst klein und geprüft.
 
 ## Bekannte Abweichungen vom blog_os-Buch
 - (Historisch, seit der 0.11-Migration irrelevant: eigenes Target-JSON
