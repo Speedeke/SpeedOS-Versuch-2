@@ -1317,6 +1317,77 @@ impl FileSystem for SpeedFs {
 }
 
 // ---------------------------------------------------------------------------
+// End-to-End-Sequenz (von den Tests geteilt: RamDisk-Unit-Test UND
+// tests/e2e_speedfs.rs gegen die echte IDE-/virtio-Platte). Deshalb
+// `pub` (Integrationstests sind eigene Crates und sehen nur die
+// öffentliche API), aber `#[doc(hidden)]` — es ist reines Testgerüst.
+// ---------------------------------------------------------------------------
+
+/// Der große Ablauf auf EINEM Dateisystem, backend-agnostisch: Ordner +
+/// Dateien anlegen, Editor-Roundtrip (write_at/read_at wie SpeedText
+/// speichert/lädt, inkl. Editieren mitten in der Datei) und eine
+/// rename-Orgie (gleicher Ordner / ordnerübergreifend / Ziel ersetzen).
+/// ALLE Pfade unter `basis`, damit die Sequenz auch in einem Unterbaum
+/// einer echten Platte läuft, ohne Nachbardaten zu stören. Panickt bei
+/// jeder Abweichung — es ist Testcode.
+#[doc(hidden)]
+pub fn e2e_ops(fs: &mut dyn crate::fs::FileSystem, basis: &str) {
+    let p = |name: &str| alloc::format!("{}/{}", basis, name);
+
+    // mkfs hat der Aufrufer erledigt; hier nur der Basis-Ordner:
+    fs.mkdir(basis).expect("e2e: mkdir basis");
+
+    // 1. Dateien + Unterordner:
+    fs.schreiben(&p("hallo.txt"), b"Hallo SpeedOS").expect("e2e: schreiben hallo");
+    fs.mkdir(&p("unter")).expect("e2e: mkdir unter");
+    fs.schreiben(&p("unter/tief.txt"), b"tief verschachtelt").expect("e2e: schreiben tief");
+
+    // 2. Editor-Roundtrip: schreiben wie SpeedText speichert (write_at ab
+    //    0), lesen wie es lädt (read_at) — Inhalt identisch. Dann mitten
+    //    in der Datei editieren und erneut prüfen.
+    let text = b"Zeile eins\nZeile zwei\nZeile drei\n";
+    let n = fs.write_at(&p("doc.txt"), 0, text).expect("e2e: write_at doc");
+    assert_eq!(n, text.len(), "e2e: write_at schrieb zu wenig");
+    let mut puffer = alloc::vec![0u8; text.len()];
+    let gelesen = fs.read_at(&p("doc.txt"), 0, &mut puffer).expect("e2e: read_at doc");
+    assert_eq!(gelesen, text.len(), "e2e: read_at las zu wenig");
+    assert_eq!(&puffer[..], &text[..], "e2e: doc-Inhalt weicht ab");
+    // "eins" (Offset 6) -> "EINS" (in-place-Overwrite):
+    fs.write_at(&p("doc.txt"), 6, b"EINS").expect("e2e: write_at edit");
+    assert_eq!(
+        fs.lesen(&p("doc.txt")).expect("e2e: lesen doc"),
+        b"Zeile EINS\nZeile zwei\nZeile drei\n"
+    );
+
+    // 3. rename-Orgie (alle Spielarten, innerhalb basis):
+    fs.rename(&p("hallo.txt"), &p("hallo2.txt")).expect("e2e: rename gleicher Ordner");
+    fs.rename(&p("hallo2.txt"), &p("unter/hallo3.txt")).expect("e2e: rename ordneruebergreifend");
+    fs.schreiben(&p("ziel.txt"), b"wird ersetzt").expect("e2e: schreiben ziel");
+    fs.rename(&p("unter/hallo3.txt"), &p("ziel.txt")).expect("e2e: rename Ziel ersetzen");
+
+    fs.sync().expect("e2e: sync");
+}
+
+/// Prüft den End-Zustand von e2e_ops (nach optionalem Absturz+Remount):
+/// alle erwarteten Dateien mit erwartetem Inhalt, die weggerenamten weg.
+#[doc(hidden)]
+pub fn e2e_verifizieren(fs: &mut dyn crate::fs::FileSystem, basis: &str) {
+    let p = |name: &str| alloc::format!("{}/{}", basis, name);
+    // hallo.txt wanderte über die rename-Orgie nach ziel.txt (mit dem
+    // Inhalt der ersten Datei); die Zwischennamen existieren nicht mehr:
+    assert_eq!(fs.lesen(&p("ziel.txt")).expect("e2e-v: ziel"), b"Hallo SpeedOS");
+    assert!(fs.lesen(&p("hallo.txt")).is_err(), "e2e-v: hallo.txt sollte weg sein");
+    assert!(fs.lesen(&p("hallo2.txt")).is_err(), "e2e-v: hallo2.txt sollte weg sein");
+    assert!(fs.lesen(&p("unter/hallo3.txt")).is_err(), "e2e-v: hallo3 sollte weg sein");
+    // doc.txt (editiert) + tief.txt sind unverändert da:
+    assert_eq!(
+        fs.lesen(&p("doc.txt")).expect("e2e-v: doc"),
+        b"Zeile EINS\nZeile zwei\nZeile drei\n"
+    );
+    assert_eq!(fs.lesen(&p("unter/tief.txt")).expect("e2e-v: tief"), b"tief verschachtelt");
+}
+
+// ---------------------------------------------------------------------------
 // Tests — auf der RamDisk (schnell, ohne QEMU-Neustart)
 // ---------------------------------------------------------------------------
 
@@ -1857,6 +1928,40 @@ mod tests {
         crate::serial_println!(
             "[FOLTER-VOLL] 80 Abschneide-Punkte auf fast voller Platte, 0 Defekte."
         );
+    }
+
+    /// Großer End-to-End-Test auf der RamDisk: mkfs -> Dateien ->
+    /// Editor-Roundtrip -> rename-Orgie -> ABSTURZ (Drop) -> Wiedermount
+    /// -> pruefen (0 Defekte, 0 Lecks) -> alles noch da. Dieselbe
+    /// Sequenz (e2e_ops) läuft gegen IDE und virtio in
+    /// tests/e2e_speedfs.rs.
+    #[test_case]
+    fn test_speedfs_e2e_ramdisk() {
+        let disk = Arc::new(spin::Mutex::new(RamDisk::neu(512, 16384))); // 8 MiB
+        formatieren(&mut *disk.lock()).unwrap();
+        {
+            let wrapper = AbsturzDisk {
+                disk: disk.clone(),
+                budget: Arc::new(AtomicI64::new(i64::MAX)),
+            };
+            let mut fs = SpeedFs::mounten(Box::new(wrapper)).map_err(|(f, _)| f).unwrap();
+            e2e_ops(&mut fs, "/e2e");
+            // Drop = Absturz nach getaner Arbeit (Cache weg; write-through
+            // -> die RamDisk trägt bereits alles).
+        }
+        let frisch = AbsturzDisk {
+            disk,
+            budget: Arc::new(AtomicI64::new(i64::MAX)),
+        };
+        let mut fs = SpeedFs::mounten(Box::new(frisch)).map_err(|(f, _)| f).unwrap();
+        let bericht = fs.pruefen(false).unwrap();
+        assert!(
+            bericht.defekte.is_empty() && !bericht.hat_lecks(),
+            "E2E nach Absturz nicht sauber: Defekte {:?}, Lecks {:?}",
+            bericht.defekte,
+            bericht.block_lecks
+        );
+        e2e_verifizieren(&mut fs, "/e2e");
     }
 
     /// Einstellungen überleben einen SIMULIERTEN Neustart
