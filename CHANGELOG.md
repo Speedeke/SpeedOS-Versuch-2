@@ -5,6 +5,51 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### Serie-4-Abschluss: Persistenz-Tests + Performance-Zahlen
+- **Neue Tests der Persistenz-Schicht** (die kritischsten Lücken):
+  - `test_speedfs_mount_fehlerpfade`: jeder Mount-Fehler kommt sauber
+    (unformatiert → KeinSpeedFs, zu klein → formatieren gibt Voll,
+    krumme Sektorgröße → Io, kaputter Superblock → KeinSpeedFs).
+  - `test_speedfs_voll_sauber`: volle Platte → `FsFehler::Voll` sauber,
+    vorherige Dateien Bit-für-Bit intakt, fsck 0 Defekte (die
+    alles-oder-nichts-Allokation ändert bei Platzmangel nichts).
+    (Es gibt bewusst kein `IoFehler::KeinPlatz` — ein fixes Blockgerät
+    ist nie „voll", nur das Dateisystem.)
+  - `test_speedfs_folter_fast_voll`: der Folter-Test auf FAST VOLLER
+    Platte — die Op-Serie trifft unterwegs Voll UND der Absturz
+    schneidet an jeder Stelle: 80 Abschneide-Punkte, 0 Defekte.
+- **Großer End-to-End-Test** als automatisierter Ablauf (geteilte
+  Sequenz `speedfs::e2e_ops`): mkfs → Dateien → Editor-Roundtrip
+  (write_at/read_at + Editieren) → rename-Orgie → Absturz → fsck →
+  alles noch da. Läuft als Unit-Test (RamDisk, inkl. Absturz-Simulation)
+  UND als `tests/e2e_speedfs.rs` gegen die ECHTE Platte — **IDE und
+  virtio** (SPEEDOS_PLATTE), non-destruktiv im Unterbaum /platte/e2e.
+  146 Lib-Tests grün (vorher 142) + der neue Integrationstest.
+- **Performance-Zahlen (final):**
+
+  *plattentest* (2 MiB sequenziell + 100 × 4 KiB zufällig):
+
+  | Operation           | virtio-blk  | IDE-PIO   | Faktor |
+  |---------------------|-------------|-----------|--------|
+  | seq. schreiben      | 324,51 MiB/s| 0,21 MiB/s| ~1545× |
+  | seq. lesen          | 1808,31 MiB/s| 0,21 MiB/s| ~8600× |
+  | zufällig schreiben  | 15,28 MiB/s | 0,21 MiB/s| ~73×   |
+  | zufällig lesen      | 39,05 MiB/s | 0,21 MiB/s| ~186×  |
+
+  Bestätigt die Architektur-Wahl: virtio ist DER Standard, IDE bleibt
+  nur für die volle ATA-Treiber-Abdeckung (tests/ata_platte.rs) wählbar.
+
+  *Compositing* (Berichts-Tests, aktuelle Messung): Editor-Tippen
+  ALT 2156 µs → **NEU 222 µs** (~10×, das Dirty-Rect-Ergebnis hält),
+  Terminal-Ausgabe ALT 1651 µs → NEU 912 µs, Uhr-Tick 244 µs,
+  Fenster-Blit Pro-Pixel 25295 µs → Zeilenkopie **4424 µs** (~5,7×).
+- **Schlimmster verbliebener Fresser: der IDE-PIO-Pfad** (0,21 MiB/s).
+  Ursache ist ARCHITEKTONISCH — jedes 16-Bit-Wort kostet einen
+  Port-I/O-VM-Exit; das lässt sich mit PIO nicht auf <1 Tag beheben
+  (LBA48-DMA/Bus-Master wäre ein eigenes Projekt). Da virtio der
+  Standard ist und IDE nur der Test-Abdeckung dient, bleibt es bewusst
+  stehen — benannt, nicht „gefixt".
+
 ### SpeedOS bootet vom USB-Stick (Live-System) + Diagnose-Modus
 - `cargo image` (neuer Alias + Host-Binary `boot/src/bin/live-image.rs`)
   baut **`speedos-live.img`** — ein bootfähiges UEFI-GPT-Image mit
