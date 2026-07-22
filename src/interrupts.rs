@@ -139,6 +139,14 @@ lazy_static! {
         idt[InterruptIndex::Timer.as_usize()].set_handler_fn(timer_interrupt_handler);
         idt[InterruptIndex::Keyboard.as_usize()].set_handler_fn(keyboard_interrupt_handler);
         idt[InterruptIndex::Maus.as_usize()].set_handler_fn(maus_interrupt_handler);
+        // PCI-Interrupts (virtio-net, Serie 5): Welche IRQ das Gerät
+        // bekommt, steht erst nach der PCI-Enumeration fest. Wir
+        // registrieren die typischen PCI-Vektoren (IRQ 9/10/11 am
+        // zweiten PIC) statisch und schalten zur Laufzeit nur die
+        // tatsächlich benutzte per irq_freischalten() frei.
+        idt[(PIC_2_OFFSET + 1) as usize].set_handler_fn(virtio_pci_irq9);
+        idt[(PIC_2_OFFSET + 2) as usize].set_handler_fn(virtio_pci_irq10);
+        idt[(PIC_2_OFFSET + 3) as usize].set_handler_fn(virtio_pci_irq11);
         idt
     };
 }
@@ -280,6 +288,51 @@ extern "x86-interrupt" fn maus_interrupt_handler(_stack_frame: InterruptStackFra
         PICS.lock()
             .notify_end_of_interrupt(InterruptIndex::Maus.as_u8());
     }
+}
+
+/// PCI-IRQ-Handler (virtio-net): drei Einstiegspunkte für die typischen
+/// PCI-Leitungen IRQ 9/10/11 — jeder kennt seinen eigenen Vektor.
+extern "x86-interrupt" fn virtio_pci_irq9(_stack_frame: InterruptStackFrame) {
+    pci_virtio_irq(PIC_2_OFFSET + 1);
+}
+extern "x86-interrupt" fn virtio_pci_irq10(_stack_frame: InterruptStackFrame) {
+    pci_virtio_irq(PIC_2_OFFSET + 2);
+}
+extern "x86-interrupt" fn virtio_pci_irq11(_stack_frame: InterruptStackFrame) {
+    pci_virtio_irq(PIC_2_OFFSET + 3);
+}
+
+/// Gemeinsamer PCI-IRQ-Pfad (das erste ASYNCHRONE Hardware-Event
+/// jenseits von Tastatur/Maus/Timer): das virtio-net-Gerät prüfen (hat
+/// ES interruptet? — Shared Interrupts) und ggf. den RX-Task wecken,
+/// dann EOI. Minimal wie alle Handler: KEIN Lock auf Treiber-Zustand,
+/// KEINE Allokation.
+fn pci_virtio_irq(vektor: u8) {
+    crate::virtio::net::irq_pruefen_und_wecken();
+    // unsafe: korrekte Vektor-Nummer — der Handler ist genau dort
+    // registriert; notify_end_of_interrupt behandelt die Kaskade selbst.
+    unsafe {
+        PICS.lock().notify_end_of_interrupt(vektor);
+    }
+}
+
+/// Schaltet eine EINZELNE IRQ am 8259-PIC frei (löscht ihr Maskenbit,
+/// andere bleiben unberührt). Für Geräte, deren IRQ erst zur Laufzeit
+/// feststeht (PCI-Enumeration) — lib::init() maskiert anfangs alles
+/// außer Timer/Tastatur/Kaskade/Maus.
+pub fn irq_freischalten(irq: u8) {
+    use x86_64::instructions::port::Port;
+    // IRQ 0-7 hängen am ersten PIC (Datenport 0x21), 8-15 am zweiten (0xA1).
+    let (port_nr, bit) = if irq < 8 { (0x21u16, irq) } else { (0xA1u16, irq - 8) };
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut port: Port<u8> = Port::new(port_nr);
+        // unsafe (Port-I/O): PIC-Datenregister — aktuelle Maske lesen,
+        // genau das eine Bit löschen, zurückschreiben.
+        unsafe {
+            let maske = port.read();
+            port.write(maske & !(1u8 << bit));
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------

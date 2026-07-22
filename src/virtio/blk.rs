@@ -341,6 +341,11 @@ pub fn init() {
         return;
     }
     let vq = Virtqueue::neu(queue_size);
+    // Diese Queue wird GEPOLLT (siehe auftrag) — das Gerät soll dafür
+    // nie interrupten. Wichtig, seit virtio-net eine PCI-IRQ-Leitung
+    // benutzt: läge blk auf derselben Leitung, gäbe es sonst einen
+    // Interrupt-Sturm bei jeder Platten-Operation.
+    vq.interrupts_aus();
     let pfn = (vq.phys_basis().as_u64() >> 12) as u32;
     // unsafe (Port-I/O): Queue-Address-Register erwartet die Page-Nummer.
     unsafe { Port::<u32>::new(io_basis + REG_QUEUE_ADDRESS).write(pfn) };

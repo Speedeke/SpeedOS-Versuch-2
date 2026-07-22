@@ -238,6 +238,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     executor.spawn(Task::new("Konsolen-Cursor", konsole::cursor_blink_task()));
     executor.spawn(Task::new("Log-Schreiber", speed_os::protokoll::log_task()));
     executor.spawn(Task::new("PS/2-Maus", speed_os::maus::maus_task()));
+    executor.spawn(Task::new("virtio-net-RX", speed_os::virtio::net::rx_task()));
     executor.spawn(
         Task::new("Compositor", speed_os::fenster::compositor_task()).mit_art(TaskArt::Fenster),
     );

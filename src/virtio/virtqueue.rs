@@ -163,6 +163,39 @@ impl Virtqueue {
         self.groesse
     }
 
+    /// Bittet das Gerät, für diese Queue KEINE Interrupts auszulösen
+    /// (VIRTQ_AVAIL_F_NO_INTERRUPT = Bit 0 der avail.flags). Für
+    /// GEPOLLTE Queues: virtio-blk und die ungenutzte TX-Queue von
+    /// virtio-net — sonst würde das Gerät bei jedem Used-Eintrag
+    /// interrupten und könnte auf einer geteilten PCI-Leitung stören.
+    /// Einmal beim Aufsetzen aufrufen (das Gerät liest avail.flags,
+    /// bevor es interruptet).
+    pub fn interrupts_aus(&self) {
+        // avail.flags liegt ganz am Anfang des Available-Rings.
+        // unsafe: avail.flags-Feld, volatil (das Gerät liest es).
+        unsafe {
+            let flags = self.basis.as_mut_ptr::<u8>().add(avail_offset(self.groesse)) as *mut u16;
+            core::ptr::write_volatile(flags, 1);
+        }
+    }
+
+    /// NUR FÜR TESTS: spielt das GERÄT und legt ein erledigtes Element
+    /// in den Used-Ring (Kopf der Kette + geschriebene Länge), erhöht
+    /// used.idx — so lässt sich die Ring-Verwaltung ohne echte Hardware
+    /// durchspielen (wie im virtio-net-RxRing-Test).
+    #[cfg(test)]
+    pub(crate) fn test_geraet_erledigt(&self, kopf: u16, laenge: u32) {
+        // unsafe: Used-Ring von Hand beschreiben, wie es das Gerät täte.
+        unsafe {
+            let idx = core::ptr::read_volatile(self.used_idx_ptr());
+            let slot = idx % self.groesse;
+            let el = self.used_element_ptr(slot);
+            core::ptr::write_volatile(el, kopf as u32);
+            core::ptr::write_volatile(el.add(1), laenge);
+            core::ptr::write_volatile(self.used_idx_ptr(), idx.wrapping_add(1));
+        }
+    }
+
     // --- Roh-Zeiger auf die einzelnen Ring-Felder ------------------------
     // Alle Zugriffe laufen über read_volatile/write_volatile, weil das
     // Gerät dieselben Bytes per DMA liest/schreibt — der Compiler darf

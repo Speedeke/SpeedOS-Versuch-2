@@ -106,6 +106,31 @@
   überspringt es seine Daten-Tests sauber). main.rs: pci::init +
   virtio::blk::init laufen NACH der Heap-Erweiterung (die Virtqueue
   alloziert), VOR den Auto-Mounts.
+- **virtio-net RX (Serie 5, Juli 2026, `src/virtio/net.rs`) — der erste
+  INTERRUPT-getriebene Empfang:** Nur EMPFANGEN + Hexdumpen, KEIN Stack
+  (Fahrplan: docs/serie5-netzwerk.md). Legacy-Init wie blk, aber MEHRERE
+  Queues (RX=0, TX=1) und INTERRUPTS statt Polling — RX-Pakete kommen
+  unaufgefordert. Die Virtqueue wird UNVERÄNDERT weiterbenutzt. RX-Queue
+  hält 16 gerätebeschreibbare DMA-Puffer (kein Bounce, wir besitzen
+  sie); `RxRing` führt Kopf→Puffer und stellt nach dem Verbrauch wieder
+  ein. IRQ-PFAD (Tastatur-/Maus-Muster): interrupts.rs registriert
+  Handler für die PCI-Vektoren 41/42/43 (IRQ 9/10/11), liest im Handler
+  das ISR-Register (0x13, quittiert + sagt „waren WIR es?" bei Shared
+  Interrupts) und weckt per AtomicWaker den async `rx_task` — KEIN Lock/
+  keine Allokation im Handler, wie bei Tastatur. `interrupts::
+  irq_freischalten(irq)` schaltet die zur Laufzeit gefundene IRQ am PIC
+  frei (in `net::init`, nicht `lib::init` — die IRQ steht erst nach der
+  PCI-Enumeration fest; QEMU-i440fx gibt der NIC IRQ 11). Der gepollte
+  virtio-blk bekommt `Virtqueue::interrupts_aus()`
+  (VIRTQ_AVAIL_F_NO_INTERRUPT), damit er nie interruptet (Sturm-Schutz
+  auf geteilter Leitung). Der IO_BASIS ist eine globale AtomicU16, damit
+  der Handler das ISR lock-frei lesen kann. RUNNER: `-netdev user +
+  virtio-net-pci` (slirp-NAT, immer, auch im Test — der PCI-Fund-Test
+  braucht die NIC); SPEEDOS_NET_DUMP=1 → filter-dump-pcap. Shell:
+  `netz-lausch` (Hexdump an/aus); weil slirp REAKTIV ist, sendet es beim
+  Einschalten EIN statisches Broadcast-ARP-Frame (TX-Poke) → slirp
+  antwortet → sichtbarer Empfang. main.rs: net::init NACH blk::init,
+  rx_task im Executor gespawnt.
 - **FAT32-Treiber (Juli 2026, `src/fs/fat32.rs`) — NUR LESEN:**
   SpeedOS liest fremde FAT32-Medien ("der USB-Stick"), schreibt sie
   aber NIE (jeder Schreib-Weg -> `IoFehler::NurLesen`). Kein/kaputtes

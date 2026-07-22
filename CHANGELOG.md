@@ -5,6 +5,38 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### Serie 5 beginnt: virtio-net — interrupt-getriebener Empfang (RX, kein Stack)
+- **Der erste ASYNCHRONE Hardware-Event jenseits von Tastatur/Maus/
+  Timer.** Netzwerk-Pakete kommen unaufgefordert — man kann sie nicht
+  wie die Platte pollen, sie müssen INTERRUPTS auslösen. Bewusst klein:
+  nur empfangen + hexdumpen, KEIN Stack (ARP/IP/TCP sind der Fahrplan
+  aus `docs/serie5-netzwerk.md`).
+- **`src/virtio/net.rs`** (Muster: `blk.rs`): findet die NIC per
+  `pci::finde` (0x1AF4:0x1000), Legacy-Init wie blk (Reset→ACK→DRIVER→
+  Features→Queues→DRIVER_OK), MAC aus der Device-Config. RX-Queue (0)
+  mit 16 gerätebeschreibbaren DMA-Puffern (kein Bounce — wir besitzen
+  sie); die `RxRing`-Struct führt die Kopf→Puffer-Zuordnung und stellt
+  Puffer nach dem Verbrauch wieder ein. Die **Virtqueue wird UNVERÄNDERT
+  weiterbenutzt** (die Serie-4-Vorhersage stimmt).
+- **IRQ-Pfad** (exakt das Tastatur-/Maus-Muster): IDT-Handler für die
+  PCI-Vektoren 41/42/43 (IRQ 9/10/11); der Handler liest das
+  ISR-Register (quittiert das Gerät, sagt „waren WIR es?" — Shared
+  Interrupts) und weckt per `AtomicWaker` einen async `rx_task` — KEIN
+  Lock im Handler. `interrupts::irq_freischalten(irq)` schaltet die zur
+  Laufzeit gefundene IRQ am PIC frei. Der gepollte virtio-blk bekommt
+  `Virtqueue::interrupts_aus()` (VIRTQ_AVAIL_F_NO_INTERRUPT), damit er
+  auf keiner geteilten Leitung stört.
+- **`netz-lausch`** (Shell): schaltet den Frame-Hexdump an/aus (Ziel-/
+  Quell-MAC, EtherType annotiert). Da QEMUs user-Netz (slirp) reaktiv
+  ist, sendet es beim Einschalten EIN statisches Broadcast-ARP-Frame —
+  slirp antwortet, der Empfang wird sichtbar (kein Stack, ein
+  42-Byte-Frame).
+- **Meilenstein verifiziert:** `[virtio-net] Bereit: MAC …, IRQ 11`, dann
+  `netz-lausch` → `[netz] Frame 64 Byte | Ziel … | Quelle 52:55:0a:00:
+  02:02 | EtherType 0x0806 (ARP)` samt Hexdump des ARP-Reply. Tests:
+  Header-Längen-Logik, RX-Ringführung (ohne Gerät), PCI-Fund. `cargo
+  clippy --all-targets` warnungsfrei.
+
 ### Serie-4-Abschluss: Persistenz-Tests + Performance-Zahlen
 - **Neue Tests der Persistenz-Schicht** (die kritischsten Lücken):
   - `test_speedfs_mount_fehlerpfade`: jeder Mount-Fehler kommt sauber

@@ -81,6 +81,7 @@ pub fn alle_befehle() -> Vec<Box<dyn Befehl>> {
         Box::new(SyncBefehl),
         Box::new(PruefeSpeedfs),
         Box::new(Plattentest),
+        Box::new(NetzLausch),
     ]
 }
 
@@ -1147,5 +1148,33 @@ impl Befehl for Plattentest {
             Ok(zufall_anzahl * zufall_bytes as u64)
         });
         println!("Fertig. (Backend: siehe 'platten' — IDE oder virtio.)");
+    }
+}
+
+/// netz-lausch — schaltet den Hexdump empfangener Ethernet-Frames an/aus
+/// (Serie 5: interrupt-getriebener Empfang, noch KEIN Stack). Beim
+/// Einschalten wird ein ARP-Poke gesendet, damit das reaktive
+/// QEMU-user-Netz (slirp) antwortet und Frames sichtbar werden.
+struct NetzLausch;
+
+impl Befehl for NetzLausch {
+    fn name(&self) -> &'static str {
+        "netz-lausch"
+    }
+    fn beschreibung(&self) -> &'static str {
+        "Empfangene Ethernet-Frames hexdumpen (an/aus); sendet einen ARP-Poke"
+    }
+    fn ausfuehren(&self, _argumente: &str, _kontext: &mut ShellKontext, _registry: &[Box<dyn Befehl>]) {
+        if !crate::virtio::net::vorhanden() {
+            konsole::set_color(Color::Yellow, Color::Black);
+            println!("Keine virtio-net-NIC vorhanden.");
+            konsole::set_color(Color::LightGray, Color::Black);
+            return;
+        }
+        if crate::virtio::net::lausch_umschalten() {
+            println!("netz-lausch AN - ARP-Poke gesendet; empfangene Frames werden gehexdumpt.");
+        } else {
+            println!("netz-lausch AUS.");
+        }
     }
 }
