@@ -14,4 +14,5 @@
 // `virtqueue` unverändert weiterbenutzen.
 
 pub mod blk;
+pub mod net;
 pub mod virtqueue;

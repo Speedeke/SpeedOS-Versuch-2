@@ -139,9 +139,12 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     //    PCI enumerieren und den virtio-blk-Treiber aufsetzen (falls
     //    QEMU die Daten-Platte per virtio statt IDE anbietet). Danach
     //    entscheidet fs::daten_geraet(), welches Backend /platte trägt.
-    speed_os::diagnose::schritt(format_args!("[2/4] PCI-Bus + virtio-blk ..."));
+    speed_os::diagnose::schritt(format_args!("[2/4] PCI-Bus + virtio-blk + virtio-net ..."));
     speed_os::pci::init();
     speed_os::virtio::blk::init();
+    // virtio-net (Serie 5): NIC finden + RX-Empfang aufsetzen (nur
+    // hexdumpen, kein Stack). Kein Gerät -> stille Rückkehr.
+    speed_os::virtio::net::init();
 
     //    Dateisystem: RamFs als Wurzel mounten (mit Demo-Dateien),
     //    dann die Daten-Platte AUTO-MOUNTEN (SpeedFS auf /platte;

@@ -216,6 +216,21 @@ fn main() {
              andere Groesse: SPEEDOS_AUFLOESUNG=1080p|2k|4k|8k|BREITExHOEHE"
         );
     }
+    // virtio-net-NIC (Serie 5): USER-MODE-Networking (slirp) — ein
+    // NAT-Netz OHNE Root-Rechte. Immer angehaengt (auch im Test, damit
+    // der PCI-Fund-Test das Geraet sieht; slirp ist harmlos und
+    // reaktiv). SPEEDOS_NET_DUMP=1 schreibt zusaetzlich einen
+    // pcap-Mitschnitt fuer die Wireshark-Gegenpruefung.
+    qemu.arg("-netdev").arg("user,id=net0");
+    qemu.arg("-device").arg("virtio-net-pci,netdev=net0");
+    if std::env::var("SPEEDOS_NET_DUMP").map(|v| v == "1").unwrap_or(false) {
+        qemu.arg("-object")
+            .arg("filter-dump,id=netdump0,netdev=net0,file=speedos-net.pcap");
+        if !test_modus {
+            eprintln!("[Runner] SPEEDOS_NET_DUMP=1 — Mitschnitt nach speedos-net.pcap.");
+        }
+    }
+
     // Die serielle Schnittstelle ist unser Debug-Lebensnerv:
     // immer ins Terminal spiegeln.
     qemu.arg("-serial").arg("stdio");
