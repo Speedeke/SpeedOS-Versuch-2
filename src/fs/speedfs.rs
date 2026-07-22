@@ -1546,6 +1546,104 @@ mod tests {
         );
     }
 
+    /// Mount-Fehlerpfade: jeder Fehler kommt SAUBER (kein Panic) und
+    /// gibt das Gerät im Fehler-Tupel zurück, damit der Aufrufer es
+    /// z. B. formatieren kann (die Naht, die platte_automounten nutzt).
+    #[test_case]
+    fn test_speedfs_mount_fehlerpfade() {
+        // (a) Unformatierte (genullte) Platte -> KeinSpeedFs.
+        let disk = RamDisk::neu(512, 4096); // 2 MiB, alles Null
+        match SpeedFs::mounten(Box::new(disk)) {
+            Err((FsFehler::KeinSpeedFs, _zurueck)) => {}
+            Err((f, _)) => panic!("unformatiert: erwartete KeinSpeedFs, kam {:?}", f),
+            Ok(_) => panic!("eine unformatierte Platte darf nicht mounten"),
+        }
+
+        // (b) Zu kleines Gerät (1 Block) -> formatieren gibt Voll,
+        //     statt beim Layout zu panicken.
+        let mut winzig = RamDisk::neu(512, 8); // genau 1 Block (4 KiB)
+        assert_eq!(formatieren(&mut winzig), Err(FsFehler::Voll));
+
+        // (c) Krumme Sektorgröße (BLOCK_GROESSE nicht durch sie teilbar)
+        //     -> Io(UngueltigePufferGroesse), noch VOR dem ersten Lesen.
+        let krumm = RamDisk::neu(513, 100);
+        match SpeedFs::mounten(Box::new(krumm)) {
+            Err((FsFehler::Io(crate::fs::block::IoFehler::UngueltigePufferGroesse), _)) => {}
+            Err((f, _)) => panic!("krumme Sektorgröße: erwartete Io, kam {:?}", f),
+            Ok(_) => panic!("krumme Sektorgröße darf nicht mounten"),
+        }
+
+        // (d) Kaputter Superblock (formatiert, dann Magic gekippt) ->
+        //     KeinSpeedFs (die Superblock-Validierung greift).
+        let mut disk2 = RamDisk::neu(512, 4096);
+        formatieren(&mut disk2).unwrap();
+        let mut block0 = vec![0u8; 512];
+        disk2.lese_sektoren(0, &mut block0).unwrap();
+        block0[0] ^= 0xFF; // Magic-Byte zerstören
+        disk2.schreibe_sektoren(0, &block0).unwrap();
+        match SpeedFs::mounten(Box::new(disk2)) {
+            Err((FsFehler::KeinSpeedFs, _)) => {}
+            Err((f, _)) => panic!("kaputter Superblock: erwartete KeinSpeedFs, kam {:?}", f),
+            Ok(_) => panic!("kaputter Superblock darf nicht mounten"),
+        }
+    }
+
+    /// Volle Platte: der Schreib-Pfad liefert SAUBER FsFehler::Voll,
+    /// korrumpiert NICHTS (vorherige Dateien bleiben Bit-für-Bit
+    /// erhalten) und der fsck findet danach keine Defekte. Genau das
+    /// garantiert die alles-oder-nichts-Allokation (bloecke_allozieren).
+    #[test_case]
+    fn test_speedfs_voll_sauber() {
+        let mut disk = RamDisk::neu(512, 1024); // 512 KiB
+        formatieren(&mut disk).unwrap();
+        let mut fs = SpeedFs::mounten(Box::new(disk)).map_err(|(f, _)| f).unwrap();
+
+        // Zwei "unantastbare" Dateien anlegen und Inhalte merken:
+        fs.schreiben("/bleibt1.txt", b"heiliger Inhalt").unwrap();
+        let gross_inhalt = vec![0xABu8; 5000]; // > 1 Block
+        fs.schreiben("/bleibt2.txt", &gross_inhalt).unwrap();
+        let ref1 = fs.lesen("/bleibt1.txt").unwrap();
+
+        // EINE wachsende Datei bis zur Datenblock-Erschöpfung (nur EIN
+        // Inode, damit wirklich die BLÖCKE ausgehen, nicht die Inodes):
+        let block = vec![0x55u8; BLOCK_GROESSE];
+        let mut off = 0usize;
+        let mut voll = false;
+        while off <= MAX_DATEI {
+            match fs.write_at("/fueller.bin", off, &block) {
+                Ok(n) => {
+                    assert!(n > 0, "write_at machte keinen Fortschritt");
+                    off += n;
+                }
+                Err(FsFehler::Voll) => {
+                    voll = true;
+                    break;
+                }
+                Err(e) => panic!("unerwarteter Fehler beim Füllen: {:?}", e),
+            }
+        }
+        assert!(voll, "die Datenblöcke wurden nie voll");
+
+        // (1) Eine NEUE Datei auf der vollen Platte -> sauber Voll:
+        assert_eq!(
+            fs.schreiben("/geht_nicht.txt", b"kein Platz"),
+            Err(FsFehler::Voll)
+        );
+        // (2) Die unantastbaren Dateien sind UNVERÄNDERT:
+        assert_eq!(fs.lesen("/bleibt1.txt").unwrap(), ref1);
+        assert_eq!(fs.lesen("/bleibt2.txt").unwrap(), gross_inhalt);
+
+        // (3) fsck (write-through -> Platte ist konsistent): keine
+        //     Defekte (Lecks wären erlaubt; hier gibt es dank
+        //     alles-oder-nichts gar keine).
+        let bericht = fs.pruefen(false).unwrap();
+        assert!(
+            bericht.defekte.is_empty(),
+            "volle Platte hinterließ DEFEKTE: {:?}",
+            bericht.defekte
+        );
+    }
+
     // --- Der Folter-Test: Absturz nach N Schreibvorgängen --------------
 
     use alloc::sync::Arc;
@@ -1682,6 +1780,82 @@ mod tests {
             "[FOLTER] {} Abschneide-Punkte geprueft, {} mit (reparierten) Lecks, 0 Defekte.",
             gesamt,
             laeufe_mit_lecks
+        );
+    }
+
+    /// Wie folter_lauf, aber die Platte ist schon FAST VOLL, bevor die
+    /// Op-Serie startet: erst große Füller schreiben (persistent, außer-
+    /// halb des Budgets), bis Voll, dann EINEN wieder löschen — so
+    /// bleiben nur wenige Blöcke frei (aber reichlich Inodes). Die
+    /// Op-Serie trifft dann unterwegs FsFehler::Voll. Liefert den
+    /// Bericht vor jeder Reparatur.
+    fn folter_lauf_fast_voll(budget_start: i64) -> PruefBericht {
+        let disk = Arc::new(spin::Mutex::new(RamDisk::neu(512, 512))); // 256 KiB
+        formatieren(&mut *disk.lock()).expect("mkfs fehlgeschlagen");
+
+        // Fast voll machen (persistent, außerhalb des Budgets):
+        {
+            let wrapper = AbsturzDisk {
+                disk: disk.clone(),
+                budget: Arc::new(AtomicI64::new(i64::MAX)),
+            };
+            let mut fs = SpeedFs::mounten(Box::new(wrapper)).map_err(|(f, _)| f).unwrap();
+            let brocken = vec![0x33u8; 4 * BLOCK_GROESSE]; // 4 Blöcke je Datei
+            let mut i = 0;
+            while i < 30 && fs.schreiben(&alloc::format!("/f{}", i), &brocken).is_ok() {
+                i += 1;
+            }
+            assert!(i >= 2, "Vorfüllen hat zu wenig geschrieben (Platte zu klein?)");
+            fs.loeschen("/f0").unwrap(); // 4 Blöcke wieder frei
+            fs.sync().unwrap();
+        }
+
+        // Budgetierter Lauf mit "Absturz" (Drop des FS):
+        {
+            let wrapper = AbsturzDisk {
+                disk: disk.clone(),
+                budget: Arc::new(AtomicI64::new(budget_start)),
+            };
+            let mut fs = SpeedFs::mounten(Box::new(wrapper)).map_err(|(f, _)| f).unwrap();
+            folter_serie(&mut fs);
+        }
+
+        // Wiedermount vom rohen Platten-Stand, dann prüfen:
+        let frisch = AbsturzDisk {
+            disk,
+            budget: Arc::new(AtomicI64::new(i64::MAX)),
+        };
+        let fs = SpeedFs::mounten(Box::new(frisch)).map_err(|(f, _)| f).unwrap();
+        fs.pruefen(false).expect("pruefen fehlgeschlagen")
+    }
+
+    /// Folter-Variante auf FAST VOLLER Platte: die Op-Serie läuft
+    /// unterwegs in FsFehler::Voll UND der Absturz schneidet an jeder
+    /// Stelle. Invariante wie beim großen Folter-Test: Lecks erlaubt,
+    /// Defekte NIE — die §7-Ordering-Disziplin gilt auch unter
+    /// Platzmangel (eine gescheiterte Allokation ändert nichts).
+    #[test_case]
+    fn test_speedfs_folter_fast_voll() {
+        // Referenzlauf ohne Absturz: keine Defekte (Lecks hier möglich,
+        // weil Ops an Voll scheitern dürfen).
+        let sauber = folter_lauf_fast_voll(1_000_000);
+        assert!(
+            sauber.defekte.is_empty(),
+            "Referenz (fast voll) defekt: {:?}",
+            sauber.defekte
+        );
+        // Jeden Abschneide-Punkt der Op-Serie durchprobieren:
+        for n in 0..80 {
+            let bericht = folter_lauf_fast_voll(n);
+            assert!(
+                bericht.defekte.is_empty(),
+                "Fast-voll-Absturz nach {} Writes hinterlaesst DEFEKTE: {:?}",
+                n,
+                bericht.defekte
+            );
+        }
+        crate::serial_println!(
+            "[FOLTER-VOLL] 80 Abschneide-Punkte auf fast voller Platte, 0 Defekte."
         );
     }
 
