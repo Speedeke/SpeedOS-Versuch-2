@@ -44,6 +44,7 @@ pub mod interrupts;
 pub mod konsole;
 pub mod maus;
 pub mod memory;
+pub mod netz;
 pub mod pci;
 pub mod protokoll;
 pub mod rtc;

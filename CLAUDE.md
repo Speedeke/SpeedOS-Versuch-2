@@ -106,31 +106,47 @@
   überspringt es seine Daten-Tests sauber). main.rs: pci::init +
   virtio::blk::init laufen NACH der Heap-Erweiterung (die Virtqueue
   alloziert), VOR den Auto-Mounts.
-- **virtio-net RX (Serie 5, Juli 2026, `src/virtio/net.rs`) — der erste
-  INTERRUPT-getriebene Empfang:** Nur EMPFANGEN + Hexdumpen, KEIN Stack
-  (Fahrplan: docs/serie5-netzwerk.md). Legacy-Init wie blk, aber MEHRERE
-  Queues (RX=0, TX=1) und INTERRUPTS statt Polling — RX-Pakete kommen
-  unaufgefordert. Die Virtqueue wird UNVERÄNDERT weiterbenutzt. RX-Queue
-  hält 16 gerätebeschreibbare DMA-Puffer (kein Bounce, wir besitzen
-  sie); `RxRing` führt Kopf→Puffer und stellt nach dem Verbrauch wieder
-  ein. IRQ-PFAD (Tastatur-/Maus-Muster): interrupts.rs registriert
-  Handler für die PCI-Vektoren 41/42/43 (IRQ 9/10/11), liest im Handler
-  das ISR-Register (0x13, quittiert + sagt „waren WIR es?" bei Shared
-  Interrupts) und weckt per AtomicWaker den async `rx_task` — KEIN Lock/
-  keine Allokation im Handler, wie bei Tastatur. `interrupts::
-  irq_freischalten(irq)` schaltet die zur Laufzeit gefundene IRQ am PIC
-  frei (in `net::init`, nicht `lib::init` — die IRQ steht erst nach der
-  PCI-Enumeration fest; QEMU-i440fx gibt der NIC IRQ 11). Der gepollte
-  virtio-blk bekommt `Virtqueue::interrupts_aus()`
-  (VIRTQ_AVAIL_F_NO_INTERRUPT), damit er nie interruptet (Sturm-Schutz
-  auf geteilter Leitung). Der IO_BASIS ist eine globale AtomicU16, damit
-  der Handler das ISR lock-frei lesen kann. RUNNER: `-netdev user +
-  virtio-net-pci` (slirp-NAT, immer, auch im Test — der PCI-Fund-Test
-  braucht die NIC); SPEEDOS_NET_DUMP=1 → filter-dump-pcap. Shell:
-  `netz-lausch` (Hexdump an/aus); weil slirp REAKTIV ist, sendet es beim
-  Einschalten EIN statisches Broadcast-ARP-Frame (TX-Poke) → slirp
-  antwortet → sichtbarer Empfang. main.rs: net::init NACH blk::init,
-  rx_task im Executor gespawnt.
+- **virtio-net + Netz-Stack (Serie 5, Juli 2026) — vom RX-Hexdump zur
+  Architektur-Naht:** Der Treiber `src/virtio/net.rs` ist Legacy-Init wie
+  blk, aber MEHRERE Queues (RX=0, TX=1) und INTERRUPTS statt Polling —
+  RX-Pakete kommen unaufgefordert. Die Virtqueue wird UNVERÄNDERT
+  weiterbenutzt. RX-Queue hält 16 gerätebeschreibbare DMA-Puffer (kein
+  Bounce, wir besitzen sie); `RxRing` führt Kopf→Puffer und stellt nach
+  dem Verbrauch wieder ein. IRQ-PFAD (Tastatur-/Maus-Muster):
+  interrupts.rs registriert Handler für die PCI-Vektoren 41/42/43 (IRQ
+  9/10/11), liest im Handler das ISR-Register (0x13, quittiert + sagt
+  „waren WIR es?" bei Shared Interrupts) und weckt — KEIN Lock/keine
+  Allokation im Handler. `interrupts::irq_freischalten(irq)` schaltet die
+  zur Laufzeit gefundene IRQ am PIC frei (in `net::init`, nicht
+  `lib::init` — die IRQ steht erst nach der PCI-Enumeration fest;
+  QEMU-i440fx gibt der NIC IRQ 11). Der gepollte virtio-blk bekommt
+  `Virtqueue::interrupts_aus()` (VIRTQ_AVAIL_F_NO_INTERRUPT), damit er nie
+  interruptet. IO_BASIS ist eine globale AtomicU16, damit der Handler das
+  ISR lock-frei liest. RUNNER: `-netdev user + virtio-net-pci` (slirp-NAT,
+  immer, auch im Test — der PCI-Fund-Test braucht die NIC);
+  SPEEDOS_NET_DUMP=1 → filter-dump-pcap.
+  **DIE NAHT: `netz::NetzGeraet`** (analog `BlockDevice`, `src/netz/`):
+  `mac()`, `sende_frame(&[u8])`, `empfange_frame()`. virtio-net
+  implementiert es und REGISTRIERT sich in der Netz-Schicht
+  (`geraet_registrieren`); der Stack redet NUR mit dem Trait (e1000/rtl8139
+  später ohne Stack-Änderung). Kein Treiber-`rx_task` mehr — den RX-Weg
+  treibt der Stack. SCHICHTEN: `netz/puffer.rs` (Leser/Schreiber,
+  grenzgeprüft, Big-Endian — von Ethernet UND ARP genutzt),
+  `netz/ethernet.rs` (Frame parse/bau + Hexdump, geräteunabhängig),
+  `netz/arp.rs` (IP↔MAC: Requests beantworten/senden, Cache mit
+  2-Min-Timeout — reine Logik, `jetzt_ms` übergeben), `netz/geraet.rs`
+  (NIC-Registry + RX-Waker). DER `netz_task` (main.rs, NACH blk::init):
+  vom IRQ geweckt, holt Frames vom NetzGeraet, dispatcht nach EtherType
+  (ARP → arp; IPv4 folgt). `netz::rx_verarbeiten()` ist SYNCHRON
+  aufrufbar, damit `arp-ping` den Empfang selbst pumpt (der kooperative
+  Executor gibt während eines Shell-Befehls keinem Task Zeit). Statische
+  IP-Konfig (DHCP später), Shell: `netz`, `netz-ip <ip> <maske>
+  <gateway>`, `netz-lausch`, `arp`, `arp-ping <ip>`. LOCK-ORDNUNG:
+  KONFIG/ARP_CACHE → GERAET (sende_frame nimmt nur GERAET); Dispatch
+  sammelt Frames EIN (GERAET-Lock los), bevor er antwortet — kein
+  verschachtelter Lock. Meilenstein „SpeedOS antwortet auf ARP" doppelt
+  bewiesen: Mock-NIC-Unit-Test + `tests/netz_arp.rs` gegen slirp
+  (arp-ping 10.0.2.2 → Gateway-MAC 52:55:0a:00:02:02).
 - **FAT32-Treiber (Juli 2026, `src/fs/fat32.rs`) — NUR LESEN:**
   SpeedOS liest fremde FAT32-Medien ("der USB-Stick"), schreibt sie
   aber NIE (jeder Schreib-Weg -> `IoFehler::NurLesen`). Kein/kaputtes

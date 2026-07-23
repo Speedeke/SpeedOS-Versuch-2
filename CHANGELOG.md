@@ -5,6 +5,47 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### Serie 5: Der Netz-Stack beginnt — NetzGeraet-Trait, Ethernet, ARP
+- **Die Architektur-Naht `netz::NetzGeraet`** (analog zu `BlockDevice`):
+  `mac()`, `sende_frame(&[u8])` und `empfange_frame()`. Der Stack redet ab
+  jetzt AUSSCHLIESSLICH mit diesem Trait — ein e1000/rtl8139 ließe sich
+  später ohne eine Zeile Stack-Änderung ergänzen. virtio-net implementiert
+  es und REGISTRIERT sich beim Boot (`geraet_registrieren`); der frühere
+  `rx_task` des Treibers ist weg, den RX-Weg treibt jetzt die Netz-Schicht.
+- **`src/netz/` mit klaren Schicht-Grenzen:**
+  - `puffer.rs` — die Byte-Puffer-Abstraktion: `Leser` (grenzgeprüft, gibt
+    `Option` statt zu panicken) und `Schreiber` (Big-Endian-Bau). Von
+    Ethernet UND ARP wiederverwendet.
+  - `ethernet.rs` — Schicht 2: Frames parsen/bauen (Ziel/Quelle/EtherType),
+    plus der Frame-Hexdump (geräteunabhängig, deshalb aus dem Treiber
+    hierher).
+  - `arp.rs` — Adressauflösung IP↔MAC: Pakete parsen/bauen, Requests
+    BEANTWORTEN (wer nach UNSERER IP fragt, bekommt unsere MAC), eigene
+    Requests SENDEN, ein ARP-Cache (IP→MAC) mit 2-Minuten-Timeout (reine,
+    testbare Logik — `jetzt_ms` wird übergeben).
+  - `geraet.rs` — die NIC-Registry + der RX-Weckmechanismus (Waker/Flag,
+    vom Geräte-IRQ gesetzt, wie bei Tastatur/Maus).
+- **Der async `netz_task` (Dreh- und Angelpunkt):** vom Geräte-IRQ geweckt,
+  holt die RX-Frames vom `NetzGeraet` und DISPATCHT sie nach EtherType
+  (ARP → arp-Modul; IPv4 folgt). Der IRQ-Handler bleibt minimal (nur ISR
+  quittieren + wecken). `rx_verarbeiten()` ist synchron aufrufbar, damit ein
+  Shell-Befehl den Empfang selbst „pumpen" kann (der kooperative Executor
+  gibt während eines Befehls keinem anderen Task Zeit).
+- **Statische IP-Konfiguration** (DHCP kommt später) + Shell-Befehle:
+  `netz` (NIC-Status/MAC/IP), `netz-ip <ip> <maske> <gateway>`,
+  `netz-lausch` (Hexdump an/aus), `arp` (Cache anzeigen),
+  `arp-ping <ip>` (MAC auflösen — sendet Request, pumpt bis Antwort/Timeout).
+- **MEILENSTEIN „SpeedOS antwortet auf ARP" doppelt verifiziert:**
+  (1) geräteunabhängig per Mock-NIC (`test_arp_antwort_meilenstein`): ein
+  ARP-Request nach unserer IP → genau eine korrekte Reply mit unserer MAC,
+  Frager gelernt; (2) ECHT gegen QEMUs slirp (`tests/netz_arp.rs`):
+  `arp-ping 10.0.2.2` löst das Gateway auf →
+  `[ARP-MEILENSTEIN] Gateway 10.0.2.2 ist bei 52:55:0a:00:02:02`.
+  Tests: Ethernet-Parse/Build, ARP-Parse/Build, ARP-Cache-Timeout,
+  Puffer-Roundtrip/Grenzen, Ipv4-Parse. 159 Lib-Tests grün (vorher 149) +
+  der neue Integrationstest `tests/netz_arp.rs`. `cargo clippy
+  --all-targets` warnungsfrei.
+
 ### Serie 5 beginnt: virtio-net — interrupt-getriebener Empfang (RX, kein Stack)
 - **Der erste ASYNCHRONE Hardware-Event jenseits von Tastatur/Maus/
   Timer.** Netzwerk-Pakete kommen unaufgefordert — man kann sie nicht

@@ -142,8 +142,9 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     speed_os::diagnose::schritt(format_args!("[2/4] PCI-Bus + virtio-blk + virtio-net ..."));
     speed_os::pci::init();
     speed_os::virtio::blk::init();
-    // virtio-net (Serie 5): NIC finden + RX-Empfang aufsetzen (nur
-    // hexdumpen, kein Stack). Kein Gerät -> stille Rückkehr.
+    // virtio-net (Serie 5): NIC finden, RX+TX aufsetzen und als
+    // NetzGeraet in der Netz-Schicht REGISTRIEREN (Ethernet/ARP reden
+    // ab jetzt nur mit dem Trait). Kein Gerät -> stille Rückkehr.
     speed_os::virtio::net::init();
 
     //    Dateisystem: RamFs als Wurzel mounten (mit Demo-Dateien),
@@ -238,7 +239,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     executor.spawn(Task::new("Konsolen-Cursor", konsole::cursor_blink_task()));
     executor.spawn(Task::new("Log-Schreiber", speed_os::protokoll::log_task()));
     executor.spawn(Task::new("PS/2-Maus", speed_os::maus::maus_task()));
-    executor.spawn(Task::new("virtio-net-RX", speed_os::virtio::net::rx_task()));
+    executor.spawn(Task::new("Netz-Dispatch", speed_os::netz::netz_task()));
     executor.spawn(
         Task::new("Compositor", speed_os::fenster::compositor_task()).mit_art(TaskArt::Fenster),
     );

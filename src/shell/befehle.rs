@@ -81,7 +81,12 @@ pub fn alle_befehle() -> Vec<Box<dyn Befehl>> {
         Box::new(SyncBefehl),
         Box::new(PruefeSpeedfs),
         Box::new(Plattentest),
+        // Netzwerk-Befehle (Serie 5):
+        Box::new(Netz),
+        Box::new(NetzIp),
         Box::new(NetzLausch),
+        Box::new(Arp),
+        Box::new(ArpPing),
     ]
 }
 
@@ -1151,10 +1156,105 @@ impl Befehl for Plattentest {
     }
 }
 
-/// netz-lausch — schaltet den Hexdump empfangener Ethernet-Frames an/aus
-/// (Serie 5: interrupt-getriebener Empfang, noch KEIN Stack). Beim
-/// Einschalten wird ein ARP-Poke gesendet, damit das reaktive
-/// QEMU-user-Netz (slirp) antwortet und Frames sichtbar werden.
+/// Gibt "keine NIC"-Hinweis aus; liefert true, wenn KEINE NIC da ist
+/// (die Netz-Befehle brechen dann ab). Ein Ort für die Meldung.
+fn keine_nic() -> bool {
+    if crate::netz::vorhanden() {
+        return false;
+    }
+    konsole::set_color(Color::Yellow, Color::Black);
+    println!("Keine Netzwerkkarte vorhanden.");
+    konsole::set_color(Color::LightGray, Color::Black);
+    true
+}
+
+/// Gibt einen Netz-Fehler rot und auf Deutsch aus.
+fn netz_fehler_ausgeben(fehler: crate::netz::NetzFehler) {
+    konsole::set_color(Color::LightRed, Color::Black);
+    println!("Fehler: {}", fehler.meldung());
+    konsole::set_color(Color::LightGray, Color::Black);
+}
+
+/// netz — zeigt den Status der Netzwerkkarte (MAC) und die IP-Konfiguration.
+struct Netz;
+
+impl Befehl for Netz {
+    fn name(&self) -> &'static str {
+        "netz"
+    }
+    fn beschreibung(&self) -> &'static str {
+        "Zeigt NIC-Status (MAC) und IP-Konfiguration"
+    }
+    fn ausfuehren(&self, _argumente: &str, _kontext: &mut ShellKontext, _registry: &[Box<dyn Befehl>]) {
+        if keine_nic() {
+            return;
+        }
+        if let Some(mac) = crate::netz::mac() {
+            konsole::set_color(Color::LightCyan, Color::Black);
+            print!("  MAC      ");
+            konsole::set_color(Color::LightGray, Color::Black);
+            println!("{}", crate::netz::ethernet::mac_text(&mac));
+        }
+        let k = crate::netz::konfig();
+        if k.gesetzt {
+            let zeilen = [
+                ("IP", k.ip),
+                ("Maske", k.maske),
+                ("Gateway", k.gateway),
+            ];
+            for (name, wert) in zeilen {
+                konsole::set_color(Color::LightCyan, Color::Black);
+                print!("  {:<8} ", name);
+                konsole::set_color(Color::LightGray, Color::Black);
+                println!("{}", wert);
+            }
+        } else {
+            konsole::set_color(Color::Yellow, Color::Black);
+            println!("  Keine IP konfiguriert.");
+            konsole::set_color(Color::LightGray, Color::Black);
+            println!("  Setzen mit: netz-ip <ip> <maske> <gateway>");
+        }
+    }
+}
+
+/// netz-ip — setzt die statische IP-Konfiguration (DHCP kommt später).
+struct NetzIp;
+
+impl Befehl for NetzIp {
+    fn name(&self) -> &'static str {
+        "netz-ip"
+    }
+    fn beschreibung(&self) -> &'static str {
+        "Setzt die statische IP: netz-ip <ip> <maske> <gateway>"
+    }
+    fn ausfuehren(&self, argumente: &str, _kontext: &mut ShellKontext, _registry: &[Box<dyn Befehl>]) {
+        use crate::netz::Ipv4;
+        let teile: Vec<&str> = argumente.split_whitespace().collect();
+        if teile.len() != 3 {
+            println!("Benutzung: netz-ip <ip> <maske> <gateway>");
+            println!("  Beispiel (QEMU-slirp): netz-ip 10.0.2.15 255.255.255.0 10.0.2.2");
+            return;
+        }
+        let ip = Ipv4::parse(teile[0]);
+        let maske = Ipv4::parse(teile[1]);
+        let gateway = Ipv4::parse(teile[2]);
+        match (ip, maske, gateway) {
+            (Some(ip), Some(maske), Some(gateway)) => {
+                crate::netz::konfig_setzen(ip, maske, gateway);
+                println!("IP-Konfiguration gesetzt: {} / {} / Gateway {}", ip, maske, gateway);
+            }
+            _ => {
+                konsole::set_color(Color::LightRed, Color::Black);
+                println!("Ungueltige Adresse — jede muss vier Oktette 0..255 haben (a.b.c.d).");
+                konsole::set_color(Color::LightGray, Color::Black);
+            }
+        }
+    }
+}
+
+/// netz-lausch — schaltet den Hexdump empfangener Ethernet-Frames an/aus.
+/// Der `netz_task` dumpt dann jedes ankommende Frame; Verkehr erzeugt man
+/// z. B. mit `arp-ping <ip>`.
 struct NetzLausch;
 
 impl Befehl for NetzLausch {
@@ -1162,19 +1262,95 @@ impl Befehl for NetzLausch {
         "netz-lausch"
     }
     fn beschreibung(&self) -> &'static str {
-        "Empfangene Ethernet-Frames hexdumpen (an/aus); sendet einen ARP-Poke"
+        "Empfangene Ethernet-Frames hexdumpen (an/aus)"
     }
     fn ausfuehren(&self, _argumente: &str, _kontext: &mut ShellKontext, _registry: &[Box<dyn Befehl>]) {
-        if !crate::virtio::net::vorhanden() {
-            konsole::set_color(Color::Yellow, Color::Black);
-            println!("Keine virtio-net-NIC vorhanden.");
-            konsole::set_color(Color::LightGray, Color::Black);
+        if keine_nic() {
             return;
         }
-        if crate::virtio::net::lausch_umschalten() {
-            println!("netz-lausch AN - ARP-Poke gesendet; empfangene Frames werden gehexdumpt.");
+        if crate::netz::lausch_umschalten() {
+            println!("netz-lausch AN - empfangene Frames werden gehexdumpt.");
+            println!("Verkehr erzeugen z. B. mit: arp-ping <ip>");
         } else {
             println!("netz-lausch AUS.");
+        }
+    }
+}
+
+/// arp — zeigt den ARP-Cache (gelernte IP -> MAC, mit Alter).
+struct Arp;
+
+impl Befehl for Arp {
+    fn name(&self) -> &'static str {
+        "arp"
+    }
+    fn beschreibung(&self) -> &'static str {
+        "Zeigt den ARP-Cache (IP -> MAC)"
+    }
+    fn ausfuehren(&self, _argumente: &str, _kontext: &mut ShellKontext, _registry: &[Box<dyn Befehl>]) {
+        let eintraege = crate::netz::arp::cache_eintraege();
+        if eintraege.is_empty() {
+            println!("ARP-Cache leer. (Aufloesen mit: arp-ping <ip>)");
+            return;
+        }
+        println!("ARP-Cache:");
+        for (ip, mac, alter_ms) in &eintraege {
+            konsole::set_color(Color::LightCyan, Color::Black);
+            print!("  {:<15} ", format!("{}", ip));
+            konsole::set_color(Color::LightGray, Color::Black);
+            println!("{}  (vor {} s gelernt)", crate::netz::ethernet::mac_text(mac), alter_ms / 1000);
+        }
+    }
+}
+
+/// arp-ping — löst die MAC hinter einer IP auf: schickt einen ARP-Request
+/// und PUMPT den Empfang synchron (der kooperative Executor lässt während
+/// eines Befehls keinen anderen Task laufen), bis die Antwort da ist oder
+/// ein Timeout greift.
+struct ArpPing;
+
+impl Befehl for ArpPing {
+    fn name(&self) -> &'static str {
+        "arp-ping"
+    }
+    fn beschreibung(&self) -> &'static str {
+        "Loest die MAC hinter einer IP auf: arp-ping <ip>"
+    }
+    fn ausfuehren(&self, argumente: &str, _kontext: &mut ShellKontext, _registry: &[Box<dyn Befehl>]) {
+        use crate::netz::Ipv4;
+        if keine_nic() {
+            return;
+        }
+        let ziel = match Ipv4::parse(argumente.trim()) {
+            Some(ip) => ip,
+            None => {
+                println!("Benutzung: arp-ping <ip>   (z. B. arp-ping 10.0.2.2)");
+                return;
+            }
+        };
+        // Request senden (braucht eine konfigurierte Absender-IP).
+        if let Err(fehler) = crate::netz::arp::anfrage_senden(ziel) {
+            netz_fehler_ausgeben(fehler);
+            return;
+        }
+        println!("ARP-Request an {} gesendet, warte auf Antwort ...", ziel);
+        // Synchron pumpen: bis zu 2 Sekunden RX verarbeiten + Cache prüfen.
+        let deadline = crate::zeit::ms_seit_boot() + 2000;
+        loop {
+            crate::netz::rx_verarbeiten();
+            if let Some(mac) = crate::netz::arp::cache_suchen(ziel) {
+                konsole::set_color(Color::LightGreen, Color::Black);
+                println!("{} ist bei {}", ziel, crate::netz::ethernet::mac_text(&mac));
+                konsole::set_color(Color::LightGray, Color::Black);
+                return;
+            }
+            if crate::zeit::ms_seit_boot() >= deadline {
+                konsole::set_color(Color::Yellow, Color::Black);
+                println!("Keine Antwort von {} (Timeout).", ziel);
+                konsole::set_color(Color::LightGray, Color::Black);
+                return;
+            }
+            x86_64::instructions::hlt();
         }
     }
 }

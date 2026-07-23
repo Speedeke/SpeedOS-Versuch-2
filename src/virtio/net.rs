@@ -1,36 +1,28 @@
-// virtio/net.rs — virtio-net (Serie 5, Schritt 1): interrupt-getriebener
-//                 EMPFANG von Ethernet-Frames — nur RX + Hexdump.
+// virtio/net.rs — virtio-net als NetzGeraet (Serie 5, Aufgabe 1)
 //
-// Dies ist der erste ASYNCHRONE Hardware-Event jenseits von Tastatur,
-// Maus und Timer: Netzwerk-Pakete kommen UNAUFGEFORDERT, deshalb kann
-// man sie nicht wie die Platte pollen — sie müssen INTERRUPTS auslösen.
+// Schritt 1 der Serie 5 war der reine EMPFANG (Hexdump, kein Stack). Jetzt
+// bekommt der Treiber seine Architektur-Naht: Er implementiert das
+// geräteunabhängige Trait `netz::NetzGeraet` (analog `BlockDevice`) und
+// registriert sich beim Boot in der Netz-Schicht. Ab hier redet der Stack
+// (Ethernet/ARP/…) NUR noch über das Trait — ein e1000/rtl8139 ließe sich
+// später ohne Stack-Änderung ergänzen.
 //
-// BEWUSST KLEIN: Es gibt hier KEINEN Netzwerk-Stack. Wir finden das
-// Gerät, richten den IRQ-Pfad ein, stellen RX-Puffer bereit und geben
-// ankommende Frames roh (hexdump) aus. ARP/IP/UDP/TCP sind der Fahrplan
-// aus docs/serie5-netzwerk.md — hier noch nicht.
+// Was der Treiber weiter selbst macht (geräteSPEZIFISCH):
+//   * PCI-Legacy-Transport (Port-I/O-BAR), Init-Sequenz wie virtio-blk,
+//   * MEHRERE Virtqueues: RX = 0 (Empfang), TX = 1 (Senden),
+//   * INTERRUPTS statt Polling für RX (Pakete kommen unaufgefordert) —
+//     der IRQ liest nur das ISR (quittiert) und WECKT die Netz-Schicht,
+//   * RX-Puffer vorab einstellen und nach dem Verbrauch neu einstellen
+//     (RxRing), jedes Frame trägt vorne einen virtio_net_hdr (10/12 Byte).
 //
-// Wiederverwendung: Transport (PCI-Legacy-Port-I/O) und Virtqueue
-// (virtio/virtqueue.rs) sind IDENTISCH zu virtio-blk; neu sind nur:
-//   * MEHRERE Queues (RX = 0, TX = 1) statt einer,
-//   * INTERRUPTS statt Polling (RX-Pakete kommen von selbst),
-//   * RX-Puffer, die wir VORAB einstellen (das Gerät DMA-t hinein) und
-//     nach dem Verbrauch wieder einstellen (RxRing).
-//
-// ARP-POKE: QEMUs user-mode-Netz (slirp) ist REAKTIV — es sendet von
-// sich aus nichts. Damit "nur empfangen" überhaupt etwas empfängt,
-// schickt `netz-lausch` beim Einschalten EIN statisches Broadcast-ARP-
-// Frame (who-has Gateway); slirp antwortet garantiert. Das ist KEIN
-// Stack — ein hand-gebautes 42-Byte-Frame.
+// Die Virtqueue (virtio/virtqueue.rs) wird UNVERÄNDERT weiterbenutzt.
 
+use crate::netz::{self, NetzFehler, NetzGeraet};
 use crate::virtio::virtqueue::Virtqueue;
-use crate::{memory, pci, println, serial_println};
-use alloc::string::String;
+use crate::{memory, pci, serial_println};
+use alloc::boxed::Box;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU16, Ordering};
-use core::task::Poll;
-use futures_util::task::AtomicWaker;
-use spin::Mutex;
+use core::sync::atomic::{AtomicU16, Ordering};
 use x86_64::instructions::port::Port;
 use x86_64::{PhysAddr, VirtAddr};
 
@@ -73,24 +65,18 @@ const RX_ANZAHL: usize = 16;
 /// 2048 teilt 4096 glatt, also liegt jeder Puffer in EINER Page (=
 /// physisch zusammenhängend, keine Seitengrenze überschritten).
 const PUFFER_BYTES: usize = 2048;
+/// Größe des (einen) TX-DMA-Puffers — eine ganze Page.
+const TX_PUFFER_BYTES: usize = 4096;
+/// Wie lange wir höchstens auf die TX-Bestätigung warten (µs).
+const TX_TIMEOUT_US: u64 = 100_000;
 
 // ---------------------------------------------------------------------------
-// Globaler Zustand
+// Globaler Zustand (nur das, was der IRQ lock-frei braucht)
 // ---------------------------------------------------------------------------
 
 /// I/O-Basis des Geräts — LOCK-FREI, damit der IRQ-Handler das
-/// ISR-Register lesen kann, ohne den NET-Mutex zu nehmen. 0 = kein Gerät.
+/// ISR-Register lesen kann, ohne einen Lock zu nehmen. 0 = kein Gerät.
 static IO_BASIS: AtomicU16 = AtomicU16::new(0);
-/// Der RX-Task schläft hier, der IRQ-Handler weckt.
-static RX_WAKER: AtomicWaker = AtomicWaker::new();
-/// Vom IRQ gesetzt: "es gibt empfangene Frames abzuholen".
-static RX_BEREIT: AtomicBool = AtomicBool::new(false);
-/// Schaltet den Hexdump an/aus (Shell-Befehl netz-lausch).
-static LAUSCH_AKTIV: AtomicBool = AtomicBool::new(false);
-
-/// Die einzige virtio-net-Instanz (Blatt-Lock wie virtio-blk — nur aus
-/// Task-Kontext, NIE aus dem Interrupt-Handler).
-static NET: Mutex<Option<VirtioNet>> = Mutex::new(None);
 
 /// Die reine Header-Längen-Logik: Ohne MRG_RXBUF ist der virtio_net_hdr
 /// 10 Byte, mit 12 (er trägt dann zusätzlich num_buffers: u16).
@@ -182,7 +168,7 @@ impl RxRing {
 }
 
 // ---------------------------------------------------------------------------
-// VirtioNet — der Treiber-Zustand
+// VirtioNet — der Treiber-Zustand, hinter dem NetzGeraet-Trait
 // ---------------------------------------------------------------------------
 
 struct VirtioNet {
@@ -195,8 +181,9 @@ struct VirtioNet {
     mac: [u8; 6],
 }
 
-// SICHERHEIT: enthält rohe DMA-Zeiger, ist aber nur über den Mutex
-// erreichbar und wird nie zwischen Threads geteilt — Send ist erfüllt.
+// SICHERHEIT: enthält rohe DMA-Zeiger, ist aber nur über den GERAET-Mutex
+// der Netz-Schicht erreichbar und wird nie zwischen Threads geteilt —
+// Send ist erfüllt.
 unsafe impl Send for VirtioNet {}
 
 impl VirtioNet {
@@ -210,32 +197,27 @@ impl VirtioNet {
         // unsafe (Port-I/O): dito, Queue 1.
         unsafe { Port::<u16>::new(self.io_basis + REG_QUEUE_NOTIFY).write(1) };
     }
+}
 
-    /// Sendet EIN statisches Broadcast-ARP-Frame (who-has 10.0.2.2), um
-    /// slirp zu einer Antwort zu provozieren — der einzige TX-Einsatz.
-    fn poke_senden(&mut self) {
-        // Vorher die alten TX-Deskriptoren zurückgeben (wir pollen die
-        // winzige TX-Queue kurz, sie ist auf interrupts_aus gestellt):
+impl NetzGeraet for VirtioNet {
+    fn mac(&self) -> [u8; 6] {
+        self.mac
+    }
+
+    /// Sendet ein rohes Ethernet-Frame über die TX-Queue: [virtio_net_hdr
+    /// (genullt) | Frame] in den TX-DMA-Puffer, an das Gerät verfügbar
+    /// machen, anstoßen und auf die Bestätigung warten (damit der EINE
+    /// TX-Puffer fürs nächste Senden wieder frei ist).
+    fn sende_frame(&mut self, frame: &[u8]) -> Result<(), NetzFehler> {
+        if frame.len() > TX_PUFFER_BYTES - self.hdr_len {
+            return Err(NetzFehler::FrameZuGross);
+        }
+        // Alte, bereits erledigte TX-Deskriptoren zurückgeben (die
+        // TX-Queue läuft interruptfrei, wir räumen sie hier selbst ab).
         while self.tx.used_abholen().is_some() {}
 
-        let mut frame = [0u8; 42];
-        // --- Ethernet-Header ---
-        frame[0..6].copy_from_slice(&[0xff; 6]); // Ziel: Broadcast
-        frame[6..12].copy_from_slice(&self.mac); // Quelle: unsere MAC
-        frame[12..14].copy_from_slice(&0x0806u16.to_be_bytes()); // EtherType ARP
-        // --- ARP (IPv4 über Ethernet) ---
-        frame[14..16].copy_from_slice(&1u16.to_be_bytes()); // htype = Ethernet
-        frame[16..18].copy_from_slice(&0x0800u16.to_be_bytes()); // ptype = IPv4
-        frame[18] = 6; // hlen
-        frame[19] = 4; // plen
-        frame[20..22].copy_from_slice(&1u16.to_be_bytes()); // op = request
-        frame[22..28].copy_from_slice(&self.mac); // sha = unsere MAC
-        frame[28..32].copy_from_slice(&[10, 0, 2, 15]); // spa = QEMU-Gast-IP
-        // tha (32..38) bleibt 0
-        frame[38..42].copy_from_slice(&[10, 0, 2, 2]); // tpa = Gateway
-
-        // In den TX-DMA-Puffer: [virtio_net_hdr genullt | Frame]:
-        // unsafe: tx_puffer_virt ist unser DMA-Puffer (>= hdr_len + 42).
+        // In den TX-DMA-Puffer: [virtio_net_hdr genullt | Frame].
+        // unsafe: tx_puffer_virt ist unser DMA-Puffer (>= hdr_len + Frame).
         unsafe {
             let p = self.tx_puffer_virt.as_mut_ptr::<u8>();
             core::ptr::write_bytes(p, 0, self.hdr_len);
@@ -243,10 +225,50 @@ impl VirtioNet {
         }
         let gesamt = (self.hdr_len + frame.len()) as u32;
         // Das GERÄT LIEST diesen Puffer (schreibt nicht) -> false.
-        if let Some(kopf) = self.tx.kette_anlegen(&[(self.tx_puffer_phys, gesamt, false)]) {
-            self.tx.verfuegbar_machen(kopf);
-            self.notify_tx();
+        let kopf = self
+            .tx
+            .kette_anlegen(&[(self.tx_puffer_phys, gesamt, false)])
+            .ok_or(NetzFehler::Sendefehler)?;
+        self.tx.verfuegbar_machen(kopf);
+        self.notify_tx();
+
+        // Auf Bestätigung warten (gepollt mit TSC-Timeout — nie endlos).
+        let start = crate::zeit::us_seit_boot();
+        loop {
+            if self.tx.used_abholen().is_some() {
+                return Ok(());
+            }
+            if crate::zeit::us_seit_boot().saturating_sub(start) > TX_TIMEOUT_US {
+                return Err(NetzFehler::Zeitueberschreitung);
+            }
+            core::hint::spin_loop();
         }
+    }
+
+    /// Holt das nächste empfangene Frame (ohne virtio_net_hdr) und stellt
+    /// den Puffer wieder ein. None = die RX-Queue ist leer. Bei einem
+    /// Runt (Länge <= Header) gibt es einen leeren Vec zurück — der
+    /// Aufrufer (frames_einsammeln) überspringt ihn, drainiert aber weiter.
+    fn empfange_frame(&mut self) -> Option<Vec<u8>> {
+        let (index, laenge) = self.rx.abholen()?;
+        let laenge = laenge as usize;
+        let hdr = self.hdr_len;
+        let frame = if laenge > hdr {
+            // unsafe: der Puffer `index` gehört uns, laenge <= PUFFER_BYTES.
+            let slice = unsafe {
+                core::slice::from_raw_parts(
+                    self.rx.puffer_virt[index].as_ptr::<u8>().add(hdr),
+                    laenge - hdr,
+                )
+            };
+            slice.to_vec()
+        } else {
+            Vec::new()
+        };
+        // Puffer wieder einstellen und das Gerät anstoßen.
+        self.rx.einstellen(index);
+        self.notify_rx();
+        Some(frame)
     }
 }
 
@@ -255,10 +277,10 @@ impl VirtioNet {
 // ---------------------------------------------------------------------------
 
 /// Wird vom PCI-IRQ-Handler gerufen. Liest das ISR-Register des Geräts
-/// (das QUITTIERT den Interrupt an der Hardware) und weckt den RX-Task,
-/// WENN eine Queue sich bewegt hat. Shared Interrupts: War es nicht
-/// unser Gerät (ISR == 0), passiert nichts (der Handler macht trotzdem
-/// EOI). Interrupt-tauglich: nur Atomics + ein Port-Read.
+/// (das QUITTIERT den Interrupt an der Hardware) und weckt die Netz-
+/// Schicht, WENN eine Queue sich bewegt hat. Shared Interrupts: War es
+/// nicht unser Gerät (ISR == 0), passiert nichts (der Handler macht
+/// trotzdem EOI). Interrupt-tauglich: nur Atomics + ein Port-Read.
 pub fn irq_pruefen_und_wecken() {
     let io_basis = IO_BASIS.load(Ordering::Acquire);
     if io_basis == 0 {
@@ -267,152 +289,9 @@ pub fn irq_pruefen_und_wecken() {
     // unsafe (Port-I/O): ISR-Register lesen quittiert den Geräte-IRQ.
     let isr = unsafe { Port::<u8>::new(io_basis + REG_ISR).read() };
     if isr & ISR_QUEUE != 0 {
-        RX_BEREIT.store(true, Ordering::Release);
-        RX_WAKER.wake();
+        // Die geräteunabhängige Netz-Schicht wecken (nur Atomics/Waker).
+        netz::geraet::rx_signal();
     }
-}
-
-// ---------------------------------------------------------------------------
-// Der RX-Task (async) und der Hexdump
-// ---------------------------------------------------------------------------
-
-/// Wartet, bis der IRQ RX_BEREIT setzt (race-frei per Doppel-Check wie
-/// beim Scancode-Stream).
-async fn rx_warten() {
-    core::future::poll_fn(|cx| {
-        if RX_BEREIT.swap(false, Ordering::Acquire) {
-            return Poll::Ready(());
-        }
-        RX_WAKER.register(cx.waker());
-        if RX_BEREIT.swap(false, Ordering::Acquire) {
-            Poll::Ready(())
-        } else {
-            Poll::Pending
-        }
-    })
-    .await
-}
-
-/// Der RX-Task: vom IRQ geweckt, empfangene Frames einsammeln und (wenn
-/// netz-lausch an ist) hexdumpen; Puffer immer wieder einstellen.
-pub async fn rx_task() {
-    loop {
-        rx_warten().await;
-        rx_verarbeiten();
-    }
-}
-
-/// Holt alle bereitliegenden Frames ab, stellt die Puffer wieder ein und
-/// gibt die zu dumpenden Frames zurück NACH dem Loslassen des Locks
-/// (println unter dem NET-Lock vermeiden). Kopiert nur, wenn gelauscht
-/// wird.
-fn rx_verarbeiten() {
-    let lauschen = LAUSCH_AKTIV.load(Ordering::Relaxed);
-    let mut zum_dumpen: Vec<Vec<u8>> = Vec::new();
-    x86_64::instructions::interrupts::without_interrupts(|| {
-        let mut lock = NET.lock();
-        let net = match lock.as_mut() {
-            Some(n) => n,
-            None => return,
-        };
-        let hdr = net.hdr_len;
-        let mut etwas = false;
-        while let Some((index, laenge)) = net.rx.abholen() {
-            let laenge = laenge as usize;
-            if lauschen && laenge > hdr {
-                // unsafe: der Puffer index gehört uns, laenge <= PUFFER_BYTES.
-                let frame = unsafe {
-                    core::slice::from_raw_parts(
-                        net.rx.puffer_virt[index].as_ptr::<u8>().add(hdr),
-                        laenge - hdr,
-                    )
-                };
-                zum_dumpen.push(frame.to_vec());
-            }
-            net.rx.einstellen(index);
-            etwas = true;
-        }
-        if etwas {
-            net.notify_rx();
-        }
-    });
-    for frame in &zum_dumpen {
-        frame_hexdump(frame);
-    }
-}
-
-/// Formatiert eine MAC-Adresse als xx:xx:xx:xx:xx:xx.
-fn mac_text(m: &[u8]) -> String {
-    alloc::format!(
-        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-        m[0], m[1], m[2], m[3], m[4], m[5]
-    )
-}
-
-/// Gibt ein rohes Ethernet-Frame lesbar aus: Ziel-/Quell-MAC, EtherType
-/// (annotiert) und einen Hexdump der ersten Bytes.
-fn frame_hexdump(frame: &[u8]) {
-    if frame.len() < 14 {
-        println!("[netz] Frame zu kurz ({} Byte)", frame.len());
-        return;
-    }
-    let ethertype = u16::from_be_bytes([frame[12], frame[13]]);
-    let typ_name = match ethertype {
-        0x0806 => "ARP",
-        0x0800 => "IPv4",
-        0x86DD => "IPv6",
-        0x8100 => "VLAN",
-        _ => "?",
-    };
-    println!(
-        "[netz] Frame {} Byte | Ziel {} | Quelle {} | EtherType 0x{:04x} ({})",
-        frame.len(),
-        mac_text(&frame[0..6]),
-        mac_text(&frame[6..12]),
-        ethertype,
-        typ_name
-    );
-    // Roh-Hexdump, gedeckelt (16 Byte je Zeile):
-    let max = frame.len().min(64);
-    let mut i = 0;
-    while i < max {
-        let ende = (i + 16).min(max);
-        let mut hex = String::new();
-        let mut asc = String::new();
-        for &b in &frame[i..ende] {
-            hex.push_str(&alloc::format!("{:02x} ", b));
-            asc.push(if (0x20..0x7f).contains(&b) { b as char } else { '.' });
-        }
-        println!("  {:04x}  {:<48}{}", i, hex, asc);
-        i += 16;
-    }
-    if frame.len() > max {
-        println!("  ... ({} weitere Byte)", frame.len() - max);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Öffentliche API für die Shell
-// ---------------------------------------------------------------------------
-
-/// Ist eine virtio-net-NIC aufgesetzt?
-pub fn vorhanden() -> bool {
-    x86_64::instructions::interrupts::without_interrupts(|| NET.lock().is_some())
-}
-
-/// Schaltet den Hexdump um. Beim EINschalten wird ein ARP-Poke gesendet
-/// (slirp antwortet -> sichtbarer Verkehr). Liefert den neuen Zustand.
-pub fn lausch_umschalten() -> bool {
-    let neu = !LAUSCH_AKTIV.load(Ordering::Relaxed);
-    LAUSCH_AKTIV.store(neu, Ordering::Relaxed);
-    if neu {
-        x86_64::instructions::interrupts::without_interrupts(|| {
-            if let Some(net) = NET.lock().as_mut() {
-                net.poke_senden();
-            }
-        });
-    }
-    neu
 }
 
 // ---------------------------------------------------------------------------
@@ -428,8 +307,8 @@ fn status_setzen(io_basis: u16, bits: u8) {
     }
 }
 
-/// Erkennt eine virtio-net-NIC am PCI-Bus und richtet den RX-Empfang
-/// ein (Legacy-Transport, RX+TX-Queue, IRQ). Läuft beim Boot NACH
+/// Erkennt eine virtio-net-NIC am PCI-Bus, richtet RX+TX und den IRQ ein
+/// und REGISTRIERT das Gerät in der Netz-Schicht. Läuft beim Boot NACH
 /// pci::init(). Kein Gerät / modern-only -> stille Rückkehr.
 pub fn init() {
     let geraet = match pci::finde(VIRTIO_VENDOR, &VIRTIO_NET_IDS) {
@@ -487,13 +366,13 @@ pub fn init() {
     queue_adresse_setzen(io_basis, 0, rx.vq.phys_basis());
     rx.alle_einstellen();
 
-    // 5b. TX-Queue (1) aufsetzen — Interrupts aus (wir pollen/senden nur
-    //     den Poke), sonst ungenutzt.
+    // 5b. TX-Queue (1) aufsetzen — Interrupts aus (wir senden/pollen
+    //     selbst; kein Interrupt-Sturm auf der geteilten PCI-Leitung).
     let tx_size = queue_groesse(io_basis, 1);
     let tx = Virtqueue::neu(tx_size.max(2));
     tx.interrupts_aus();
     queue_adresse_setzen(io_basis, 1, tx.phys_basis());
-    // Ein kleiner TX-DMA-Puffer für den ARP-Poke (Header + Frame):
+    // Ein TX-DMA-Puffer (eine Page) für [virtio_net_hdr | Frame].
     let tx_puffer_virt = memory::allocate_pages(1).expect("virtio-net TX-DMA");
     let tx_puffer_phys = memory::uebersetzen(tx_puffer_virt).expect("virtio-net TX-Physik");
 
@@ -507,20 +386,20 @@ pub fn init() {
         mac,
     };
 
-    // 6. DRIVER_OK, dann Zustand veröffentlichen und den IRQ scharf
-    //    schalten. Reihenfolge: NET setzen BEVOR die IRQ feuert (der
-    //    RX-Task braucht NET), IO_BASIS BEVOR der Handler das ISR liest.
+    // 6. DRIVER_OK, dann das Gerät der Netz-Schicht übergeben und den IRQ
+    //    scharf schalten. Reihenfolge: GERÄT registrieren BEVOR die IRQ
+    //    feuert (der netz_task braucht es), IO_BASIS BEVOR der Handler das
+    //    ISR liest.
     status_setzen(io_basis, STATUS_DRIVER_OK);
     net.notify_rx(); // dem Gerät sagen: RX-Puffer stehen bereit
-    x86_64::instructions::interrupts::without_interrupts(|| {
-        *NET.lock() = Some(net);
-    });
+    let mac_text = netz::ethernet::mac_text(&mac);
+    netz::geraet::geraet_registrieren(Box::new(net));
     IO_BASIS.store(io_basis, Ordering::Release);
     crate::interrupts::irq_freischalten(irq);
 
     serial_println!(
         "[virtio-net] Bereit: MAC {}, RX-Queue {} ({} Puffer), TX-Queue {}, Header {} Byte, IRQ {} (I/O 0x{:04x}).",
-        mac_text(&mac),
+        mac_text,
         rx_size,
         RX_ANZAHL,
         tx_size,
