@@ -5,6 +5,42 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### Serie 5: TCP (Minimal-Viable, selbst gebaut) — SpeedOS lädt HTTP-Seiten
+- **Der lehrreichste und riskanteste Teil**, bewusst als LERN-ARTEFAKT scharf
+  abgegrenzt. Umfang, bewusste Lücken und — VOR dem Code festgelegt — das
+  **Reißleinen-Kriterium** stehen in `docs/tcp-scope.md`.
+- **`src/netz/tcp.rs` — der vollständige Zustandsautomat** (CLOSED, LISTEN,
+  SYN_SENT, SYN_RCVD, ESTABLISHED, FIN_WAIT_1/2, CLOSING, TIME_WAIT,
+  CLOSE_WAIT, LAST_ACK): 3-Wege-Handshake aktiv (`connect`) UND passiv
+  (`listen`), In-Order-Datentransfer mit Seq/ACK und **festem** Fenster,
+  **Retransmit-on-Timeout** (feste Start-RTO, exponentielles Backoff, Aufgabe
+  nach N Versuchen — KEIN Karn/Jacobson), geordneter Abbau inkl. TIME_WAIT
+  (2·MSL bewusst auf 2 s verkürzt). Die `Verbindung` (TCB) ist eine REINE
+  Zustandsmaschine: sie sammelt Segmente in einem Ausgang, statt selbst ins
+  Netz zu rufen — so spielt derselbe Code gegen echte Hardware UND im
+  Loopback-Test gegen sich selbst.
+- **Bewusst NICHT** (docs/tcp-scope.md): Congestion-Control, Fast-Retransmit,
+  SACK, Window-Scaling, Out-of-Order-Reassembly (Out-of-Order → verworfen +
+  kumulatives ACK → Retransmit). Ehrlich dokumentiert: bei Verlust langsam
+  (Go-Back-N-artig), aber korrekt.
+- **Byte-Ring-Abstraktion** `netz::puffer::Ringpuffer` (fester Ring: schreiben/
+  lesen/spitzen/verwerfen mit Wraparound) trägt Sende- und Empfangspuffer;
+  Puffer-Ownership explizit dokumentiert (copy-in/out — passt für die spätere
+  Kernel/User-Grenze).
+- **Treiber** (eine aktive Verbindung über IPv4) + IPv4-Dispatch für Protokoll
+  6; Shell **`hole <host> [pfad]`** holt eine HTTP/1.0-Seite (DNS-Auflösung →
+  TCP-Connect → GET → Antwort → Close).
+- **MEILENSTEIN + REISSLEINEN-MESSUNG** (`tests/netz_tcp.rs`, echt über slirp):
+  **10/10 HTTP-Abrufe gegen example.com:80 sauber** (`HTTP/1.1 200 OK`,
+  828 Byte, sauberer Close). Kriterium ≥ 9/10 erfüllt → **Eigenbau-TCP bleibt**
+  (smoltcp-Reißleine NICHT gezogen).
+- Tests: Zustandsübergänge (Handshake aktiv+passiv, Datenphase, Abbau),
+  Sequenznummern-Arithmetik mit u32-Wraparound, Retransmit-Auslösung +
+  Backoff, **Loopback über einen simulierten Kanal mit 20 % Paketverlust**
+  (Handshake + 3000 Byte + Close kommen durch), Ringpuffer-Wraparound.
+  179 Lib-Tests grün (vorher 174) + `tests/netz_tcp.rs`. `cargo clippy
+  --all-targets` warnungsfrei; Desktop bootet sauber.
+
 ### Serie 5: UDP + DHCP + DNS — SpeedOS ist im Internet
 - **UDP-Schicht** (`src/netz/udp.rs`): Datagramme parsen/bauen (Ports, Länge,
   Prüfsumme). Die **Prüfsumme über den PSEUDO-HEADER** (Quell-/Ziel-IP,

@@ -196,10 +196,11 @@ pub fn verarbeiten(paket: &[u8]) {
     if !fuer_uns(kopf.ziel) {
         return;
     }
-    // Nach Protokoll an die obere Schicht dispatchen (TCP folgt).
+    // Nach Protokoll an die obere Schicht dispatchen.
     match kopf.protokoll {
         PROTO_ICMP => super::icmp::verarbeiten(kopf.quelle, kopf.ttl, nutzlast),
         PROTO_UDP => super::udp::verarbeiten(kopf.quelle, kopf.ziel, nutzlast),
+        PROTO_TCP => super::tcp::verarbeiten(kopf.quelle, kopf.ziel, nutzlast),
         _ => {}
     }
 }

@@ -136,6 +136,121 @@ impl Default for Schreiber {
 }
 
 // ---------------------------------------------------------------------------
+// Ringpuffer — der Byte-Ring für Stream-Puffer (TCP Sende-/Empfangspuffer)
+// ---------------------------------------------------------------------------
+//
+// Ein Ringpuffer (zirkulärer Puffer) fester Kapazität: Bytes werden hinten
+// angehängt (`schreiben`) und vorne entnommen (`lesen`), die Indizes laufen
+// am Ende auf 0 zurück ("wickeln"). Das ist die natürliche Datenstruktur für
+// einen BYTESTROM mit begrenztem Fenster — genau, was TCP für seine Sende-
+// und Empfangspuffer braucht:
+//   * SENDEPUFFER: Die App schreibt Bytes hinein; sie bleiben, bis der Peer
+//     sie bestätigt (ACK). `spitzen` liest sie zum (Neu-)Senden OHNE sie zu
+//     entfernen, `verwerfen` gibt die bestätigten vorne frei.
+//   * EMPFANGSPUFFER: Ankommende, in-Order-Daten landen hier; die App holt
+//     sie mit `lesen` ab. Der freie Platz (`frei`) ist unser Empfangsfenster.
+//
+// PUFFER-OWNERSHIP: Der Ringpuffer BESITZT seinen Speicher (ein Vec fester
+// Länge). Er kopiert bei jeder Operation (kein Aliasing nach außen) — die
+// Grenze ist bewusst copy-in/copy-out, damit später eine Kernel/User-Grenze
+// (Serie 6) sauber dazwischen passt.
+
+/// Ein Byte-Ringpuffer fester Kapazität.
+pub struct Ringpuffer {
+    daten: Vec<u8>,
+    /// Index des ersten belegten Bytes (Lese-Position).
+    kopf: usize,
+    /// Anzahl belegter Bytes.
+    fuell: usize,
+}
+
+impl Ringpuffer {
+    /// Legt einen Ringpuffer mit fester Kapazität an (Kapazität >= 1).
+    pub fn neu(kapazitaet: usize) -> Ringpuffer {
+        Ringpuffer {
+            daten: alloc::vec![0u8; kapazitaet.max(1)],
+            kopf: 0,
+            fuell: 0,
+        }
+    }
+
+    /// Die feste Gesamtkapazität.
+    pub fn kapazitaet(&self) -> usize {
+        self.daten.len()
+    }
+
+    /// Wie viele Bytes gerade belegt sind.
+    pub fn len(&self) -> usize {
+        self.fuell
+    }
+
+    /// Ist der Puffer leer?
+    pub fn is_empty(&self) -> bool {
+        self.fuell == 0
+    }
+
+    /// Wie viel freier Platz übrig ist (= das Empfangsfenster).
+    pub fn frei(&self) -> usize {
+        self.daten.len() - self.fuell
+    }
+
+    /// Hängt so viele Bytes wie möglich hinten an (bis `frei()`). Liefert
+    /// die tatsächlich geschriebene Anzahl.
+    pub fn schreiben(&mut self, daten: &[u8]) -> usize {
+        let n = daten.len().min(self.frei());
+        let kap = self.daten.len();
+        let mut schreib = (self.kopf + self.fuell) % kap; // Schreib-Position
+        for &b in &daten[..n] {
+            self.daten[schreib] = b;
+            schreib = (schreib + 1) % kap;
+        }
+        self.fuell += n;
+        n
+    }
+
+    /// Kopiert bis zu `ziel.len()` Bytes ab `offset` (relativ zum Kopf) OHNE
+    /// sie zu entfernen. Für das (Neu-)Senden unbestätigter Sende-Daten.
+    /// Liefert die kopierte Anzahl.
+    pub fn spitzen(&self, offset: usize, ziel: &mut [u8]) -> usize {
+        if offset >= self.fuell {
+            return 0;
+        }
+        let verfuegbar = self.fuell - offset;
+        let n = ziel.len().min(verfuegbar);
+        let kap = self.daten.len();
+        let mut lese = (self.kopf + offset) % kap;
+        for byte in ziel.iter_mut().take(n) {
+            *byte = self.daten[lese];
+            lese = (lese + 1) % kap;
+        }
+        n
+    }
+
+    /// Entnimmt bis zu `ziel.len()` Bytes vorne (kopieren + entfernen).
+    /// Liefert die gelesene Anzahl.
+    pub fn lesen(&mut self, ziel: &mut [u8]) -> usize {
+        let n = self.spitzen(0, ziel);
+        self.verwerfen(n);
+        n
+    }
+
+    /// Verwirft `n` Bytes vorne (z. B. nach einer Bestätigung). Liefert die
+    /// tatsächlich verworfene Anzahl.
+    pub fn verwerfen(&mut self, n: usize) -> usize {
+        let n = n.min(self.fuell);
+        self.kopf = (self.kopf + n) % self.daten.len();
+        self.fuell -= n;
+        n
+    }
+
+    /// Leert den Puffer vollständig.
+    pub fn leeren(&mut self) {
+        self.kopf = 0;
+        self.fuell = 0;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests — laufen in QEMU über unser eigenes Test-Framework (cargo test)
 // ---------------------------------------------------------------------------
 
@@ -186,5 +301,43 @@ mod tests {
         assert_eq!(l.u8(), Some(0x00));
         assert_eq!(l.u16_be(), Some(0x0102));
         assert_eq!(l.rest(), 0);
+    }
+
+    /// Der Ringpuffer: schreiben/lesen, freier Platz, spitzen (ohne
+    /// Entnehmen) und verwerfen — inklusive WRAPAROUND über die
+    /// Kapazitätsgrenze.
+    #[test_case]
+    fn test_ringpuffer() {
+        let mut r = Ringpuffer::neu(8);
+        assert_eq!(r.kapazitaet(), 8);
+        assert_eq!(r.frei(), 8);
+        assert!(r.is_empty());
+
+        // Mehr schreiben als Platz: nur `frei()` viele werden angenommen.
+        assert_eq!(r.schreiben(b"ABCDEFGHIJ"), 8);
+        assert_eq!(r.len(), 8);
+        assert_eq!(r.frei(), 0);
+        assert_eq!(r.schreiben(b"X"), 0); // voll
+
+        // spitzen liest OHNE zu entfernen (für Retransmit).
+        let mut sicht = [0u8; 3];
+        assert_eq!(r.spitzen(0, &mut sicht), 3);
+        assert_eq!(&sicht, b"ABC");
+        assert_eq!(r.spitzen(5, &mut sicht), 3);
+        assert_eq!(&sicht, b"FGH");
+        assert_eq!(r.len(), 8, "spitzen entfernt nichts");
+
+        // verwerfen gibt vorne frei (wie ein ACK).
+        assert_eq!(r.verwerfen(5), 5);
+        assert_eq!(r.len(), 3); // "FGH" bleibt
+
+        // Jetzt über die Grenze schreiben (Wraparound): Platz ist wieder 5.
+        assert_eq!(r.frei(), 5);
+        assert_eq!(r.schreiben(b"12345"), 5);
+        // Auslesen muss die richtige Reihenfolge über den Wrap liefern.
+        let mut raus = [0u8; 8];
+        assert_eq!(r.lesen(&mut raus), 8);
+        assert_eq!(&raus, b"FGH12345");
+        assert!(r.is_empty());
     }
 }

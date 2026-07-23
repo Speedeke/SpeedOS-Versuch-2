@@ -30,6 +30,7 @@ pub mod geraet;
 pub mod icmp;
 pub mod ipv4;
 pub mod puffer;
+pub mod tcp;
 pub mod udp;
 
 pub use ethernet::Mac;

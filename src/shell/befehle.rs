@@ -91,6 +91,7 @@ pub fn alle_befehle() -> Vec<Box<dyn Befehl>> {
         Box::new(ArpPing),
         Box::new(Ping),
         Box::new(Nslookup),
+        Box::new(Hole),
     ]
 }
 
@@ -1620,6 +1621,80 @@ impl Befehl for Nslookup {
             Err(fehler) => {
                 konsole::set_color(Color::LightRed, Color::Black);
                 println!("Fehler: {}", fehler.meldung());
+                konsole::set_color(Color::LightGray, Color::Black);
+            }
+        }
+    }
+}
+
+/// hole — holt eine HTTP/1.0-Seite über den eigenen TCP-Stack (Lern-Artefakt,
+/// siehe docs/tcp-scope.md). Aufruf: hole <host> [pfad]
+struct Hole;
+
+impl Befehl for Hole {
+    fn name(&self) -> &'static str {
+        "hole"
+    }
+    fn beschreibung(&self) -> &'static str {
+        "Holt eine HTTP/1.0-Seite (eigener TCP): hole <host> [pfad]"
+    }
+    fn ausfuehren(&self, argumente: &str, _kontext: &mut ShellKontext, _registry: &[Box<dyn Befehl>]) {
+        if keine_nic() {
+            return;
+        }
+        let mut teile = argumente.split_whitespace();
+        let host = match teile.next() {
+            Some(h) => h,
+            None => {
+                println!("Benutzung: hole <host> [pfad]   (z. B. hole example.com /)");
+                return;
+            }
+        };
+        let pfad = teile.next().unwrap_or("/");
+
+        // Host auflösen (IP oder Name — nslookup-Weg).
+        let ip = match crate::netz::dns::aufloesen(host) {
+            Ok(ip) => ip,
+            Err(fehler) => {
+                konsole::set_color(Color::LightRed, Color::Black);
+                println!("DNS-Fehler: {}", fehler.meldung());
+                konsole::set_color(Color::LightGray, Color::Black);
+                return;
+            }
+        };
+        println!("Verbinde mit {} ({}) Port 80 ...", host, ip);
+
+        // Eine schlichte HTTP/1.0-Anfrage (Connection: close -> Server
+        // schließt nach der Antwort, wir lesen bis zum FIN).
+        let anfrage = format!(
+            "GET {} HTTP/1.0\r\nHost: {}\r\nConnection: close\r\n\r\n",
+            pfad, host
+        );
+        match crate::netz::tcp::hole(ip, 80, anfrage.as_bytes(), 10_000) {
+            Ok(antwort) => {
+                // Status-Zeile + Kopf/Rumpf-Größen anzeigen.
+                let text = String::from_utf8_lossy(&antwort);
+                let status = text.lines().next().unwrap_or("(keine Statuszeile)");
+                let rumpf_start = text.find("\r\n\r\n").map(|i| i + 4);
+                konsole::set_color(Color::LightGreen, Color::Black);
+                println!("{}", status);
+                konsole::set_color(Color::LightGray, Color::Black);
+                println!("Empfangen: {} Bytes gesamt.", antwort.len());
+                if let Some(start) = rumpf_start {
+                    let rumpf = &text[start..];
+                    let zeigen = rumpf.len().min(400);
+                    println!("--- Rumpf (erste {} von {} Byte) ---", zeigen, rumpf.len());
+                    print!("{}", &rumpf[..zeigen]);
+                    if rumpf.len() > zeigen {
+                        println!("\n... ({} weitere Byte)", rumpf.len() - zeigen);
+                    } else {
+                        println!();
+                    }
+                }
+            }
+            Err(fehler) => {
+                konsole::set_color(Color::LightRed, Color::Black);
+                println!("TCP-Fehler: {}", fehler.meldung());
                 konsole::set_color(Color::LightGray, Color::Black);
             }
         }

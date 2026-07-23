@@ -258,13 +258,14 @@ docs/                Migrationsplan bootloader 0.9 -> 0.11, Screenshots
 - [x] **Live-USB-Boot:** `cargo image` → bootfähiges UEFI-Image für
       echte Hardware (auf einem Acer verifiziert), robust gegen fehlende
       Geräte, mit Diagnose-Modus ([docs/usb-boot.md](docs/usb-boot.md))
-- [ ] **Netzwerk (Serie 5, läuft):** virtio-net (interrupt-getriebener
-      Empfang) auf der Virtqueue-Basis; die geräteunabhängige Naht
-      `NetzGeraet` (analog `BlockDevice`); Ethernet + **ARP** + **IPv4**
-      (Checksumme, Fragment-Erkennung) + **ICMP** (`ping`) + **UDP** +
-      **DHCP** (holt beim Boot automatisch eine IP) + **DNS**
-      (`nslookup <name>`) — **SpeedOS ist im Internet**. TCP folgt —
-      Bestandsaufnahme in [docs/serie5-netzwerk.md](docs/serie5-netzwerk.md)
+- [x] **Netzwerk (Serie 5):** virtio-net (interrupt-getriebener Empfang) auf
+      der Virtqueue-Basis; die geräteunabhängige Naht `NetzGeraet` (analog
+      `BlockDevice`); Ethernet + **ARP** + **IPv4** (Checksumme, Fragment-
+      Erkennung) + **ICMP** (`ping`) + **UDP** + **DHCP** (holt beim Boot
+      automatisch eine IP) + **DNS** (`nslookup`) + **eigenes TCP**
+      (Minimal-Viable, Lern-Artefakt — `hole <host>` lädt echte HTTP-Seiten,
+      10/10 sauber). Umfang/Reißleine: [docs/tcp-scope.md](docs/tcp-scope.md),
+      Bestandsaufnahme: [docs/serie5-netzwerk.md](docs/serie5-netzwerk.md)
 - [ ] **User Space (Serie 6):** Ring-3-Prozesse, Syscalls, präemptiver
       Scheduler
 - [ ] Ferner: eigene Programme laden (ELF), DNS/TLS/HTTP, Sound

@@ -188,6 +188,27 @@
   MEILENSTEIN „im Internet" ECHT (`tests/netz_dhcp_dns.rs`): DHCP →
   10.0.2.15/…/DNS 10.0.2.3, dann `example.com` → echte IP (braucht Host-
   Internet; DNS-Protokoll separat per Unit-Test bewiesen).
+- **TCP (Serie 5, Juli 2026, `src/netz/tcp.rs`) — Minimal-Viable, bewusstes
+  LERN-ARTEFAKT:** Umfang/Lücken/REISSLEINE stehen VOR dem Code in
+  docs/tcp-scope.md (Reißleine: < 9/10 saubere HTTP-Läufe ⇒ smoltcp NUR für
+  die TCP-Schicht; gemessen 10/10 → Eigenbau bleibt). Der `Verbindung`-TCB
+  ist eine REINE Zustandsmaschine: Eingaben `segment_empfangen/senden/
+  schliessen/tick`, Ausgabe ein AUSGANG gebauter Segmente (kein Selbst-
+  Senden) — derselbe Code läuft gegen echte Hardware UND im Loopback-Test
+  gegen sich selbst (Kanal mit einstellbarem Verlust). Voller Automat (11
+  Zustände), Handshake aktiv+passiv, In-Order-Daten mit festem Fenster,
+  Retransmit mit fester RTO + exp. Backoff (KEIN Karn/Jacobson), TIME_WAIT
+  (2·MSL auf 2 s verkürzt). BEWUSST NICHT: Congestion-Control, Fast-Retx,
+  SACK, Window-Scaling, Out-of-Order-Reassembly (Out-of-Order verworfen →
+  kumulatives ACK → Retransmit; Go-Back-N-artig, korrekt aber bei Verlust
+  langsam). Seq-Arithmetik zyklisch (seq_lt via `(a-b) as i32 < 0`). Puffer:
+  `netz::puffer::Ringpuffer` (Byte-Ring, spitzen=peek für Retransmit,
+  verwerfen=ACK-Freigabe) für Sende-/Empfangspuffer; Ownership copy-in/out.
+  TREIBER (`tcp::verarbeiten` aus IPv4-Proto-6-Dispatch + `tcp::hole`): EINE
+  aktive Verbindung (Mutex<Option<Verbindung>>), synchron gepumpt wie
+  ping/dns (Ausgang per ipv4::senden, Empfang per rx_verarbeiten, tick).
+  Shell `hole <host> [pfad]` = HTTP/1.0-GET (DNS→Connect→GET→Close).
+  MEILENSTEIN ECHT (`tests/netz_tcp.rs`): 10/10 example.com:80 sauber.
 - **FAT32-Treiber (Juli 2026, `src/fs/fat32.rs`) — NUR LESEN:**
   SpeedOS liest fremde FAT32-Medien ("der USB-Stick"), schreibt sie
   aber NIE (jeder Schreib-Weg -> `IoFehler::NurLesen`). Kein/kaputtes
