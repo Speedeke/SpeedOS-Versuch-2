@@ -88,15 +88,53 @@ die richtige Ingenieur-Entscheidung, keine Niederlage.
 - **End-to-End** (soweit Netz verfügbar): eine echte HTTP-Anfrage über slirp —
   das ist zugleich die Messung für die Reißleine oben.
 
-## Messergebnis (Juli 2026)
+## Messergebnisse (Juli 2026)
 
-Erste Messung mit `tests/netz_tcp.rs` (10 HTTP/1.0-Abrufe gegen
-`example.com:80` über slirp): **10/10 sauber** — jeder Lauf mit erfolgreichem
-Handshake, vollständiger Antwort (`HTTP/1.1 200 OK`, 828 Byte) und sauberem
-Close. Das Kriterium (≥ 9/10) ist **erfüllt**: Die Reißleine wird NICHT
-gezogen, das Eigenbau-TCP bleibt. (Die Messung ist als Test reproduzierbar;
-manuell: `hole example.com` in der Shell.)
+### Messung 1 — Internet über slirp (`tests/netz_tcp.rs`)
 
-Der Unit-Test `test_tcp_loopback_mit_verlust` beweist zusätzlich, dass
-Handshake + mehrsegmentige Daten + Close auch bei **20 % Paketverlust**
-durchkommen (Retransmit + Zustandsautomat greifen zusammen).
+10 HTTP-Abrufe gegen `example.com:80`: **10/10 sauber** — jeder Lauf mit
+erfolgreichem Handshake, vollständiger Antwort (`HTTP/1.1 200 OK`) und
+sauberem Close.
+
+### Messung 2 — LAN-Server, der eigentliche Prüfpunkt (`tests/netz_http.rs`)
+
+Aufbau: auf dem Host `python -m http.server 8000` in einem Verzeichnis mit
+einer **21 700 Byte** großen `probe.txt`; QEMUs slirp zeigt den Host dem Gast
+als `10.0.2.2`. Die Datei ist ABSICHTLICH größer als unser Empfangsfenster
+(8 KiB) — der Transfer läuft also über mehrere Fensterfüllungen samt
+Fenster-Updates.
+
+Geprüft wird bei JEDEM Abruf streng: Status 200, Rumpflänge **exakt** gleich
+`Content-Length`, Anfang UND Ende des Inhalts vorhanden (kein verlorenes oder
+doppeltes Byte).
+
+**Ergebnis: 10/10 Abrufe sauber, je 21 700 Byte vollständig.**
+
+```
+[LAN] Versuch  1..10: OK — HTTP 200 , 21700 Byte vollstaendig
+[LAN-REISSLEINE] 10/10 Abrufe sauber (21700 Byte je Datei). Kriterium: >= 9/10.
+```
+
+### Verdikt
+
+Das Kriterium (≥ 9/10) ist in BEIDEN Messungen erfüllt → **die Reißleine wird
+NICHT gezogen, das Eigenbau-TCP bleibt.** Beide Messungen sind als Tests
+reproduzierbar (`cargo test --test netz_http`, `--test netz_tcp`); manuell:
+`hole http://10.0.2.2:8000/probe.txt` bzw. `hole http://example.com`.
+
+Zusätzlich beweist `test_tcp_loopback_mit_verlust`, dass Handshake +
+mehrsegmentige Daten + Close auch bei **20 % Paketverlust** durchkommen
+(Retransmit + Zustandsautomat greifen zusammen), und
+`test_http_auf_platte_speichern`, dass ein über den eigenen Stack geholter
+Body byte-identisch auf der SpeedFS-Platte landet.
+
+### Reproduktion der LAN-Messung
+
+```
+# auf dem Host (Verzeichnis mit probe.txt):
+python -m http.server 8000
+# dann im Projekt:
+cargo test --test netz_http
+```
+Läuft kein Server, überspringt der Test die Messung sauber (statt rot zu
+werden) — der TCP-Kern ist ohnehin per Loopback-Unit-Test abgesichert.

@@ -244,6 +244,12 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     executor.spawn(Task::new("Log-Schreiber", speed_os::protokoll::log_task()));
     executor.spawn(Task::new("PS/2-Maus", speed_os::maus::maus_task()));
     executor.spawn(Task::new("Netz-Dispatch", speed_os::netz::netz_task()));
+    // Der Socket-Takt: tickt TCP-Timer (Retransmits) auch dann, wenn gerade
+    // nichts empfangen wird — sonst haengen Verbindungen bei Paketverlust.
+    executor.spawn(Task::new(
+        "Socket-Takt",
+        speed_os::netz::socket::takt_task(),
+    ));
     executor.spawn(
         Task::new("Compositor", speed_os::fenster::compositor_task()).mit_art(TaskArt::Fenster),
     );

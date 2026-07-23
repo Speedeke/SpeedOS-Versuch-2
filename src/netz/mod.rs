@@ -28,8 +28,10 @@ pub mod dns;
 pub mod ethernet;
 pub mod geraet;
 pub mod icmp;
+pub mod http;
 pub mod ipv4;
 pub mod puffer;
+pub mod socket;
 pub mod tcp;
 pub mod udp;
 
@@ -263,8 +265,17 @@ fn dispatch(frame: &[u8]) {
 pub async fn netz_task() {
     loop {
         geraet::rx_warten().await;
-        rx_verarbeiten();
+        pumpen();
     }
+}
+
+/// EIN vollständiger Netz-Schritt: Empfangenes verarbeiten UND die Sockets
+/// bedienen (Timer ticken, erzeugte Segmente wirklich senden). Das ist der
+/// Takt, den sowohl der `netz_task` als auch jede synchrone Pump-Schleife
+/// (HTTP-Client, Shell-Befehle) benutzt.
+pub fn pumpen() {
+    rx_verarbeiten();
+    socket::bedienen();
 }
 
 // ---------------------------------------------------------------------------

@@ -5,6 +5,52 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### Serie 5: Socket-API + HTTP-Client — die öffentliche Fassade des Stacks
+- **`src/netz/socket.rs` — DIE NAHT FÜR SERIE 6 (User-Space).** Anwendungen
+  reden nur noch hierüber, nie mit `tcp::Verbindung`/`udp` direkt:
+  `oeffnen/binden/lauschen/verbinden/senden/empfangen/schliessen` +
+  `zustand`/`verfuegbar`. **HANDLES statt Zeiger** (undurchsichtige,
+  monoton wachsende IDs — kein Recycling, kein Kernel-Zeiger nach außen),
+  **klare Fehler-Enums** (`SocketFehler` mit deutschen Meldungen), und die
+  **Puffer-Ownership explizit**: `senden` kopiert HINEIN, `empfangen` HERAUS,
+  in vom Aufrufer gestellte Slices — genau die Grenze, an der später
+  copy-in/out zwischen Kernel und User sitzt. TCP UND UDP über dieselbe API
+  (TCP trägt die Zustandsmaschine, UDP nutzt den bestehenden Port-Demux).
+  **TLS-agnostisch**: die API kennt nur Bytes (TLS wäre später eine Schicht
+  darüber).
+- **Der `netz_task` bedient die Sockets**: neues `netz::pumpen()` = Empfang
+  verarbeiten + `socket::bedienen()` (TCP-Timer ticken, erzeugte Segmente per
+  IPv4 senden, fertige Sockets abräumen). Dazu ein **Socket-Takt-Task**
+  (100 ms), damit Retransmits auch ohne eingehenden Verkehr feuern. Der alte
+  Einzelverbindungs-Treiber in `tcp.rs` ist weg; `tcp::verarbeiten` stellt
+  Segmente per 4-Tupel (bzw. lauschendem Port) dem passenden Socket zu.
+- **`src/netz/http.rs` — HTTP/1.1-Client**: Anfrage bauen (Host-Header,
+  `Connection: close`), Antwort parsen — Statuszeile, Kopfzeilen
+  (case-insensitiv, robust gegen krumme Abstände/Zeilen ohne Doppelpunkt/
+  bloße LF), Rumpf per **Content-Length UND chunked transfer encoding**
+  (inkl. Chunk-Erweiterungen; fehlender 0-Chunk = `UnvollstaendigeAntwort`).
+  **Weiterleitungen (3xx)** bis zu einer kleinen Grenze, mit Auflösung
+  absoluter/relativer `Location`-Ziele. **NUR http://** — https wird sauber
+  mit `TlsNichtUnterstuetzt` abgelehnt statt halbherzig versucht.
+- **Shell `hole <url> [zieldatei]`**: zeigt Statuszeile + alle Kopfzeilen;
+  ohne Zieldatei wird Text direkt angezeigt, mit Zieldatei wandert der Rumpf
+  aufs Dateisystem (inkl. `sync`) — **Netz und Persistenz zusammen**.
+- **MEILENSTEIN (Reißleinen-Prüfpunkt, protokolliert in docs/tcp-scope.md):**
+  gegen einen LAN-Server (`python -m http.server` auf dem Host, über slirp als
+  10.0.2.2) **10/10 Abrufe sauber, je 21 700 Byte** — die Datei ist größer als
+  das 8-KiB-Empfangsfenster, läuft also über mehrere Fensterfüllungen; geprüft
+  wird exakte Content-Length-Übereinstimmung plus Anfang und Ende. Realtest
+  gegen das Internet ebenfalls **10/10**. Kriterium (≥ 9/10) in beiden
+  Messungen erfüllt → **Eigenbau-TCP bleibt**.
+- Zusätzlich bewiesen: ein über den eigenen Stack geholter Body landet
+  **byte-identisch auf der SpeedFS-Platte** (`test_http_auf_platte_speichern`).
+- Tests: HTTP-Response-Parsing (Content-Length, chunked, Header-Wirrwarr),
+  URL-Zerlegung, Redirect-Logik, Anfrage-Bau, Socket-Handle-Lebenszyklus
+  (nach `schliessen` ist jedes weitere Kommando `UngueltigerHandle`, IDs
+  werden nie wiederverwendet) und TCP-Socket-Fehlerpfade. 187 Lib-Tests grün
+  (vorher 179) + `tests/netz_http.rs`. `cargo clippy --all-targets`
+  warnungsfrei; Desktop bootet sauber.
+
 ### Serie 5: TCP (Minimal-Viable, selbst gebaut) — SpeedOS lädt HTTP-Seiten
 - **Der lehrreichste und riskanteste Teil**, bewusst als LERN-ARTEFAKT scharf
   abgegrenzt. Umfang, bewusste Lücken und — VOR dem Code festgelegt — das

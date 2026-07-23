@@ -263,8 +263,11 @@ docs/                Migrationsplan bootloader 0.9 -> 0.11, Screenshots
       `BlockDevice`); Ethernet + **ARP** + **IPv4** (Checksumme, Fragment-
       Erkennung) + **ICMP** (`ping`) + **UDP** + **DHCP** (holt beim Boot
       automatisch eine IP) + **DNS** (`nslookup`) + **eigenes TCP**
-      (Minimal-Viable, Lern-Artefakt — `hole <host>` lädt echte HTTP-Seiten,
-      10/10 sauber). Umfang/Reißleine: [docs/tcp-scope.md](docs/tcp-scope.md),
+      (Minimal-Viable, Lern-Artefakt) + **Socket-API** (Handles, TCP+UDP —
+      die Naht für User-Space) + **HTTP/1.1-Client**: `hole <url> [datei]`
+      lädt echte Seiten (Content-Length, chunked, Redirects) und speichert
+      sie auf die Platte. LAN- und Internet-Messung je 10/10 sauber.
+      Umfang/Reißleine: [docs/tcp-scope.md](docs/tcp-scope.md),
       Bestandsaufnahme: [docs/serie5-netzwerk.md](docs/serie5-netzwerk.md)
 - [ ] **User Space (Serie 6):** Ring-3-Prozesse, Syscalls, präemptiver
       Scheduler

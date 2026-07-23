@@ -32,8 +32,6 @@ use super::puffer::{Ringpuffer, Schreiber};
 use super::Ipv4;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU16, Ordering};
-use spin::Mutex;
-use x86_64::instructions::interrupts::without_interrupts;
 
 // --- TCP-Flags (im 14. Byte des Kopfes) ---------------------------------
 const FLAG_FIN: u8 = 0x01;
@@ -294,6 +292,19 @@ impl Verbindung {
     }
     pub fn ferner_port(&self) -> u16 {
         self.ferner_port
+    }
+    pub fn lokaler_port(&self) -> u16 {
+        self.lokaler_port
+    }
+    pub fn ferne_ip(&self) -> Ipv4 {
+        self.ferne_ip
+    }
+    /// Hat die Gegenstelle ihre Senderichtung beendet (FIN empfangen)?
+    pub fn peer_hat_geschlossen(&self) -> bool {
+        matches!(
+            self.zustand,
+            Zustand::CloseWait | Zustand::LastAck | Zustand::Closing | Zustand::TimeWait | Zustand::Closed
+        )
     }
 
     /// Nimmt die gebauten Ausgangs-Segmente heraus (Treiber/Test senden sie).
@@ -697,53 +708,24 @@ impl Verbindung {
 }
 
 // ---------------------------------------------------------------------------
-// Treiber: EINE aktive Verbindung über IPv4 (für den HTTP-Abruf)
+// Anbindung ans Netz: der Dispatch reicht Segmente an die Socket-Schicht
 // ---------------------------------------------------------------------------
 //
-// Bewusst MINIMAL: genau eine Verbindung zur Zeit (kein Verbindungs-Tisch —
-// den bringt die Socket-API in einer späteren Stufe). Der Treiber verbindet
-// die reine Zustandsmaschine mit dem echten Netz:
-//   * `verarbeiten` (aus dem IPv4-Dispatch) reicht eingehende Segmente an
-//     die Verbindung,
-//   * `hole` treibt den Ablauf synchron (wie ping/nslookup): Segmente aus
-//     dem AUSGANG per IPv4 senden, den Empfang pumpen, Timer ticken.
-
-/// Die eine aktive Verbindung (Blatt-Lock, nur aus Task-Kontext).
-static VERBINDUNG: Mutex<Option<Verbindung>> = Mutex::new(None);
-
-/// Fehler des TCP-Treibers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TcpFehler {
-    /// Keine IP konfiguriert (erst DHCP/netz-ip).
-    NichtKonfiguriert,
-    /// Keine Netzwerkkarte.
-    KeinGeraet,
-    /// Verbindungsaufbau/Transfer lief in den Timeout.
-    Zeitueberschreitung,
-    /// Die Gegenstelle hat abgelehnt (RST) oder wir haben aufgegeben.
-    Abgebrochen,
-}
-
-impl TcpFehler {
-    pub fn meldung(&self) -> &'static str {
-        match self {
-            TcpFehler::NichtKonfiguriert => "keine IP konfiguriert (erst dhcp oder netz-ip)",
-            TcpFehler::KeinGeraet => "keine Netzwerkkarte vorhanden",
-            TcpFehler::Zeitueberschreitung => "Zeitueberschreitung (Handshake/Transfer)",
-            TcpFehler::Abgebrochen => "Verbindung abgebrochen (RST oder zu viele Retransmits)",
-        }
-    }
-}
+// Die VERBINDUNGEN selbst verwaltet `netz::socket` — die oeffentliche
+// Socket-API mit HANDLES. Hier bleibt nur, was TCP-eigen ist: Startwerte
+// erzeugen und eingehende Segmente weiterreichen.
 
 /// Eine initiale Sequenznummer aus der TSC-Uhr (muss nur schwer vorhersagbar
-/// sein — für unseren Lernzweck genügt die Uhr).
-fn isn() -> u32 {
+/// sein — fuer unseren Lernzweck genuegt die Uhr).
+pub(crate) fn isn() -> u32 {
     crate::zeit::us_seit_boot() as u32
 }
 
 /// Fortlaufender ephemerer Quell-Port (49152..).
 static EPH_PORT: AtomicU16 = AtomicU16::new(49152);
-fn ephemerer_port() -> u16 {
+
+/// Liefert den naechsten freien ephemeren Quell-Port.
+pub(crate) fn ephemerer_port() -> u16 {
     let p = EPH_PORT.fetch_add(1, Ordering::Relaxed);
     if p >= 60000 {
         EPH_PORT.store(49152, Ordering::Relaxed);
@@ -751,167 +733,11 @@ fn ephemerer_port() -> u16 {
     p
 }
 
-/// Aus dem IPv4-Dispatch (Protokoll 6): reicht das Segment an die aktive
-/// Verbindung. Sendet NICHT selbst — der `hole`-Ablauf leert danach den
-/// Ausgang (so bleibt der Lock-Pfad einfach).
+/// Aus dem IPv4-Dispatch (Protokoll 6): das Segment an den passenden Socket
+/// zustellen (nach 4-Tupel bzw. lauschendem Port). Sendet NICHT selbst — den
+/// Ausgang leert `socket::bedienen()`.
 pub fn verarbeiten(quell_ip: Ipv4, _ziel_ip: Ipv4, segment: &[u8]) {
-    let jetzt = crate::zeit::ms_seit_boot();
-    without_interrupts(|| {
-        if let Some(v) = VERBINDUNG.lock().as_mut() {
-            v.segment_empfangen(quell_ip, segment, jetzt);
-        }
-    });
-}
-
-/// Leert den Ausgang der Verbindung und schickt jedes Segment per IPv4 an
-/// `ferne_ip` (der Lock wird NICHT über das Senden gehalten).
-fn ausgang_senden(ferne_ip: Ipv4) {
-    let segmente = without_interrupts(|| {
-        VERBINDUNG
-            .lock()
-            .as_mut()
-            .map(|v| v.ausgang_abholen())
-            .unwrap_or_default()
-    });
-    for seg in segmente {
-        let _ = ipv4::senden(ferne_ip, PROTO_TCP, &seg);
-    }
-}
-
-/// Ein Pump-Schritt: Ausstehendes senden, Empfang verarbeiten, Timer ticken,
-/// Antworten senden.
-fn pump_schritt(ferne_ip: Ipv4) {
-    ausgang_senden(ferne_ip);
-    super::rx_verarbeiten();
-    let jetzt = crate::zeit::ms_seit_boot();
-    without_interrupts(|| {
-        if let Some(v) = VERBINDUNG.lock().as_mut() {
-            v.tick(jetzt);
-        }
-    });
-    ausgang_senden(ferne_ip);
-}
-
-/// Der aktuelle Zustand der Verbindung (None, wenn keine da ist).
-fn zustand_lesen() -> Option<Zustand> {
-    without_interrupts(|| VERBINDUNG.lock().as_ref().map(|v| v.zustand()))
-}
-
-/// Schreibt Anfrage-Bytes in den Sendepuffer.
-fn verbindung_senden(daten: &[u8]) {
-    let jetzt = crate::zeit::ms_seit_boot();
-    without_interrupts(|| {
-        if let Some(v) = VERBINDUNG.lock().as_mut() {
-            v.senden(daten, jetzt);
-        }
-    });
-}
-
-/// Holt alle verfügbaren Empfangsbytes und hängt sie an `ziel` an.
-fn empfang_anhaengen(ziel: &mut Vec<u8>) {
-    without_interrupts(|| {
-        if let Some(v) = VERBINDUNG.lock().as_mut() {
-            let mut buf = [0u8; 1024];
-            loop {
-                let n = v.empfangen(&mut buf);
-                if n == 0 {
-                    break;
-                }
-                ziel.extend_from_slice(&buf[..n]);
-            }
-        }
-    });
-}
-
-/// Leitet den Verbindungsabbau ein.
-fn verbindung_schliessen() {
-    let jetzt = crate::zeit::ms_seit_boot();
-    without_interrupts(|| {
-        if let Some(v) = VERBINDUNG.lock().as_mut() {
-            v.schliessen(jetzt);
-        }
-    });
-}
-
-/// Entfernt die Verbindung (gibt ihre Puffer frei).
-fn verbindung_raeumen() {
-    without_interrupts(|| *VERBINDUNG.lock() = None);
-}
-
-/// Baut eine TCP-Verbindung zu `ferne_ip:port` auf, sendet `anfrage`, liest
-/// die Antwort bis der Peer schließt (oder Timeout) und baut sauber ab.
-/// DER end-to-end-Weg — zugleich die Messung für die Reißleine
-/// (docs/tcp-scope.md).
-pub fn hole(
-    ferne_ip: Ipv4,
-    port: u16,
-    anfrage: &[u8],
-    timeout_ms: u64,
-) -> Result<Vec<u8>, TcpFehler> {
-    let unsere_ip = super::unsere_ip().ok_or(TcpFehler::NichtKonfiguriert)?;
-    super::mac().ok_or(TcpFehler::KeinGeraet)?;
-
-    let jetzt = crate::zeit::ms_seit_boot();
-    let v = Verbindung::verbinden_aktiv(unsere_ip, ephemerer_port(), ferne_ip, port, isn(), jetzt);
-    without_interrupts(|| *VERBINDUNG.lock() = Some(v));
-    let deadline = jetzt + timeout_ms;
-
-    // 1. Handshake abwarten.
-    loop {
-        pump_schritt(ferne_ip);
-        match zustand_lesen() {
-            Some(Zustand::Established) => break,
-            None | Some(Zustand::Closed) => {
-                verbindung_raeumen();
-                return Err(TcpFehler::Abgebrochen);
-            }
-            _ => {}
-        }
-        if crate::zeit::ms_seit_boot() >= deadline {
-            verbindung_raeumen();
-            return Err(TcpFehler::Zeitueberschreitung);
-        }
-        x86_64::instructions::hlt();
-    }
-
-    // 2. Anfrage senden.
-    verbindung_senden(anfrage);
-
-    // 3. Antwort lesen, bis der Peer schließt (FIN -> CLOSE_WAIT) oder Timeout.
-    let mut antwort = Vec::new();
-    loop {
-        pump_schritt(ferne_ip);
-        empfang_anhaengen(&mut antwort);
-        let z = zustand_lesen();
-        let peer_fertig = matches!(
-            z,
-            Some(Zustand::CloseWait) | Some(Zustand::LastAck) | Some(Zustand::Closed) | None
-        );
-        if peer_fertig {
-            break;
-        }
-        if crate::zeit::ms_seit_boot() >= deadline {
-            break; // partielle Antwort ist besser als nichts
-        }
-        x86_64::instructions::hlt();
-    }
-
-    // 4. Sauber schließen (unser FIN, auf das ACK des Peers warten).
-    verbindung_schliessen();
-    let close_deadline = crate::zeit::ms_seit_boot() + 3000;
-    loop {
-        pump_schritt(ferne_ip);
-        empfang_anhaengen(&mut antwort);
-        if matches!(zustand_lesen(), Some(Zustand::Closed) | None) {
-            break;
-        }
-        if crate::zeit::ms_seit_boot() >= close_deadline {
-            break;
-        }
-        x86_64::instructions::hlt();
-    }
-    verbindung_raeumen();
-    Ok(antwort)
+    super::socket::tcp_zustellen(quell_ip, segment);
 }
 
 // ---------------------------------------------------------------------------

@@ -207,8 +207,30 @@
   TREIBER (`tcp::verarbeiten` aus IPv4-Proto-6-Dispatch + `tcp::hole`): EINE
   aktive Verbindung (Mutex<Option<Verbindung>>), synchron gepumpt wie
   ping/dns (Ausgang per ipv4::senden, Empfang per rx_verarbeiten, tick).
-  Shell `hole <host> [pfad]` = HTTP/1.0-GET (DNS→Connect→GET→Close).
   MEILENSTEIN ECHT (`tests/netz_tcp.rs`): 10/10 example.com:80 sauber.
+- **Socket-API + HTTP-Client (Serie 5, Juli 2026, `src/netz/{socket,http}.rs`)
+  — die öffentliche Fassade:** `socket.rs` ist DIE NAHT FÜR SERIE 6:
+  HANDLES statt Zeiger (undurchsichtige, monoton wachsende IDs — kein
+  Recycling; nach `schliessen` liefert JEDE Operation `UngueltigerHandle`),
+  klare Fehler-Enums, PUFFER-OWNERSHIP explizit (senden=copy-in,
+  empfangen=copy-out in Aufrufer-Slices — die künftige Kernel/User-Grenze),
+  TLS-agnostisch (kennt nur Bytes). TCP UND UDP über dieselbe API: TCP trägt
+  `tcp::Verbindung`, UDP nutzt den bestehenden Port-Demux. Der alte
+  Einzelverbindungs-Treiber in tcp.rs ist WEG; `tcp::verarbeiten` →
+  `socket::tcp_zustellen` (Zustellung per 4-Tupel, sonst lauschender Port).
+  `socket::bedienen()` tickt Timer, sendet die erzeugten Segmente per IPv4
+  (Socket-Lock beim Senden NIE gehalten) und räumt fertige Sockets ab;
+  `netz::pumpen()` = rx_verarbeiten + bedienen (nutzen netz_task UND jede
+  synchrone Shell-Pumpe). Ein "Socket-Takt"-Task (100 ms) lässt Retransmits
+  auch ohne eingehenden Verkehr feuern. `http.rs`: Anfrage bauen
+  (Host, Connection: close), Antwort parsen (Statuszeile, Header
+  case-insensitiv/robust, Rumpf per Content-Length ODER chunked mit
+  0-Chunk-Prüfung), 3xx-Weiterleitungen mit absoluter/relativer
+  Location-Auflösung, NUR http:// (https ⇒ `TlsNichtUnterstuetzt`).
+  Shell `hole <url> [zieldatei]` zeigt Status+Header und speichert den Body
+  wahlweise aufs Dateisystem (mit sync). MEILENSTEIN protokolliert in
+  docs/tcp-scope.md: LAN-Server 10/10 à 21 700 Byte (> Fenster!), Internet
+  10/10; Body byte-identisch auf /platte.
 - **FAT32-Treiber (Juli 2026, `src/fs/fat32.rs`) — NUR LESEN:**
   SpeedOS liest fremde FAT32-Medien ("der USB-Stick"), schreibt sie
   aber NIE (jeder Schreib-Weg -> `IoFehler::NurLesen`). Kein/kaputtes

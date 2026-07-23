@@ -19,7 +19,6 @@
 
 extern crate alloc;
 
-use alloc::string::String;
 use bootloader_api::{entry_point, BootInfo};
 use core::panic::PanicInfo;
 use speed_os::netz;
@@ -74,33 +73,29 @@ fn test_http_reissleine() {
         }
     };
 
-    let anfrage = "GET / HTTP/1.0\r\nHost: example.com\r\nConnection: close\r\n\r\n";
+    // Über die Socket-API + den HTTP-Client (die neue öffentliche Fassade).
+    let _ = ziel; // die Auflösung macht der HTTP-Client selbst
     let mut sauber = 0u32;
     for versuch in 1..=10 {
-        match netz::tcp::hole(ziel, 80, anfrage.as_bytes(), 10_000) {
-            Ok(antwort) => {
-                let text = String::from_utf8_lossy(&antwort);
-                // "Sauber" = HTTP-Statuszeile, vollständiger Kopf und ein Rumpf.
-                let hat_status = text.starts_with("HTTP/");
-                let hat_kopf_ende = text.contains("\r\n\r\n");
-                let hat_rumpf = text
-                    .find("\r\n\r\n")
-                    .map(|i| i + 4 < antwort.len())
-                    .unwrap_or(false);
-                if hat_status && hat_kopf_ende && hat_rumpf {
+        match netz::http::holen("http://example.com/") {
+            Ok((_url, antwort)) => {
+                // "Sauber" = 2xx-Status UND vollständiger Rumpf (antwort_parsen
+                // prüft Content-Length bzw. den chunked-Abschluss).
+                if (200..300).contains(&antwort.status) && !antwort.rumpf.is_empty() {
                     sauber += 1;
-                    let status = text.lines().next().unwrap_or("");
                     serial_println!(
-                        "[TCP] Versuch {:>2}: OK ({} Byte) — {}",
+                        "[TCP] Versuch {:>2}: OK — HTTP {} {}, {} Byte Rumpf",
                         versuch,
-                        antwort.len(),
-                        status
+                        antwort.status,
+                        antwort.grund,
+                        antwort.rumpf.len()
                     );
                 } else {
                     serial_println!(
-                        "[TCP] Versuch {:>2}: unvollstaendig ({} Byte)",
+                        "[TCP] Versuch {:>2}: Status {} / {} Byte Rumpf",
                         versuch,
-                        antwort.len()
+                        antwort.status,
+                        antwort.rumpf.len()
                     );
                 }
             }

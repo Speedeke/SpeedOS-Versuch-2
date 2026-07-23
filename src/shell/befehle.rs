@@ -1627,8 +1627,10 @@ impl Befehl for Nslookup {
     }
 }
 
-/// hole — holt eine HTTP/1.0-Seite über den eigenen TCP-Stack (Lern-Artefakt,
-/// siehe docs/tcp-scope.md). Aufruf: hole <host> [pfad]
+/// hole — laedt eine http-Ressource ueber den eigenen Netz-Stack (Socket-API
+/// -> HTTP-Client). Aufruf: hole <url> [zieldatei]
+/// Ohne Zieldatei wird Text direkt angezeigt; mit Zieldatei wandert der Rumpf
+/// aufs Dateisystem (z. B. nach /platte) — Netz und Persistenz zusammen.
 struct Hole;
 
 impl Befehl for Hole {
@@ -1636,66 +1638,89 @@ impl Befehl for Hole {
         "hole"
     }
     fn beschreibung(&self) -> &'static str {
-        "Holt eine HTTP/1.0-Seite (eigener TCP): hole <host> [pfad]"
+        "Laedt eine http-Seite: hole <url> [zieldatei]"
     }
-    fn ausfuehren(&self, argumente: &str, _kontext: &mut ShellKontext, _registry: &[Box<dyn Befehl>]) {
+    fn ausfuehren(&self, argumente: &str, kontext: &mut ShellKontext, _registry: &[Box<dyn Befehl>]) {
         if keine_nic() {
             return;
         }
         let mut teile = argumente.split_whitespace();
-        let host = match teile.next() {
-            Some(h) => h,
+        let url_text = match teile.next() {
+            Some(u) => u,
             None => {
-                println!("Benutzung: hole <host> [pfad]   (z. B. hole example.com /)");
+                println!("Benutzung: hole <url> [zieldatei]");
+                println!("  Beispiele: hole http://example.com");
+                println!("             hole http://10.0.2.2:8000/datei.txt /platte/heim/datei.txt");
                 return;
             }
         };
-        let pfad = teile.next().unwrap_or("/");
+        let zieldatei = teile.next();
 
-        // Host auflösen (IP oder Name — nslookup-Weg).
-        let ip = match crate::netz::dns::aufloesen(host) {
-            Ok(ip) => ip,
+        println!("Hole {} ...", url_text);
+        let (end_url, antwort) = match crate::netz::http::holen(url_text) {
+            Ok(paar) => paar,
             Err(fehler) => {
                 konsole::set_color(Color::LightRed, Color::Black);
-                println!("DNS-Fehler: {}", fehler.meldung());
+                println!("Fehler: {}", fehler.meldung());
                 konsole::set_color(Color::LightGray, Color::Black);
                 return;
             }
         };
-        println!("Verbinde mit {} ({}) Port 80 ...", host, ip);
 
-        // Eine schlichte HTTP/1.0-Anfrage (Connection: close -> Server
-        // schließt nach der Antwort, wir lesen bis zum FIN).
-        let anfrage = format!(
-            "GET {} HTTP/1.0\r\nHost: {}\r\nConnection: close\r\n\r\n",
-            pfad, host
-        );
-        match crate::netz::tcp::hole(ip, 80, anfrage.as_bytes(), 10_000) {
-            Ok(antwort) => {
-                // Status-Zeile + Kopf/Rumpf-Größen anzeigen.
-                let text = String::from_utf8_lossy(&antwort);
-                let status = text.lines().next().unwrap_or("(keine Statuszeile)");
-                let rumpf_start = text.find("\r\n\r\n").map(|i| i + 4);
-                konsole::set_color(Color::LightGreen, Color::Black);
-                println!("{}", status);
-                konsole::set_color(Color::LightGray, Color::Black);
-                println!("Empfangen: {} Bytes gesamt.", antwort.len());
-                if let Some(start) = rumpf_start {
-                    let rumpf = &text[start..];
-                    let zeigen = rumpf.len().min(400);
-                    println!("--- Rumpf (erste {} von {} Byte) ---", zeigen, rumpf.len());
-                    print!("{}", &rumpf[..zeigen]);
-                    if rumpf.len() > zeigen {
-                        println!("\n... ({} weitere Byte)", rumpf.len() - zeigen);
-                    } else {
-                        println!();
+        // Statuszeile (gruen bei 2xx, gelb sonst) + Kopfzeilen anzeigen.
+        let farbe = if (200..300).contains(&antwort.status) {
+            Color::LightGreen
+        } else {
+            Color::Yellow
+        };
+        konsole::set_color(farbe, Color::Black);
+        println!("HTTP {} {}", antwort.status, antwort.grund);
+        konsole::set_color(Color::LightGray, Color::Black);
+        if end_url.als_text() != url_text {
+            println!("(weitergeleitet nach {})", end_url.als_text());
+        }
+        for (name, wert) in &antwort.header {
+            konsole::set_color(Color::LightCyan, Color::Black);
+            print!("  {}: ", name);
+            konsole::set_color(Color::LightGray, Color::Black);
+            println!("{}", wert);
+        }
+        println!("Rumpf: {} Byte", antwort.rumpf.len());
+
+        match zieldatei {
+            // Speichern (Netz + Persistenz zusammen).
+            Some(datei) => {
+                let pfad = kontext.aufloesen(datei);
+                match fs::mit_fs(|f| f.schreiben(&pfad, &antwort.rumpf)) {
+                    Ok(()) => {
+                        // "Gespeichert" heisst "auf dem Medium" -> sync.
+                        if let Err(fehler) = fs::sync() {
+                            fs_fehler_ausgeben(fehler);
+                            return;
+                        }
+                        konsole::set_color(Color::LightGreen, Color::Black);
+                        println!("{} Byte nach {} gespeichert.", antwort.rumpf.len(), pfad);
+                        konsole::set_color(Color::LightGray, Color::Black);
                     }
+                    Err(fehler) => fs_fehler_ausgeben(fehler),
                 }
             }
-            Err(fehler) => {
-                konsole::set_color(Color::LightRed, Color::Black);
-                println!("TCP-Fehler: {}", fehler.meldung());
-                konsole::set_color(Color::LightGray, Color::Black);
+            // Anzeigen (nur bei Text-Inhalten, gedeckelt).
+            None => {
+                if !antwort.ist_text() {
+                    println!("(kein Text-Inhalt — mit Zieldatei speichern: hole <url> <datei>)");
+                    return;
+                }
+                let text = String::from_utf8_lossy(&antwort.rumpf);
+                let zeigen = text.char_indices().nth(800).map(|(i, _)| i).unwrap_or(text.len());
+                println!("--- Rumpf ---");
+                print!("{}", &text[..zeigen]);
+                if zeigen < text.len() {
+                    println!();
+                    println!("... (gekuerzt; ganz speichern: hole <url> <datei>)");
+                } else {
+                    println!();
+                }
             }
         }
     }
