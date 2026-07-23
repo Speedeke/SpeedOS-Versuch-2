@@ -23,11 +23,14 @@
 // selbst (`netz-ip` in der Shell); DHCP kommt in einer späteren Stufe.
 
 pub mod arp;
+pub mod dhcp;
+pub mod dns;
 pub mod ethernet;
 pub mod geraet;
 pub mod icmp;
 pub mod ipv4;
 pub mod puffer;
+pub mod udp;
 
 pub use ethernet::Mac;
 pub use geraet::{NetzFehler, NetzGeraet};
@@ -43,7 +46,7 @@ use x86_64::instructions::interrupts::without_interrupts;
 /// Eine IPv4-Adresse (vier Oktette, z. B. 10.0.2.15). Bewusst ein
 /// Newtype über `[u8; 4]` — so ist sie typsicher von einer MAC oder
 /// beliebigen Bytes zu unterscheiden.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub struct Ipv4(pub [u8; 4]);
 
 impl Ipv4 {
@@ -85,23 +88,43 @@ impl core::fmt::Display for Ipv4 {
 // Statische Netz-Konfiguration (IP / Maske / Gateway)
 // ---------------------------------------------------------------------------
 
-/// Die statische IP-Konfiguration. `gesetzt` unterscheidet „bewusst
-/// konfiguriert" von der Null-Vorgabe.
+/// Woher die IP-Konfiguration stammt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Quelle {
+    /// Noch nichts gesetzt.
+    Keine,
+    /// Von Hand gesetzt (`netz-ip`).
+    Statisch,
+    /// Per DHCP bezogen.
+    Dhcp,
+}
+
+/// Die IP-Konfiguration: Adresse, Maske, Gateway, DNS-Server und (bei DHCP)
+/// die Lease-Dauer. `gesetzt` unterscheidet „bewusst konfiguriert" von der
+/// Null-Vorgabe.
 #[derive(Debug, Clone, Copy)]
 pub struct NetzKonfig {
     pub ip: Ipv4,
     pub maske: Ipv4,
     pub gateway: Ipv4,
+    /// Primärer DNS-Server (0.0.0.0 = keiner bekannt).
+    pub dns: Ipv4,
     pub gesetzt: bool,
+    pub quelle: Quelle,
+    /// Lease-Dauer in Sekunden (nur bei DHCP; 0 sonst).
+    pub lease_sekunden: u32,
 }
 
 /// Die aktuelle Konfiguration (Blatt-Lock, nur aus Task-Kontext). Beginnt
-/// leer — bis `netz-ip` sie setzt (oder später DHCP).
+/// leer — bis `netz-ip` sie setzt oder DHCP eine Lease bezieht.
 static KONFIG: Mutex<NetzKonfig> = Mutex::new(NetzKonfig {
     ip: Ipv4::NULL,
     maske: Ipv4::NULL,
     gateway: Ipv4::NULL,
+    dns: Ipv4::NULL,
     gesetzt: false,
+    quelle: Quelle::Keine,
+    lease_sekunden: 0,
 });
 
 /// Liest die aktuelle Konfiguration (Kopie).
@@ -109,14 +132,33 @@ pub fn konfig() -> NetzKonfig {
     without_interrupts(|| *KONFIG.lock())
 }
 
-/// Setzt die statische IP-Konfiguration (Shell-Befehl `netz-ip`).
+/// Setzt die STATISCHE IP-Konfiguration (Shell-Befehl `netz-ip`). DNS bleibt
+/// leer (per DHCP oder später separat).
 pub fn konfig_setzen(ip: Ipv4, maske: Ipv4, gateway: Ipv4) {
     without_interrupts(|| {
         *KONFIG.lock() = NetzKonfig {
             ip,
             maske,
             gateway,
+            dns: Ipv4::NULL,
             gesetzt: true,
+            quelle: Quelle::Statisch,
+            lease_sekunden: 0,
+        };
+    });
+}
+
+/// Übernimmt eine per DHCP bezogene Konfiguration (inkl. DNS + Lease).
+pub fn konfig_setzen_dhcp(ip: Ipv4, maske: Ipv4, gateway: Ipv4, dns: Ipv4, lease_sekunden: u32) {
+    without_interrupts(|| {
+        *KONFIG.lock() = NetzKonfig {
+            ip,
+            maske,
+            gateway,
+            dns,
+            gesetzt: true,
+            quelle: Quelle::Dhcp,
+            lease_sekunden,
         };
     });
 }
@@ -126,6 +168,16 @@ pub fn unsere_ip() -> Option<Ipv4> {
     let k = konfig();
     if k.gesetzt {
         Some(k.ip)
+    } else {
+        None
+    }
+}
+
+/// Der bekannte DNS-Server (None, wenn keiner konfiguriert ist).
+pub fn dns_server() -> Option<Ipv4> {
+    let k = konfig();
+    if k.dns != Ipv4::NULL {
+        Some(k.dns)
     } else {
         None
     }

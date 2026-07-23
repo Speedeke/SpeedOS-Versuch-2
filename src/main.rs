@@ -143,9 +143,13 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     speed_os::pci::init();
     speed_os::virtio::blk::init();
     // virtio-net (Serie 5): NIC finden, RX+TX aufsetzen und als
-    // NetzGeraet in der Netz-Schicht REGISTRIEREN (Ethernet/ARP reden
-    // ab jetzt nur mit dem Trait). Kein Gerät -> stille Rückkehr.
+    // NetzGeraet in der Netz-Schicht REGISTRIEREN (Ethernet/ARP/IPv4/UDP
+    // reden ab jetzt nur mit dem Trait). Kein Gerät -> stille Rückkehr.
     speed_os::virtio::net::init();
+    // DHCP: sich beim Boot automatisch eine IP holen (IP/Maske/Gateway/DNS).
+    // Timeout 3 s -> Fallback auf statische Konfiguration per 'netz-ip'.
+    // Pumpt den Empfang synchron; auf QEMU-slirp antwortet der Server sofort.
+    speed_os::netz::dhcp::autokonfig(3000);
 
     //    Dateisystem: RamFs als Wurzel mounten (mit Demo-Dateien),
     //    dann die Daten-Platte AUTO-MOUNTEN (SpeedFS auf /platte;

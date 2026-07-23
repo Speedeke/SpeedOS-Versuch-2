@@ -85,9 +85,12 @@ pub fn alle_befehle() -> Vec<Box<dyn Befehl>> {
         Box::new(Netz),
         Box::new(NetzIp),
         Box::new(NetzLausch),
+        Box::new(NetzStatus),
+        Box::new(Dhcp),
         Box::new(Arp),
         Box::new(ArpPing),
         Box::new(Ping),
+        Box::new(Nslookup),
     ]
 }
 
@@ -1491,6 +1494,134 @@ impl Befehl for Ping {
                 ms_text(summe_us / empfangen as u64),
                 ms_text(max_us)
             );
+        }
+    }
+}
+
+/// Gibt eine Konfigurations-Zeile "  Name   Wert" aus.
+fn status_zeile(name: &str, wert: &str) {
+    konsole::set_color(Color::LightCyan, Color::Black);
+    print!("  {:<9}", name);
+    konsole::set_color(Color::LightGray, Color::Black);
+    println!("{}", wert);
+}
+
+/// netz-status — zeigt die volle Netz-Konfiguration: IP, Maske, Gateway,
+/// DNS, Lease und die Quelle (DHCP oder statisch).
+struct NetzStatus;
+
+impl Befehl for NetzStatus {
+    fn name(&self) -> &'static str {
+        "netz-status"
+    }
+    fn beschreibung(&self) -> &'static str {
+        "Zeigt IP, Maske, Gateway, DNS, Lease und Quelle"
+    }
+    fn ausfuehren(&self, _argumente: &str, _kontext: &mut ShellKontext, _registry: &[Box<dyn Befehl>]) {
+        use crate::netz::Quelle;
+        if keine_nic() {
+            return;
+        }
+        println!("Netz-Status:");
+        if let Some(mac) = crate::netz::mac() {
+            status_zeile("MAC", &crate::netz::ethernet::mac_text(&mac));
+        }
+        let k = crate::netz::konfig();
+        let quelle = match k.quelle {
+            Quelle::Keine => "keine",
+            Quelle::Statisch => "statisch (netz-ip)",
+            Quelle::Dhcp => "DHCP",
+        };
+        status_zeile("Quelle", quelle);
+        if !k.gesetzt {
+            konsole::set_color(Color::Yellow, Color::Black);
+            println!("  Keine IP — 'dhcp' versuchen oder 'netz-ip <ip> <maske> <gateway>'.");
+            konsole::set_color(Color::LightGray, Color::Black);
+            return;
+        }
+        status_zeile("IP", &format!("{}", k.ip));
+        status_zeile("Maske", &format!("{}", k.maske));
+        status_zeile("Gateway", &format!("{}", k.gateway));
+        status_zeile(
+            "DNS",
+            &if k.dns == crate::netz::Ipv4::NULL {
+                String::from("-")
+            } else {
+                format!("{}", k.dns)
+            },
+        );
+        if k.quelle == Quelle::Dhcp {
+            status_zeile("Lease", &format!("{} s", k.lease_sekunden));
+        }
+    }
+}
+
+/// dhcp — bezieht (erneut) eine IP per DHCP und übernimmt sie.
+struct Dhcp;
+
+impl Befehl for Dhcp {
+    fn name(&self) -> &'static str {
+        "dhcp"
+    }
+    fn beschreibung(&self) -> &'static str {
+        "Bezieht eine IP per DHCP (IP/Maske/Gateway/DNS)"
+    }
+    fn ausfuehren(&self, _argumente: &str, _kontext: &mut ShellKontext, _registry: &[Box<dyn Befehl>]) {
+        if keine_nic() {
+            return;
+        }
+        println!("DHCP: sende DISCOVER, warte auf Angebot ...");
+        match crate::netz::dhcp::beziehen(4000) {
+            Some(e) => {
+                crate::netz::konfig_setzen_dhcp(e.ip, e.maske, e.gateway, e.dns, e.lease_sekunden);
+                konsole::set_color(Color::LightGreen, Color::Black);
+                println!("Lease bezogen: {} (Maske {}, Gateway {})", e.ip, e.maske, e.gateway);
+                konsole::set_color(Color::LightGray, Color::Black);
+                println!("DNS {}, Lease {} s. Details: netz-status", e.dns, e.lease_sekunden);
+            }
+            None => {
+                konsole::set_color(Color::Yellow, Color::Black);
+                println!("Keine DHCP-Antwort (Timeout). Alternativ: netz-ip <ip> <maske> <gateway>");
+                konsole::set_color(Color::LightGray, Color::Black);
+            }
+        }
+    }
+}
+
+/// nslookup — löst einen Namen über den DNS-Server auf (A-Record).
+struct Nslookup;
+
+impl Befehl for Nslookup {
+    fn name(&self) -> &'static str {
+        "nslookup"
+    }
+    fn beschreibung(&self) -> &'static str {
+        "Loest einen Namen zu einer IP auf: nslookup <name>"
+    }
+    fn ausfuehren(&self, argumente: &str, _kontext: &mut ShellKontext, _registry: &[Box<dyn Befehl>]) {
+        let name = argumente.trim();
+        if name.is_empty() {
+            println!("Benutzung: nslookup <name>   (z. B. nslookup example.com)");
+            return;
+        }
+        if keine_nic() {
+            return;
+        }
+        if let Some(server) = crate::netz::dns_server() {
+            status_zeile("Server", &format!("{}", server));
+        }
+        match crate::netz::dns::aufloesen(name) {
+            Ok(ip) => {
+                status_zeile("Name", name);
+                konsole::set_color(Color::LightGreen, Color::Black);
+                status_zeile("Adresse", &format!("{}", ip));
+                konsole::set_color(Color::LightGray, Color::Black);
+            }
+            Err(fehler) => {
+                konsole::set_color(Color::LightRed, Color::Black);
+                println!("Fehler: {}", fehler.meldung());
+                konsole::set_color(Color::LightGray, Color::Black);
+            }
         }
     }
 }

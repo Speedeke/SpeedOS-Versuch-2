@@ -5,6 +5,34 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### Serie 5: UDP + DHCP + DNS — SpeedOS ist im Internet
+- **UDP-Schicht** (`src/netz/udp.rs`): Datagramme parsen/bauen (Ports, Länge,
+  Prüfsumme). Die **Prüfsumme über den PSEUDO-HEADER** (Quell-/Ziel-IP,
+  Protokoll, UDP-Länge + Segment) als reine, getestete Funktion. Ein
+  **Port-Demux**: Dienste `binden` einen Port, ankommende Datagramme landen in
+  seiner Empfangs-Queue (`empfangen`) — bewusst die VORÜBUNG für die spätere
+  Socket-API (Handles statt Zeiger, jedes Datagramm ein eigener Vec).
+- **DHCP-Client** (`src/netz/dhcp.rs`): der Vier-Wege-Tanz DISCOVER → OFFER →
+  REQUEST → ACK über UDP-Broadcast (68→67). Übernimmt IP, Maske, Gateway,
+  DNS-Server und Lease-Dauer aus den Optionen. Broadcast-Flag gesetzt, damit
+  der Server antworten kann, BEVOR wir eine IP haben (IPv4 akzeptiert dafür
+  jetzt 255.255.255.255). **Beim Boot automatisch** (`autokonfig`, 3 s Timeout
+  → Fallback auf statische Config). Neu in IPv4: `senden_an_mac` (explizite
+  Quell-IP 0.0.0.0 an die Broadcast-MAC, ohne ARP/Config — genau für DHCP).
+- **DNS-Resolver** (`src/netz/dns.rs`): A-Record-Query bauen und Antwort
+  parsen — inklusive **Namens-KOMPRESSION** (0xC0-Zeiger mit Schleifen-Schutz),
+  gegen den per DHCP gelernten Server (UDP 53). Kleiner **Cache mit TTL**.
+- **Shell**: `netz-status` (IP, Maske, Gateway, DNS, Lease, Quelle), `dhcp`
+  (erneut beziehen), `nslookup <name>` (Name → IP).
+- **MEILENSTEIN „SpeedOS ist im Internet" ECHT bewiesen** (`tests/netz_dhcp_dns.rs`
+  gegen slirp): DHCP → `IP 10.0.2.15 / Maske 255.255.255.0 / Gateway 10.0.2.2 /
+  DNS 10.0.2.3 / Lease 86400 s`, dann DNS → `example.com -> 172.66.147.243`.
+  Beim echten Boot: `[dhcp] Lease bezogen: IP 10.0.2.15 …` automatisch.
+- Tests: UDP-Parse/Build + Pseudo-Header-Prüfsumme, Port-Demux, DHCP-Optionen-
+  Parsing (inkl. abgeschnitten), DHCP-Discover-Bau, DNS-Namens-Kompression,
+  DNS-Query-Build + Antwort-Parsing. 174 Lib-Tests grün (vorher 166) +
+  `tests/netz_dhcp_dns.rs`. `cargo clippy --all-targets` warnungsfrei.
+
 ### Serie 5: IPv4 + ICMP — SpeedOS ist anpingbar (der klassische Meilenstein)
 - **IPv4-Schicht** (`src/netz/ipv4.rs`): Kopf parsen/bauen (Version/IHL,
   Gesamtlänge, TTL, Protokoll, Kopf-Prüfsumme), Dispatch nach Protokollfeld

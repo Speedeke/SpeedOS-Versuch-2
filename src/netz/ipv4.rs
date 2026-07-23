@@ -192,15 +192,35 @@ pub fn verarbeiten(paket: &[u8]) {
         );
         return;
     }
-    // Ist das Paket an UNS gerichtet? (Broadcast/Multicast später.)
-    match super::unsere_ip() {
-        Some(unsere_ip) if kopf.ziel == unsere_ip => {}
-        _ => return,
+    // Ist das Paket an UNS gerichtet?
+    if !fuer_uns(kopf.ziel) {
+        return;
     }
-    // Nach Protokoll an die obere Schicht dispatchen (UDP/TCP folgen).
-    if kopf.protokoll == PROTO_ICMP {
-        super::icmp::verarbeiten(kopf.quelle, kopf.ttl, nutzlast);
+    // Nach Protokoll an die obere Schicht dispatchen (TCP folgt).
+    match kopf.protokoll {
+        PROTO_ICMP => super::icmp::verarbeiten(kopf.quelle, kopf.ttl, nutzlast),
+        PROTO_UDP => super::udp::verarbeiten(kopf.quelle, kopf.ziel, nutzlast),
+        _ => {}
     }
+}
+
+/// Die limitierte Broadcast-Adresse (an ALLE im lokalen Netz).
+pub const BROADCAST_IP: Ipv4 = Ipv4([255, 255, 255, 255]);
+
+/// Ist ein Ziel an UNS gerichtet? Akzeptiert: unsere IP, die limitierte
+/// Broadcast-Adresse (255.255.255.255 — so kommen DHCP-Antworten, BEVOR wir
+/// eine IP haben) und die Subnetz-Broadcast-Adresse.
+fn fuer_uns(ziel: Ipv4) -> bool {
+    if ziel == BROADCAST_IP {
+        return true;
+    }
+    let k = super::konfig();
+    k.gesetzt && (ziel == k.ip || ziel == subnetz_broadcast(k.ip, k.maske))
+}
+
+/// Die Subnetz-Broadcast-Adresse (Host-Bits alle 1): ip | !maske.
+fn subnetz_broadcast(ip: Ipv4, maske: Ipv4) -> Ipv4 {
+    Ipv4(core::array::from_fn(|i| ip.0[i] | !maske.0[i]))
 }
 
 // ---------------------------------------------------------------------------
@@ -256,6 +276,22 @@ pub fn senden(ziel: Ipv4, protokoll: u8, nutzlast: &[u8]) -> Result<(), NetzFehl
             Ok(())
         }
     }
+}
+
+/// Sendet ein IPv4-Paket mit EXPLIZITER Quell-IP an eine EXPLIZITE Ziel-MAC
+/// — ohne ARP und ohne Konfig-Prüfung. Genau das braucht DHCP: Absender
+/// 0.0.0.0 (noch keine IP), Ziel 255.255.255.255 an die Broadcast-MAC.
+pub fn senden_an_mac(
+    quell_ip: Ipv4,
+    ziel_ip: Ipv4,
+    ziel_mac: Mac,
+    protokoll: u8,
+    nutzlast: &[u8],
+) -> Result<(), NetzFehler> {
+    let unsere_mac = super::mac().ok_or(NetzFehler::KeinGeraet)?;
+    let ip_paket = bauen(quell_ip, ziel_ip, protokoll, nutzlast);
+    let frame = ethernet::rahmen_bauen(ziel_mac, unsere_mac, ETHERTYPE_IPV4, &ip_paket);
+    super::sende_frame(&frame)
 }
 
 /// Ein Paket, das auf seine Next-Hop-MAC (ARP) wartet.

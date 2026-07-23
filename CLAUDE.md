@@ -164,7 +164,30 @@
   per Mock (`test_icmp_echo_antwort_meilenstein`) — über slirp-NAT ist der
   Gast von außen NICHT direkt pingbar (bräuchte TAP/Bridge); (2) „SpeedOS
   pingt Gateway" ECHT gegen slirp (`tests/netz_ping.rs`, ping 10.0.2.2 →
-  ttl 255). ipv4::verarbeiten prüft „an UNS gerichtet?" (dest == unsere IP).
+  ttl 255). ipv4::verarbeiten prüft „an UNS gerichtet?" (dest == unsere IP,
+  255.255.255.255 oder Subnetz-Broadcast — Broadcast nötig für DHCP).
+- **UDP + DHCP + DNS (Serie 5, Juli 2026, `src/netz/{udp,dhcp,dns}.rs`) —
+  SpeedOS ist im Internet:** UDP parst/baut Datagramme; die PRÜFSUMME läuft
+  über den PSEUDO-HEADER (src/dst-IP, Proto, Länge + Segment) — reine
+  Funktion auf der Internet-Checksumme; 0 im Feld = „keine". PORT-DEMUX:
+  `udp::binden(port)` legt eine Empfangs-Queue an, `udp::verarbeiten`
+  (aus ipv4 für Proto 17) stellt zu, `udp::empfangen(port)` holt ab —
+  VORÜBUNG für die Socket-API (Handles/Ports, Puffer-Ownership je Vec).
+  DHCP-Client: DISCOVER→OFFER→REQUEST→ACK über UDP-Broadcast (68→67),
+  BROADCAST-Flag gesetzt (Server antwortet an 255.255.255.255, bevor wir
+  eine IP haben); `ipv4::senden_an_mac` (Quell 0.0.0.0 an Broadcast-MAC,
+  ohne ARP/Config) ist der DHCP-TX-Weg. Optionen (53 Typ, 1 Maske, 3
+  Router, 6 DNS, 51 Lease, 54 Server-ID) als reine, getestete TLV-Schleife.
+  `dhcp::autokonfig(3000)` läuft BEIM BOOT (main.rs nach net::init, pumpt
+  synchron — kein Executor nötig); Timeout → Fallback statisch. NetzKonfig
+  trägt jetzt dns + quelle (Keine/Statisch/Dhcp) + lease_sekunden.
+  DNS-Resolver: A-Query bauen, Antwort parsen MIT Namens-KOMPRESSION
+  (0xC0-Zeiger, `name_lesen` folgt ihnen mit Sprung-Limit; liefert Name +
+  Offset hinter dem ERSTEN Zeiger); Cache (Name→IP, TTL, mind. 10 s);
+  ephemerer Quell-Port rotiert. Shell: `netz-status`, `dhcp`, `nslookup`.
+  MEILENSTEIN „im Internet" ECHT (`tests/netz_dhcp_dns.rs`): DHCP →
+  10.0.2.15/…/DNS 10.0.2.3, dann `example.com` → echte IP (braucht Host-
+  Internet; DNS-Protokoll separat per Unit-Test bewiesen).
 - **FAT32-Treiber (Juli 2026, `src/fs/fat32.rs`) — NUR LESEN:**
   SpeedOS liest fremde FAT32-Medien ("der USB-Stick"), schreibt sie
   aber NIE (jeder Schreib-Weg -> `IoFehler::NurLesen`). Kein/kaputtes

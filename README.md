@@ -260,11 +260,11 @@ docs/                Migrationsplan bootloader 0.9 -> 0.11, Screenshots
       Geräte, mit Diagnose-Modus ([docs/usb-boot.md](docs/usb-boot.md))
 - [ ] **Netzwerk (Serie 5, läuft):** virtio-net (interrupt-getriebener
       Empfang) auf der Virtqueue-Basis; die geräteunabhängige Naht
-      `NetzGeraet` (analog `BlockDevice`); Ethernet + **ARP** (mit Cache) +
-      **IPv4** (Checksumme, Fragment-Erkennung) + **ICMP** — SpeedOS ist
-      **anpingbar** und pingt selbst (`ping <ip>` mit RTT-Messung). UDP/TCP
-      folgen — Bestandsaufnahme + Architektur-Empfehlung in
-      [docs/serie5-netzwerk.md](docs/serie5-netzwerk.md)
+      `NetzGeraet` (analog `BlockDevice`); Ethernet + **ARP** + **IPv4**
+      (Checksumme, Fragment-Erkennung) + **ICMP** (`ping`) + **UDP** +
+      **DHCP** (holt beim Boot automatisch eine IP) + **DNS**
+      (`nslookup <name>`) — **SpeedOS ist im Internet**. TCP folgt —
+      Bestandsaufnahme in [docs/serie5-netzwerk.md](docs/serie5-netzwerk.md)
 - [ ] **User Space (Serie 6):** Ring-3-Prozesse, Syscalls, präemptiver
       Scheduler
 - [ ] Ferner: eigene Programme laden (ELF), DNS/TLS/HTTP, Sound
