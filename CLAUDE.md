@@ -147,6 +147,24 @@
   verschachtelter Lock. Meilenstein „SpeedOS antwortet auf ARP" doppelt
   bewiesen: Mock-NIC-Unit-Test + `tests/netz_arp.rs` gegen slirp
   (arp-ping 10.0.2.2 → Gateway-MAC 52:55:0a:00:02:02).
+- **IPv4 + ICMP (Serie 5, Juli 2026, `src/netz/ipv4.rs`+`icmp.rs`) — SpeedOS
+  ist anpingbar:** IPv4 parst/baut den 20-Byte-Kopf; die INTERNET-CHECKSUMME
+  (RFC 1071) ist eine reine, gegen bekannten Vektor (0xB861) getestete
+  Funktion — sie liefert 0 über einen Kopf MIT korrekter Prüfsumme (so
+  prüft man RX) und den einzusetzenden Wert bei Feld=0 (so baut man TX).
+  FRAGMENTE werden ERKANNT (MF/Offset) und VERWORFEN (kein Reassembly —
+  bewusst, dokumentiert). Ausgehend: Next-Hop = eigenes Subnetz direkt,
+  sonst Gateway; MAC per ARP-Cache, bei MISS Paket ZURÜCKSTELLEN
+  (`AUSSTEHEND`, TTL 3 s) + ARP-Request, `ausstehend_ausliefern()` läuft
+  nach JEDEM Dispatch (`rx_verarbeiten`). ICMP beantwortet Echo-Requests
+  (Reply mit gespiegeltem Identifier/Sequenz/Daten, Checksumme über die
+  GANZE Nachricht) und vermerkt Echo-REPLIES (ident/seq/ttl) für `ping`.
+  Shell `ping <ip>`: 4 Echos, RTT über die TSC-µs-Uhr, min/schnitt/max —
+  pumpt synchron. MEILENSTEINE: (1) „Host pingt SpeedOS" geräteunabhängig
+  per Mock (`test_icmp_echo_antwort_meilenstein`) — über slirp-NAT ist der
+  Gast von außen NICHT direkt pingbar (bräuchte TAP/Bridge); (2) „SpeedOS
+  pingt Gateway" ECHT gegen slirp (`tests/netz_ping.rs`, ping 10.0.2.2 →
+  ttl 255). ipv4::verarbeiten prüft „an UNS gerichtet?" (dest == unsere IP).
 - **FAT32-Treiber (Juli 2026, `src/fs/fat32.rs`) — NUR LESEN:**
   SpeedOS liest fremde FAT32-Medien ("der USB-Stick"), schreibt sie
   aber NIE (jeder Schreib-Weg -> `IoFehler::NurLesen`). Kein/kaputtes

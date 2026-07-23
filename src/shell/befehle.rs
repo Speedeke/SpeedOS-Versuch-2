@@ -87,6 +87,7 @@ pub fn alle_befehle() -> Vec<Box<dyn Befehl>> {
         Box::new(NetzLausch),
         Box::new(Arp),
         Box::new(ArpPing),
+        Box::new(Ping),
     ]
 }
 
@@ -1351,6 +1352,145 @@ impl Befehl for ArpPing {
                 return;
             }
             x86_64::instructions::hlt();
+        }
+    }
+}
+
+/// Formatiert Mikrosekunden als "X,YZ ms" (zwei Nachkommastellen).
+fn ms_text(us: u64) -> String {
+    format!("{},{:02} ms", us / 1000, (us % 1000) / 10)
+}
+
+/// ping — der klassische Netzwerk-Meilenstein: schickt ICMP-Echo-Requests
+/// an eine IP und misst die Round-Trip-Zeit über die TSC-Mikrosekunden-Uhr,
+/// wie das echte ping. PUMPT den Empfang synchron (kooperativer Executor).
+struct Ping;
+
+impl Ping {
+    /// Anzahl der Echos, die wir schicken.
+    const ANZAHL: u16 = 4;
+    /// Nutzlast-Größe (wie das klassische ping: 56 Datenbytes -> 64-Byte-ICMP).
+    const DATEN_LEN: usize = 56;
+    /// Unser ICMP-Identifier (fest — es läuft immer nur ein ping zugleich).
+    const IDENT: u16 = 0x5057; // "PW" ~ SpeedOS-Ping
+    /// Wartezeit pro Echo auf die Antwort.
+    const TIMEOUT_MS: u64 = 1000;
+    /// Abstand zwischen zwei Echos (wie das echte ping ~1 s, hier kürzer).
+    const INTERVALL_MS: u64 = 500;
+
+    /// Pumpt den Empfang bis `deadline_ms` und wartet dabei auf die Antwort
+    /// für `sequenz`. Liefert die RTT (µs) + TTL, wenn sie eintrifft.
+    fn auf_antwort_warten(sequenz: u16, start_us: u64, deadline_ms: u64) -> Option<(u64, u8)> {
+        loop {
+            crate::netz::rx_verarbeiten();
+            if let Some(ttl) = crate::netz::icmp::antwort_empfangen(Ping::IDENT, sequenz) {
+                return Some((crate::zeit::us_seit_boot() - start_us, ttl));
+            }
+            if crate::zeit::ms_seit_boot() >= deadline_ms {
+                return None;
+            }
+            x86_64::instructions::hlt();
+        }
+    }
+}
+
+impl Befehl for Ping {
+    fn name(&self) -> &'static str {
+        "ping"
+    }
+    fn beschreibung(&self) -> &'static str {
+        "Sendet ICMP-Echos und misst die RTT: ping <ip>"
+    }
+    fn ausfuehren(&self, argumente: &str, _kontext: &mut ShellKontext, _registry: &[Box<dyn Befehl>]) {
+        use crate::netz::Ipv4;
+        if keine_nic() {
+            return;
+        }
+        let ziel = match Ipv4::parse(argumente.trim()) {
+            Some(ip) => ip,
+            None => {
+                println!("Benutzung: ping <ip>   (z. B. ping 10.0.2.2)");
+                return;
+            }
+        };
+        if crate::netz::unsere_ip().is_none() {
+            netz_fehler_ausgeben(crate::netz::NetzFehler::NichtKonfiguriert);
+            return;
+        }
+
+        // Eine erkennbare Nutzlast (stabiles Muster, wird zurückgespiegelt).
+        let mut daten = vec![0u8; Ping::DATEN_LEN];
+        for (i, b) in daten.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_add(0x10);
+        }
+
+        println!("PING {}: {} Datenbytes", ziel, Ping::DATEN_LEN);
+        crate::netz::icmp::antworten_leeren();
+
+        let mut gesendet = 0u32;
+        let mut empfangen = 0u32;
+        let mut summe_us = 0u64;
+        let mut min_us = u64::MAX;
+        let mut max_us = 0u64;
+
+        for sequenz in 0..Ping::ANZAHL {
+            let start_us = crate::zeit::us_seit_boot();
+            if let Err(fehler) = crate::netz::icmp::echo_senden(ziel, Ping::IDENT, sequenz, &daten) {
+                netz_fehler_ausgeben(fehler);
+                return;
+            }
+            gesendet += 1;
+            let deadline = crate::zeit::ms_seit_boot() + Ping::TIMEOUT_MS;
+            match Ping::auf_antwort_warten(sequenz, start_us, deadline) {
+                Some((rtt_us, ttl)) => {
+                    empfangen += 1;
+                    summe_us += rtt_us;
+                    min_us = min_us.min(rtt_us);
+                    max_us = max_us.max(rtt_us);
+                    konsole::set_color(Color::LightGreen, Color::Black);
+                    println!(
+                        "{} Bytes von {}: seq={} ttl={} zeit={}",
+                        Ping::DATEN_LEN + 8,
+                        ziel,
+                        sequenz,
+                        ttl,
+                        ms_text(rtt_us)
+                    );
+                    konsole::set_color(Color::LightGray, Color::Black);
+                }
+                None => {
+                    konsole::set_color(Color::Yellow, Color::Black);
+                    println!("Zeitueberschreitung fuer seq={}", sequenz);
+                    konsole::set_color(Color::LightGray, Color::Black);
+                }
+            }
+            // Bis zum nächsten Echo warten — und dabei weiter RX pumpen,
+            // damit eingehende Pings an UNS trotzdem beantwortet werden.
+            if sequenz + 1 < Ping::ANZAHL {
+                let bis = crate::zeit::ms_seit_boot() + Ping::INTERVALL_MS;
+                while crate::zeit::ms_seit_boot() < bis {
+                    crate::netz::rx_verarbeiten();
+                    x86_64::instructions::hlt();
+                }
+            }
+        }
+
+        // Statistik wie das echte ping.
+        // gesendet ist hier immer >= 1 (bei Fehler kehren wir vorher zurück);
+        // max(1) hält die Division sicher und clippy zufrieden.
+        let verlust = (gesendet - empfangen) * 100 / gesendet.max(1);
+        println!("--- {} Ping-Statistik ---", ziel);
+        println!(
+            "{} gesendet, {} empfangen, {}% Verlust",
+            gesendet, empfangen, verlust
+        );
+        if empfangen > 0 {
+            println!(
+                "RTT min/schnitt/max = {} / {} / {}",
+                ms_text(min_us),
+                ms_text(summe_us / empfangen as u64),
+                ms_text(max_us)
+            );
         }
     }
 }

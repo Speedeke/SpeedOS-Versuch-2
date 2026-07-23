@@ -5,6 +5,40 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### Serie 5: IPv4 + ICMP — SpeedOS ist anpingbar (der klassische Meilenstein)
+- **IPv4-Schicht** (`src/netz/ipv4.rs`): Kopf parsen/bauen (Version/IHL,
+  Gesamtlänge, TTL, Protokoll, Kopf-Prüfsumme), Dispatch nach Protokollfeld
+  (ICMP heute; UDP/TCP folgen). Die **Internet-Checksumme (RFC 1071)** als
+  reine, gegen einen bekannten Vektor getestete Funktion (0xB861).
+  FRAGMENTIERUNG wird bewusst NICHT unterstützt, aber sauber ERKANNT (MF-Bit
+  bzw. Offset != 0) und mit Log verworfen — Reassemblierung wäre unnötiger
+  Aufwand für unseren Zweck. Ausgehend: Ziel-MAC per ARP-Cache auflösen;
+  bei einem MISS wird das Paket kurz ZURÜCKGESTELLT (`AUSSTEHEND`, TTL 3 s)
+  und ein ARP-Request geschickt — trifft die Antwort ein, liefert
+  `ausstehend_ausliefern` (nach jedem Dispatch) es aus. Next-Hop-Wahl:
+  eigenes Subnetz → direkt, sonst über das Gateway.
+- **ICMP-Schicht** (`src/netz/icmp.rs`): Echo-Request BEANTWORTEN (Ping-Reply
+  mit gespiegeltem Identifier/Sequenz/Daten und korrekter Prüfsumme über die
+  ganze Nachricht) und Echo-Request SENDEN. Empfangene Echo-Antworten werden
+  vermerkt (Identifier/Sequenz/TTL), damit der `ping`-Befehl sie zuordnen kann.
+- **`ping <ip>`** (Shell): schickt 4 Echos (56 Datenbytes wie das echte ping),
+  misst die RTT über die TSC-Mikrosekunden-Uhr, zeigt `N Bytes von <ip>:
+  seq=… ttl=… zeit=…ms` und eine min/schnitt/max-Statistik. Pumpt den Empfang
+  synchron (kooperativer Executor) und beantwortet dabei auch eingehende Pings.
+- **MEILENSTEIN 1 „der Host kann SpeedOS anpingen"** geräteunabhängig bewiesen
+  (`test_icmp_echo_antwort_meilenstein`, Mock-NIC): ein Echo-Request an unsere
+  IP → genau ein korrekter Echo-Reply (unsere IP, Identifier/Sequenz/Daten
+  gespiegelt). (Über slirp-NAT ist der Gast von außen nicht direkt pingbar —
+  darum der geräteunabhängige Beweis; ein echter Host-Ping bräuchte ein
+  Bridged/TAP-Netz.)
+- **MEILENSTEIN 2 „SpeedOS kann das Gateway anpingen"** ECHT gegen slirp
+  (`tests/netz_ping.rs`): `ping 10.0.2.2` →
+  `[PING-MEILENSTEIN] Antwort von 10.0.2.2 seq=0 ttl=255 zeit=4354us`.
+- Tests: IPv4-Parse/Build (inkl. Prüfsummen-Abweisung), Internet-Checksumme
+  (bekannter Vektor), ICMP-Echo-Reply-Konstruktion, Fragment-Erkennung,
+  ICMP-Parse-Grenzen. 166 Lib-Tests grün (vorher 159) + `tests/netz_ping.rs`.
+  `cargo clippy --all-targets` warnungsfrei.
+
 ### Serie 5: Der Netz-Stack beginnt — NetzGeraet-Trait, Ethernet, ARP
 - **Die Architektur-Naht `netz::NetzGeraet`** (analog zu `BlockDevice`):
   `mac()`, `sende_frame(&[u8])` und `empfange_frame()`. Der Stack redet ab

@@ -25,6 +25,8 @@
 pub mod arp;
 pub mod ethernet;
 pub mod geraet;
+pub mod icmp;
+pub mod ipv4;
 pub mod puffer;
 
 pub use ethernet::Mac;
@@ -184,6 +186,9 @@ pub fn rx_verarbeiten() {
         }
         dispatch(frame);
     }
+    // Nach dem Dispatch: zurückgestellte IP-Pakete ausliefern, deren
+    // Next-Hop-MAC gerade per ARP-Antwort bekannt geworden ist.
+    ipv4::ausstehend_ausliefern();
 }
 
 /// Verteilt EIN Frame an die passende obere Schicht (nach EtherType).
@@ -194,8 +199,7 @@ fn dispatch(frame: &[u8]) {
     };
     match kopf.ethertype {
         ethernet::ETHERTYPE_ARP => arp::verarbeiten(nutzlast),
-        // IPv4 (und darüber ICMP/UDP/TCP) kommt in einer späteren Stufe.
-        ethernet::ETHERTYPE_IPV4 => {}
+        ethernet::ETHERTYPE_IPV4 => ipv4::verarbeiten(nutzlast),
         _ => {}
     }
 }
@@ -329,6 +333,59 @@ mod tests {
         assert_eq!(arp::cache_suchen(frager_ip), Some(frager_mac));
 
         // Aufräumen: Mock-NIC entfernen (spätere Tests: "keine NIC").
+        geraet::geraet_zuruecksetzen();
+        MOCK_GESENDET.lock().clear();
+        MOCK_RX.lock().clear();
+    }
+
+    /// Der Ping-Meilenstein, geräteunabhängig: kommt ein ICMP-Echo-Request
+    /// an UNSERE IP herein, muss SpeedOS mit einem korrekten Echo-Reply
+    /// antworten (Identifier/Sequenz/Daten gespiegelt, gültige Prüfsummen).
+    #[test_case]
+    fn test_icmp_echo_antwort_meilenstein() {
+        MOCK_GESENDET.lock().clear();
+        MOCK_RX.lock().clear();
+
+        let unsere_mac = [0x52, 0x54, 0x00, 0x11, 0x22, 0x33];
+        let unsere_ip = Ipv4([10, 0, 2, 15]);
+        konfig_setzen(unsere_ip, Ipv4([255, 255, 255, 0]), Ipv4([10, 0, 2, 2]));
+        geraet::geraet_registrieren(Box::new(MockNic { mac: unsere_mac }));
+
+        // Damit die Antwort SOFORT rausgeht (nicht auf ARP wartet), die
+        // MAC des Pingers vorab in den Cache legen.
+        let pinger_mac = [0x52, 0x54, 0x00, 0xAA, 0xBB, 0xCC];
+        let pinger_ip = Ipv4([10, 0, 2, 2]);
+        arp::cache_einfuegen(pinger_ip, pinger_mac);
+
+        // Einen Echo-Request "an uns" bauen: Ethernet -> IPv4 -> ICMP.
+        let daten = [1, 2, 3, 4, 5, 6, 7, 8];
+        let echo = icmp::echo_bauen(icmp::TYP_ECHO_REQUEST, 0x1234, 7, &daten);
+        let ip = ipv4::bauen(pinger_ip, unsere_ip, ipv4::PROTO_ICMP, &echo);
+        let frame =
+            ethernet::rahmen_bauen(unsere_mac, pinger_mac, ethernet::ETHERTYPE_IPV4, &ip);
+        MOCK_RX.lock().push(frame);
+
+        // Dispatch wie der netz_task.
+        rx_verarbeiten();
+
+        // GENAU EINE Antwort: ein Echo-Reply zurück an den Pinger.
+        let gesendet = MOCK_GESENDET.lock().clone();
+        assert_eq!(gesendet.len(), 1, "genau ein Echo-Reply erwartet");
+        let (ekopf, enutz) = ethernet::parse(&gesendet[0]).expect("Ethernet");
+        assert_eq!(ekopf.ethertype, ethernet::ETHERTYPE_IPV4);
+        assert_eq!(ekopf.ziel, pinger_mac);
+        assert_eq!(ekopf.quelle, unsere_mac);
+        let (ipkopf, ipnutz) = ipv4::parse(enutz).expect("IPv4 (gueltige Pruefsumme)");
+        assert_eq!(ipkopf.protokoll, ipv4::PROTO_ICMP);
+        assert_eq!(ipkopf.quelle, unsere_ip, "Antwort von unserer IP");
+        assert_eq!(ipkopf.ziel, pinger_ip);
+        let (ckopf, cdaten) = icmp::echo_parse(ipnutz).expect("ICMP-Echo");
+        assert_eq!(ckopf.typ, icmp::TYP_ECHO_REPLY);
+        assert_eq!(ckopf.identifier, 0x1234, "Identifier gespiegelt");
+        assert_eq!(ckopf.sequenz, 7, "Sequenz gespiegelt");
+        assert_eq!(cdaten, &daten, "Daten gespiegelt");
+
+        // Aufräumen.
         geraet::geraet_zuruecksetzen();
         MOCK_GESENDET.lock().clear();
         MOCK_RX.lock().clear();
