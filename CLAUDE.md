@@ -67,6 +67,23 @@
   Explorer in der Statusleiste, SpeedText als Fehler-Dialog
   (`ui::dialog::fehler`, dünner Mantel um bestaetigung()).
 
+## User-Space-Dauerregeln (Serie 6, ab Juli 2026 — gelten AB SOFORT überall)
+- **(I) DER KERNEL FOLGT NIEMALS BLIND EINEM USER-ZEIGER.** Jeder Zeiger, den
+  Ring-3-Code übergibt (Syscall-Argument), wird VOR der Benutzung GEPRÜFT und
+  die Daten werden KOPIERT — nie direkt dereferenziert. `ring3::copy_in(ptr,
+  laenge)` ist der einzige Weg: Es prüft JEDE berührte Page auf „gemappt UND
+  USER_ACCESSIBLE" (`memory::seiten_flags`), fängt Längen-Überlauf und absurde
+  Größen ab (`CopyFehler::{Ueberlauf, ZuGross, NichtGemappt, KernelSpeicher}`)
+  und PANICKT NIE. Ein User-Zeiger auf Kernel-Speicher wird abgelehnt, nicht
+  gelesen. (Rückrichtung später analog: copy-out in geprüfte User-Puffer.)
+- **(II) EIN FEHLER IM USER-MODE DARF DEN KERNEL NIE MITREISSEN.** Page Fault
+  oder #GP aus Ring 3 beenden den User-Code und kehren in den Kernel zurück —
+  der Kernel läuft weiter. Mechanik: `interrupts::user_recovery()` prüft „kam
+  der Trap aus Ring 3 (CS & 3 == 3) UND läuft Ring-3-Code?" und biegt dann den
+  CPU-Interrupt-Rahmen auf den Landeplatz um (Ring 0, Kernel-Stack) — der
+  Epilog-`iretq` springt in den Kernel statt zurück nach Ring 3. NUR ein Fehler
+  im KERNEL selbst (Ring 0) hält an, denn das ist ein echter Bug.
+
 ## Platten-Sicherheits-Regel (Juli 2026)
 - Der ATA-Treiber weigert sich PER KONSTRUKTION, auf das Boot-Laufwerk
   zu schreiben: Das Feld `beschreibbar` ist privat, Laufwerke entstehen
@@ -273,6 +290,33 @@
   ELF-Loader; APIC/MSI erzwingt erst SMP, NICHT User-Space; die Handle-/
   copy-in/out-APIs sind schon Syscall-fertig; kleinster erster Prozess = Ring-3-
   „Hallo Welt" per INT 0x80; TLS ist der Browser-Blocker).
+- **RING 3 — der erste User-Mode (Serie 6, Juli 2026, `src/ring3.rs`):** Der
+  Beweis, dass CPU-Code UNPRIVILEGIERT läuft und sauber zurückkommt — noch
+  OHNE ELF, OHNE eigenen Adressraum, OHNE Scheduler (bewusst nur der
+  Privilegienwechsel). GDT (`gdt.rs`) hat jetzt User-Code/-Data (DPL 3,
+  Selektoren mit RPL 3 über `user_code_selektor()`/`user_data_selektor()`) und
+  das TSS `privilege_stack_table[0]` = RSP0 (der Kernel-Stack, auf den die CPU
+  bei Traps AUS Ring 3 umschaltet; 16-ausgerichtet wegen SSE im Dispatcher).
+  Die IST-Nutzung für Double Fault bleibt unangetastet. USER-PAGES:
+  `memory::map_page_benutzer` mappt PRESENT|WRITABLE|USER_ACCESSIBLE — WICHTIG,
+  die CPU UND-verknüpft das U-Bit über ALLE Ebenen, deshalb setzt
+  `benutzer_pfad_freischalten` U auch auf schon existierenden P4/P3/P2-
+  Einträgen. ÜBERGANG: `iretq` (nicht sysretq — es braucht keine MSR-Einrichtung
+  und keine Segment-Anordnung; wir bauen den Rahmen, den ein Trap aus Ring 3
+  hinterlassen hätte). RÜCKWEG: INT 0x80 als Trap-Gate mit **DPL 3** (sonst
+  dürfte Ring 3 es nicht auslösen), Einstieg ist nacktes `global_asm`, das ALLE
+  General-Register als `TrapFrame` sichert, `syscall_dispatch` ruft und per
+  `iretq` zurückkehrt. Syscalls: 0 = debug_print(ptr,len) über den GEPRÜFTEN
+  `copy_in` (Dauerregel I), 1 = exit. KRITISCHE LEKTION: Der Kernel-Kontext
+  wird per **setjmp/longjmp-Muster** (`kern_setjmp` + `kern_ring3_landing` in
+  global_asm) gesichert/wiederhergestellt — ein einzelner Inline-asm-Block mit
+  Sprung-Label FUNKTIONIERT NICHT, weil der Rückweg über einen Trap-Handler
+  kommt, den der Compiler nicht als Kontrollfluss sieht (er verwaltet die
+  Register dann falsch → Korruption/#GP). Neuer #GP-Handler fängt (wie der
+  Page-Fault-Handler) User-Mode-Traps über `user_recovery()` ab. Shell:
+  `ring3test` (+ `ring3test absturz`). Beweise in `tests/ring3.rs`:
+  „Hallo aus Ring 3!" + Page Fault aus User-Mode aufgefangen + Ring 3 läuft
+  danach weiter.
 - **FAT32-Treiber (Juli 2026, `src/fs/fat32.rs`) — NUR LESEN:**
   SpeedOS liest fremde FAT32-Medien ("der USB-Stick"), schreibt sie
   aber NIE (jeder Schreib-Weg -> `IoFehler::NurLesen`). Kein/kaputtes

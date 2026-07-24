@@ -47,6 +47,7 @@ pub mod memory;
 pub mod netz;
 pub mod pci;
 pub mod protokoll;
+pub mod ring3;
 pub mod rtc;
 pub mod serial;
 pub mod shell;

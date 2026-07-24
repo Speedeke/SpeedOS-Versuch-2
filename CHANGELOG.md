@@ -5,6 +5,68 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### Serie 6 beginnt: RING 3 — SpeedOS führt unprivilegierten Code aus
+- **Der Sprung, der SpeedOS zu einem „echten" OS macht.** Bis hierher lief
+  JEDER Befehl im Kernel-Privileg (Ring 0). Jetzt läuft Code in **Ring 3**,
+  darf NICHT alles — und ein Absturz dort reißt den Kernel NICHT mehr mit.
+  Bewusst klein: nur der Privilegienwechsel, noch KEIN ELF-Loader, KEIN
+  eigener Adressraum, KEIN präemptiver Scheduler (Fahrplan:
+  `docs/serie6-bestandsaufnahme.md`).
+- **GDT/TSS** (`src/gdt.rs`): User-Code- und User-Data-Segmente (DPL 3;
+  Selektoren mit RPL 3) plus **RSP0** in der `privilege_stack_table` — der
+  Kernel-Stack, auf den die CPU bei einem Trap AUS Ring 3 automatisch
+  umschaltet (16-ausgerichtet wegen SSE im Dispatcher). Die bestehende
+  IST-Nutzung für Double Faults bleibt unangetastet.
+- **User-Pages** (`memory::map_page_benutzer`): PRESENT|WRITABLE|
+  USER_ACCESSIBLE. Wichtige Lektion: Die CPU **UND-verknüpft das U-Bit über
+  alle vier Page-Table-Ebenen** — `benutzer_pfad_freischalten` setzt es
+  deshalb auch auf bereits existierenden P4/P3/P2-Einträgen. Dazu
+  `memory::seiten_flags` als Prüf-Grundlage für copy-in.
+- **Der Übergang** (`ring3::nach_ring3`): per **`iretq`** (begründet im Code:
+  braucht keine MSR-Einrichtung und keine bestimmte Segment-Anordnung wie
+  `sysretq` — wir bauen einfach den Rahmen, den ein Trap aus Ring 3
+  hinterlassen hätte). Der User-Code liegt als hand-assemblierter
+  Maschinencode in einer User-Page.
+- **Der Rückweg** — **INT 0x80** als Trap-Gate mit **DPL 3** (sonst dürfte
+  Ring 3 es gar nicht auslösen; die anderen Gates bleiben DPL 0). Begründung
+  im Code: einfacher und lehrreicher als SYSCALL/SYSRET, das kann später
+  kommen. Der Einstieg ist nacktes `global_asm`, das **den vollen
+  User-Kontext sichert** (alle General-Register als `TrapFrame`), den
+  Rust-Dispatcher ruft und alles wiederherstellt. Syscall 0 = `debug_print`
+  (Zeiger + Länge), 1 = `exit`.
+- **KRITISCHE LEKTION (im Code dokumentiert):** Der Kernel-Kontext wird per
+  **setjmp/longjmp-Muster** gesichert (`kern_setjmp` + `kern_ring3_landing`).
+  Ein einzelner Inline-asm-Block mit Sprung-Label funktioniert NICHT: Der
+  Rückweg kommt über einen Trap-Handler, den der Compiler nicht als
+  Kontrollfluss sieht — er verwaltet die Register dann falsch (Korruption,
+  #GP beim iretq). Das kostete mehrere Debug-Runden.
+- **DIE ZWEI DAUERREGELN** (ab jetzt in CLAUDE.md, gelten überall):
+  **(I) Der Kernel folgt niemals blind einem User-Zeiger** — `ring3::copy_in`
+  prüft JEDE berührte Page auf „gemappt UND USER_ACCESSIBLE", fängt
+  Längen-Überlauf und absurde Größen ab und **panickt nie**; ein User-Zeiger
+  auf Kernel-Speicher wird abgelehnt.
+  **(II) Ein Fehler im User-Mode reißt den Kernel nie mit** — Page Fault und
+  #GP aus Ring 3 werden über `interrupts::user_recovery()` aufgefangen (der
+  Interrupt-Rahmen wird auf den Kernel-Landeplatz umgebogen); nur ein Fehler
+  im Kernel selbst hält an. Neu: ein **General-Protection-Fault-Handler**.
+- **Shell `ring3test`** (und `ring3test absturz`) führt beide Beweise vor.
+- **DIE BEWEISE** (`tests/ring3.rs`, echt in QEMU):
+  ```
+  Hallo aus Ring 3!
+  [ring3] Sauber zurueck im Kernel (Ring 0) — System laeuft weiter.
+  EXCEPTION: PAGE FAULT — aus USER-MODE (Ring 3)
+    Zugriff auf Adresse: VirtAddr(0x444444440000)
+    -> Der User-Code wird BEENDET, der Kernel laeuft weiter.
+  [RING3-MEILENSTEIN] Kernel lebt nach dem User-Mode-Absturz weiter.
+  ```
+  Plus: Ring 3 läuft auch NACH dem Absturz fehlerfrei weiter (nichts kaputt
+  zurückgelassen).
+- Tests: copy-in gegen Kernel-Adresse, ungemappte Adresse, Längen-Überlauf und
+  absurde Länge (alle sauber Fehler, nie Panik) sowie gegen eine gültige
+  User-Page (inkl. Puffer, der über die Page hinausragt). 192 Lib-Tests grün
+  (vorher 190) + `tests/ring3.rs`. `cargo clippy --all-targets` warnungsfrei;
+  Desktop bootet unverändert sauber.
+
 ### Serie-5-Abschluss: Härtetests, unsafe-Audit, Serie-6-Bestandsaufnahme
 - **Feature-Lücken geschlossen (mit Tests):**
   - **DNS-Retry**: `dns::aufloesen` sendet die Anfrage jetzt bis zu 3× erneut

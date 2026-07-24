@@ -27,7 +27,8 @@ use x86_64::VirtAddr;
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 
 lazy_static! {
-    /// Das Task State Segment mit unserem Notfall-Stack.
+    /// Das Task State Segment: Notfall-Stack (IST) UND — neu für Ring 3 —
+    /// der Kernel-Stack für Traps aus dem User-Mode (RSP0).
     static ref TSS: TaskStateSegment = {
         let mut tss = TaskStateSegment::new();
         tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = {
@@ -43,27 +44,80 @@ lazy_static! {
             let stack_start = VirtAddr::from_ptr(&raw const STACK);
             stack_start + STACK_SIZE
         };
+        // RSP0 = der Kernel-Stack, auf den die CPU AUTOMATISCH umschaltet,
+        // wenn aus Ring 3 (User-Mode) ein Trap/Interrupt/Syscall kommt. OHNE
+        // ihn würde die CPU beim ersten Syscall aus Ring 3 versuchen, auf dem
+        // (User-)Stack weiterzumachen bzw. hätte gar keinen gültigen Kernel-
+        // Stack — Triple Fault. Getrennt vom IST-Stack (der ist nur für
+        // Double Faults, dieser für den normalen Ring-3→Ring-0-Übergang).
+        tss.privilege_stack_table[0] = {
+            const RSP0_SIZE: usize = 4096 * 5;
+            // 16-Byte-ausgerichtet: Der Syscall-Dispatcher (Rust/C-ABI) darf
+            // SSE-Befehle nutzen, die einen 16-aligned Stack verlangen — ein
+            // [u8;N] allein garantiert das nicht.
+            #[repr(align(16))]
+            #[allow(dead_code)] // nur als ausgerichteter Speicher genutzt
+            struct Stack([u8; RSP0_SIZE]);
+            static mut RSP0_STACK: Stack = Stack([0; RSP0_SIZE]);
+            let start = VirtAddr::from_ptr(&raw const RSP0_STACK);
+            start + RSP0_SIZE
+        };
         tss
     };
 }
 
 /// Die Selektoren merken wir uns, um sie nach dem Laden der GDT
-/// in die CPU-Register zu schreiben.
+/// in die CPU-Register zu schreiben (und für den Ring-3-Übergang).
 struct Selectors {
     code_selector: SegmentSelector,
     data_selector: SegmentSelector,
+    user_code_selector: SegmentSelector,
+    user_data_selector: SegmentSelector,
     tss_selector: SegmentSelector,
 }
 
 lazy_static! {
-    /// Unsere GDT: Code- und Daten-Segment für den Kernel + das TSS.
+    /// Unsere GDT: Kernel-Code/Daten (Ring 0), User-Code/Daten (Ring 3)
+    /// und das TSS. Die Reihenfolge ist für `iretq` frei wählbar (nur
+    /// SYSCALL/SYSRET stellt Anforderungen — das nutzen wir bewusst nicht).
     static ref GDT: (GlobalDescriptorTable, Selectors) = {
         let mut gdt = GlobalDescriptorTable::new();
         let code_selector = gdt.add_entry(Descriptor::kernel_code_segment());
         let data_selector = gdt.add_entry(Descriptor::kernel_data_segment());
+        // Ring-3-Segmente (DPL 3): Code und Daten für den User-Mode.
+        let user_code_selector = gdt.add_entry(Descriptor::user_code_segment());
+        let user_data_selector = gdt.add_entry(Descriptor::user_data_segment());
         let tss_selector = gdt.add_entry(Descriptor::tss_segment(&TSS));
-        (gdt, Selectors { code_selector, data_selector, tss_selector })
+        (
+            gdt,
+            Selectors {
+                code_selector,
+                data_selector,
+                user_code_selector,
+                user_data_selector,
+                tss_selector,
+            },
+        )
     };
+}
+
+/// Die Kernel-Code-Selektor-Nummer (für die Rückkehr aus Ring 3 in den
+/// Kernel — der Page-Fault-/Exit-Pfad setzt CS/SS damit zurück).
+pub fn kernel_code_selektor() -> u64 {
+    GDT.1.code_selector.0 as u64
+}
+/// Die Kernel-Daten-Selektor-Nummer.
+pub fn kernel_data_selektor() -> u64 {
+    GDT.1.data_selector.0 as u64
+}
+/// Der User-Code-Selektor MIT RPL 3 (die unteren 2 Bits = angeforderte
+/// Privilegstufe; `iretq` verlangt RPL 3 für einen Sprung nach Ring 3).
+pub fn user_code_selektor() -> u64 {
+    (GDT.1.user_code_selector.0 | 3) as u64
+}
+/// Der User-Daten-Selektor MIT RPL 3.
+pub fn user_data_selektor() -> u64 {
+    (GDT.1.user_data_selector.0 | 3) as u64
 }
 
 /// Lädt GDT und TSS in die CPU. Muss beim Boot VOR der IDT

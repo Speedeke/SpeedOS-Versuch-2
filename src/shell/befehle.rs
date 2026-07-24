@@ -92,6 +92,8 @@ pub fn alle_befehle() -> Vec<Box<dyn Befehl>> {
         Box::new(Ping),
         Box::new(Nslookup),
         Box::new(Hole),
+        // Serie 6: der erste Sprung nach Ring 3 (User-Mode).
+        Box::new(Ring3Test),
     ]
 }
 
@@ -1722,6 +1724,42 @@ impl Befehl for Hole {
                     println!();
                 }
             }
+        }
+    }
+}
+/// ring3test — DER historische Beweis (Serie 6): CPU-Code laeuft in Ring 3
+/// (User-Mode) und kehrt sauber zurueck; ein Absturz im User-Mode reisst den
+/// Kernel NICHT mit.
+struct Ring3Test;
+
+impl Befehl for Ring3Test {
+    fn name(&self) -> &'static str {
+        "ring3test"
+    }
+    fn beschreibung(&self) -> &'static str {
+        "Fuehrt Code in Ring 3 aus (User-Mode-Beweis + Absturz-Auffang)"
+    }
+    fn ausfuehren(&self, argumente: &str, _kontext: &mut ShellKontext, _registry: &[Box<dyn Befehl>]) {
+        konsole::set_color(Color::LightCyan, Color::Black);
+        println!("=== Ring-3-Test (User-Mode) ===");
+        konsole::set_color(Color::LightGray, Color::Black);
+
+        // Teil 1: Erfolgs-Lauf (immer).
+        println!("[1] Ring-3-Code druckt eine Nachricht per Syscall:");
+        crate::ring3::ring3_erfolg();
+
+        // Teil 2: Absturz-Lauf — nur mit Argument 'absturz' (er erzeugt
+        // absichtlich einen Page Fault; die Meldung ist gewollt).
+        if argumente.trim() == "absturz" {
+            println!();
+            println!("[2] Ring-3-Code greift verboten auf Kernel-Speicher zu:");
+            konsole::set_color(Color::Yellow, Color::Black);
+            crate::ring3::ring3_absturz();
+            konsole::set_color(Color::LightGreen, Color::Black);
+            println!("Der Kernel hat den Absturz ueberlebt.");
+            konsole::set_color(Color::LightGray, Color::Black);
+        } else {
+            println!("(Absturz-Beweis: 'ring3test absturz' — erzeugt absichtlich einen Page Fault)");
         }
     }
 }

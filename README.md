@@ -357,10 +357,12 @@ könnte — die unteren Schichten und die Socket-API blieben dabei unsere.
       sie auf die Platte. LAN- und Internet-Messung je 10/10 sauber.
       Umfang/Reißleine: [docs/tcp-scope.md](docs/tcp-scope.md),
       Bestandsaufnahme: [docs/serie5-netzwerk.md](docs/serie5-netzwerk.md)
-- [ ] **User Space (Serie 6):** Ring-3-Prozesse, Syscalls, präemptiver
-      Scheduler, ELF-Loader — ehrliche Bestandsaufnahme mit Weichenstellungen
-      (auch: was zwingt zu APIC/SMP, wo blockt TLS den Browser) in
-      [docs/serie6-bestandsaufnahme.md](docs/serie6-bestandsaufnahme.md)
+- [ ] **User Space (Serie 6, läuft):** **Ring 3 steht** — SpeedOS führt
+      unprivilegierten Code aus (`ring3test`), der per Syscall (INT 0x80,
+      geprüfter copy-in) druckt und sauber zurückkehrt; ein Absturz im
+      User-Mode wird aufgefangen, **der Kernel läuft weiter**. Als Nächstes:
+      eigener Adressraum pro Prozess, präemptiver Scheduler, ELF-Loader —
+      Fahrplan in [docs/serie6-bestandsaufnahme.md](docs/serie6-bestandsaufnahme.md)
 - [ ] Ferner: HTML-Text-Browser (Kernel-App), TLS/HTTPS (geprüfte Krypto),
       Sound
 

@@ -18,6 +18,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use lazy_static::lazy_static;
 use pic8259::ChainedPics;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
+use x86_64::{PrivilegeLevel, VirtAddr};
 
 // ---------------------------------------------------------------------------
 // Hardware-Interrupts und der 8259 PIC
@@ -126,6 +127,11 @@ lazy_static! {
         let mut idt = InterruptDescriptorTable::new();
         idt.breakpoint.set_handler_fn(breakpoint_handler);
         idt.page_fault.set_handler_fn(page_fault_handler);
+        // General Protection Fault: klassisch bei ungültigen Segment-/
+        // Privileg-Operationen — und der Auffang für verbotene Instruktionen
+        // aus Ring 3 (ein User-Programm könnte auch ein #GP statt #PF auslösen).
+        idt.general_protection_fault
+            .set_handler_fn(general_protection_fault_handler);
         // `unsafe`: Wir versprechen, dass der IST-Index gültig ist und
         // nicht für mehrere Handler gleichzeitig verwendet wird.
         unsafe {
@@ -147,6 +153,17 @@ lazy_static! {
         idt[(PIC_2_OFFSET + 1) as usize].set_handler_fn(virtio_pci_irq9);
         idt[(PIC_2_OFFSET + 2) as usize].set_handler_fn(virtio_pci_irq10);
         idt[(PIC_2_OFFSET + 3) as usize].set_handler_fn(virtio_pci_irq11);
+        // SYSCALL-GATE (Serie 6): INT 0x80 aus Ring 3. Der Einstieg ist ein
+        // nackter Assembler-Handler (ring3.rs), der den vollen User-Kontext
+        // sichert. DPL 3, damit Ring-3-Code diesen Trap AUSLÖSEN darf (die
+        // anderen Gates haben DPL 0 — User-Mode könnte sie nicht auslösen).
+        // unsafe: set_handler_addr traut uns zu, eine GÜLTIGE Handler-Adresse
+        // zu liefern — sie stammt aus unserem global_asm-Symbol (ring3.rs).
+        unsafe {
+            idt[0x80]
+                .set_handler_addr(VirtAddr::new(crate::ring3::syscall_handler_adresse()))
+                .set_privilege_level(PrivilegeLevel::Ring3);
+        }
         idt
     };
 }
@@ -172,17 +189,54 @@ extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
 /// Handler für Page Faults: Zugriff auf Speicher, der nicht gemappt
 /// oder geschützt ist. Gibt alle Infos lesbar aus und hält dann an —
 /// weiterlaufen wäre gefährlich, ohne den Fehler zu beheben.
+/// Gemeinsame User-Mode-Recovery (Dauerregel II): Kam der Trap aus Ring 3 und
+/// läuft gerade unser Ring-3-Code, biegen wir den Interrupt-Rahmen auf den
+/// Kernel-Recovery-Punkt um (return -> Epilog-iretq -> Kernel) und liefern
+/// `true`. Sonst `false` (der Aufrufer behandelt es als Kernel-Bug).
+fn user_recovery(stack_frame: &mut InterruptStackFrame) -> bool {
+    let aus_user_mode = (stack_frame.code_segment & 3) == 3;
+    if !(aus_user_mode && crate::ring3::ring3_aktiv()) {
+        return false;
+    }
+    // unsafe: as_mut() gibt volatilen Zugriff auf den echten Rahmen auf dem
+    // Stack — genau den benutzt der iretq gleich.
+    unsafe {
+        let mut rahmen = stack_frame.as_mut();
+        let mut wert = rahmen.read();
+        wert.instruction_pointer = VirtAddr::new(crate::ring3::recovery_rip());
+        wert.stack_pointer = VirtAddr::new(crate::ring3::recovery_rsp());
+        wert.code_segment = gdt::kernel_code_selektor();
+        wert.stack_segment = gdt::kernel_data_selektor();
+        wert.cpu_flags = 0x202; // IF gesetzt
+        rahmen.write(wert);
+    }
+    true
+}
+
+/// General Protection Fault: ungültige Segment-/Privileg-Operation. Aus Ring 3
+/// (bei laufendem Ring-3-Code) wird er aufgefangen; sonst ist es ein
+/// Kernel-Bug und wir halten an.
+extern "x86-interrupt" fn general_protection_fault_handler(
+    mut stack_frame: InterruptStackFrame,
+    error_code: u64,
+) {
+    if user_recovery(&mut stack_frame) {
+        println!("EXCEPTION: GENERAL PROTECTION FAULT — aus USER-MODE, Kernel faengt es auf.");
+        return;
+    }
+    println!("EXCEPTION: GENERAL PROTECTION FAULT (Fehlercode {:#x})", error_code);
+    println!("{:#?}", stack_frame);
+    crate::hlt_loop();
+}
+
 extern "x86-interrupt" fn page_fault_handler(
-    stack_frame: InterruptStackFrame,
+    mut stack_frame: InterruptStackFrame,
     error_code: PageFaultErrorCode,
 ) {
     use x86_64::registers::control::Cr2;
 
-    // Die CPU legt die Adresse, deren Zugriff fehlschlug,
-    // automatisch ins Register CR2.
-    println!("EXCEPTION: PAGE FAULT");
-    println!("  Zugriff auf Adresse: {:?}", Cr2::read());
-    // Den Fehlercode in verständliche Aussagen übersetzen:
+    // Die CPU legt die fehlgeschlagene Adresse automatisch in CR2.
+    let adresse = Cr2::read();
     let ursache = if error_code.contains(PageFaultErrorCode::PROTECTION_VIOLATION) {
         "Schutzverletzung (Seite vorhanden, Zugriff verboten)"
     } else {
@@ -193,6 +247,23 @@ extern "x86-interrupt" fn page_fault_handler(
     } else {
         "Lesezugriff"
     };
+
+    // DAUERREGEL (II): Ein User-Mode-Fehler reisst den Kernel NICHT mit. Kam
+    // der Fault aus Ring 3 (bei laufendem Ring-3-Code), fangen wir ihn auf und
+    // kehren in den Kernel zurück (statt nach Ring 3, wo derselbe Fault käme).
+    if user_recovery(&mut stack_frame) {
+        println!("EXCEPTION: PAGE FAULT — aus USER-MODE (Ring 3)");
+        println!("  Zugriff auf Adresse: {:?}", adresse);
+        println!("  Ursache:  {}", ursache);
+        println!("  Zugriff:  {}", zugriff);
+        println!("  -> Der User-Code wird BEENDET, der Kernel laeuft weiter.");
+        return; // -> Epilog macht iretq mit dem umgebogenen Rahmen
+    }
+
+    // Sonst: ein Fault im KERNEL selbst — ein echter Bug. Wie bisher anhalten
+    // (weiterlaufen wäre gefährlich, ohne die Ursache zu beheben).
+    println!("EXCEPTION: PAGE FAULT");
+    println!("  Zugriff auf Adresse: {:?}", adresse);
     println!("  Ursache:  {}", ursache);
     println!("  Zugriff:  {}", zugriff);
     if error_code.contains(PageFaultErrorCode::INSTRUCTION_FETCH) {

@@ -140,6 +140,77 @@ pub fn map_page(page: Page) -> Result<(), MapToError<Size4KiB>> {
     })
 }
 
+/// Mappt eine Page auf einen frischen Frame und macht sie RING-3-ZUGÄNGLICH
+/// (PRESENT | WRITABLE | USER_ACCESSIBLE). Genau das braucht User-Mode-Code:
+/// Ohne das USER_ACCESSIBLE-Flag löst jeder Zugriff aus Ring 3 sofort einen
+/// Page Fault aus (Schutzverletzung). Für den ersten Ring-3-Sprung (Serie 6).
+///
+/// WICHTIG: Die CPU UND-verknüpft das U-Bit über ALLE vier Page-Table-Ebenen
+/// (P4→P3→P2→P1) — ein einziges U=0 unterwegs sperrt Ring 3. `map_to_with_
+/// table_flags` setzt U nur auf NEU angelegten Zwischentabellen; existierten
+/// sie schon (ohne U), müssen wir nachhelfen (`benutzer_pfad_freischalten`).
+pub fn map_page_benutzer(page: Page) -> Result<(), MapToError<Size4KiB>> {
+    // Expliziter Closure-Rückgabetyp pinnt S = Size4KiB (OffsetPageTable
+    // implementiert Mapper für mehrere Seitengrößen — sonst mehrdeutig).
+    mit_speicher(|mapper, frame_allocator| -> Result<(), MapToError<Size4KiB>> {
+        let frame: PhysFrame = frame_allocator
+            .allocate_frame()
+            .ok_or(MapToError::FrameAllocationFailed)?;
+        let flags = PageTableFlags::PRESENT
+            | PageTableFlags::WRITABLE
+            | PageTableFlags::USER_ACCESSIBLE;
+        // unsafe: frischer, exklusiver Frame; parent_table_flags ebenfalls
+        // mit U, damit neu angelegte Zwischentabellen ring-3-zugänglich sind.
+        let flush = unsafe {
+            mapper.map_to_with_table_flags(page, frame, flags, flags, frame_allocator)?
+        };
+        flush.flush();
+        Ok(())
+    })?;
+    benutzer_pfad_freischalten(page.start_address());
+    Ok(())
+}
+
+/// Setzt das USER_ACCESSIBLE-Bit (und PRESENT|WRITABLE) auf den P4/P3/P2-
+/// Einträgen für `addr` — die drei ZWISCHEN-Ebenen. Nötig, falls sie schon
+/// ohne U existierten (map_to lässt vorhandene Tabellen unverändert). Die
+/// P1-Leaf-Ebene trägt ihre Flags bereits vom Mapping.
+fn benutzer_pfad_freischalten(addr: VirtAddr) {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let offset = phys_offset();
+        let (p4_frame, _) = Cr3::read();
+        let extra =
+            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+        // unsafe: Wir lesen/ändern die aktiven Page Tables über das Komplett-
+        // Mapping. Single-threaded, keine gleichzeitige Mapper-Nutzung während
+        // dieses Aufrufs (nur beim Ring-3-Aufsetzen aufgerufen).
+        unsafe {
+            let mut table_frame = p4_frame;
+            for shift in [39u64, 30, 21] {
+                let table: &mut PageTable = &mut *((offset
+                    + table_frame.start_address().as_u64())
+                .as_mut_ptr::<PageTable>());
+                let index = ((addr.as_u64() >> shift) & 0x1ff) as usize;
+                let entry = &mut table[index];
+                entry.set_flags(entry.flags() | extra);
+                table_frame = PhysFrame::containing_address(entry.addr());
+            }
+        }
+    });
+    x86_64::instructions::tlb::flush(addr);
+}
+
+/// Die Mapping-Flags einer virtuellen Adresse (None = nicht gemappt). Der
+/// copy-in-Helfer (ring3.rs) prüft damit, ob eine User-Adresse wirklich zum
+/// User-Bereich gehört (USER_ACCESSIBLE gesetzt) — die Kernel/User-Grenze.
+pub fn seiten_flags(addr: VirtAddr) -> Option<PageTableFlags> {
+    use x86_64::structures::paging::mapper::TranslateResult;
+    mit_speicher(|mapper, _| match mapper.translate(addr) {
+        TranslateResult::Mapped { flags, .. } => Some(flags),
+        _ => None,
+    })
+}
+
 /// Mappt eine Page auf einen BESTIMMTEN Frame — für Hardware-Speicher
 /// wie den VGA-Puffer oder später den Framebuffer (MMIO).
 ///
