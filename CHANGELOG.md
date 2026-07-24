@@ -5,6 +5,95 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### Serie 6, Teil 2: EIGENER ADRESSRAUM PRO PROZESS — echte Isolation
+- **Der zweite große Schritt in den User-Space.** Bis eben lief Ring-3-Code
+  zwar unprivilegiert, aber in DENSELBEN Page Tables wie der Kernel — zwei
+  Programme hätten sich gegenseitig gesehen. Jetzt bekommt jeder Prozess
+  seine **eigene Level-4-Tabelle**: Was nicht in seinen Tabellen steht,
+  EXISTIERT für ihn nicht.
+- **`src/adressraum.rs`** — das neue Modul. Grundprinzip **„Kernel spiegeln,
+  User privat"**: Beim Anlegen werden die Kernel-P4-EINTRÄGE (8-Byte-Zeiger
+  auf GETEILTE P3-Tabellen, nicht die Tabellen selbst!) in die neue P4
+  kopiert. Das MUSS sein, weil ein Interrupt jederzeit mitten im User-Code
+  zuschlägt und die CPU dabei **nicht** CR3 wechselt — ohne Kernel-Mapping
+  wäre das ein Triple Fault.
+- **EHRLICHE ABWEICHUNG VOM LEHRBUCH.** Lehrbücher sagen „spiegle die obere
+  Adressraumhälfte". Bei uns wäre das fatal: `bootloader_api` 0.11 legt mit
+  `Mapping::Dynamic` **alles in die UNTERE Hälfte**. Nachgemessen im
+  laufenden System:
+  ```
+  P4[0]   Bootloader-/Frühmappings   P4[5]   Physik-Komplettmapping
+  P4[2,3] Kernel-Image               P4[6,7] Stack, BootInfo, Framebuffer
+  P4[4]   ...                        P4[136] Kernel-Heap (0x4444_4444_0000)
+  ```
+  Die obere Hälfte ist **komplett leer**. Also spiegeln wir jeden belegten
+  Kernel-Slot; privat ist genau **P4-Slot 1** (512 GiB .. 1 TiB) — der
+  einzige freie Slot. Die Messung stand vor dem Code, nicht die Annahme.
+- **Die Feinheit, die es robust macht:** Weil wir P4-EINTRÄGE kopieren
+  (Zeiger auf gemeinsame P3-Tabellen), sind spätere Kernel-Mappings
+  *innerhalb* schon gespiegelter Slots — etwa `heap_erweitern` — automatisch
+  in allen Adressräumen sichtbar. Nur ein komplett NEUER Kernel-Slot wäre es
+  nicht, deshalb frischt `aktivieren()` den Spiegel jedes Mal auf (511
+  Einträge kopieren, ein Wimpernschlag).
+- **Besitz und Abriss.** `eigene: Vec<PhysFrame>` führt Buch über die P4,
+  ALLE Zwischentabellen (ein `BuchAllocator` notiert auch die, die `map_to`
+  im Verborgenen anlegt) und alle Datenseiten. `Drop` schaltet nötigenfalls
+  erst auf den Kernel-Adressraum zurück (Tabellen unter den eigenen Füßen
+  freizugeben wäre der schnellste Weg zum Triple Fault) und gibt exakt diese
+  Frames frei. Kernel-Frames sind nur *gespiegelt*, stehen nicht in `eigene`
+  und werden nie angefasst.
+- **API:** `map_benutzer` (PRESENT|WRITABLE|USER_ACCESSIBLE — und der Frame
+  wird **vorher genullt**, sonst leckt der Inhalt des Vorbesitzers nach
+  Ring 3), `bereich_mappen`, `stack_anlegen`, `schreiben`/`lesen` über das
+  Physik-Komplettmapping **ohne Aktivierung** (genau das Muster des künftigen
+  ELF-Loaders), `seiten_flags` auch für INAKTIVE Räume, `aktivieren` /
+  `kernel_aktivieren` (CR3), `abreissen`.
+- **User-Stack mit GUARD-PAGE.** `stack_anlegen(top, seiten)` mappt die
+  Stack-Seiten und lässt die Seite darunter **bewusst ungemappt**. Ein
+  Stack-Überlauf gibt damit sofort einen Page Fault, statt still den
+  darunterliegenden Speicher zu zerschreiben — der übelste Fehlerfall
+  überhaupt, weil er erst viel später und ganz woanders auffällt.
+- **copy-in/copy-out ausgebaut** (`src/ring3.rs`) — die kritischste
+  Sicherheitsfläche des Kernels, jetzt **dreistufig** in dieser Reihenfolge:
+  **(a) Bereich** — liegt [ptr, ptr+len) vollständig im User-Bereich? Reine
+  Arithmetik mit `checked_add`, erledigt Kernel-Adressen und Nullzeiger, ohne
+  auch nur eine Page Table anzufassen. **(b) Mapping** — ist JEDE berührte
+  Page im Adressraum des AUFRUFENDEN Prozesses (den Tabellen aus CR3!)
+  gemappt und USER_ACCESSIBLE? Eine Page aus einem FREMDEN Adressraum ist
+  damit schlicht ungemappt. **(c) Schreibrecht** — beim copy-OUT zusätzlich
+  WRITABLE, sonst würde Ring-0-Code in eine Seite schreiben, die der Prozess
+  selbst nur lesen darf. Neu: `copy_out`, `user_bereich_pruefen` und
+  `copy_in_prozess`/`copy_out_prozess`, die den Adressraum explizit nennen
+  und ablehnen, wenn er nicht der aktive ist. Panickt weiterhin **nie**.
+- **`memory::map_page_benutzer` ist ersatzlos entfallen** — User-Speicher
+  darf es im Kernel-Adressraum nie geben. Neu: `memory::kernel_p4_frame()`
+  (der globale MAPPER schreibt IMMER in die Kernel-P4, egal was in CR3 steht,
+  damit Kernel-Mappings nie im Adressraum eines Prozesses landen).
+- **Neuer Syscall 2 = `zeit_ms(ptr)`** — der erste, der copy-OUT benutzt
+  (Kernel schreibt in einen User-Puffer). Ring-3-Programme laufen jetzt in
+  `prozess_aufsetzen`-gebauten Adressräumen; `nach_ring3` wechselt CR3 und
+  schaltet auf BEIDEN Rückwegen (exit UND Absturz) sauber zurück.
+- **Shell:** `adressraum` (Isolations-Beweis zum Zusehen) und
+  `ring3test stack` (Guard-Page-Beweis).
+- **DIE BEWEISE** (`tests/adressraum.rs`, echt in QEMU):
+  ```
+  [ADRESSRAUM-MEILENSTEIN] Adresse 0x8000100000: in A = "AAAA-ich-bin-A--",
+                                                 in B = "BBBB-ich-bin-B--"
+  [ADRESSRAUM-MEILENSTEIN] 5x anlegen/abreissen: 25375 von 32768 Frames frei
+    (vorher 25375), Spitzenbedarf 53 Frames — Bilanz exakt null.
+  EXCEPTION: PAGE FAULT — aus USER-MODE (Ring 3)
+    Zugriff auf Adresse: VirtAddr(0x80000fbff8)   <- die Guard-Page
+    Ursache: Seite nicht vorhanden   Zugriff: Schreibzugriff
+  [ADRESSRAUM-MEILENSTEIN] Guard-Page hat den Stack-Ueberlauf gefangen.
+  [ADRESSRAUM-MEILENSTEIN] Absturz aufgefangen UND der Adressraum
+                           vollstaendig abgeraeumt.
+  ```
+  Dazu die Angriffs-Unit-Tests gegen copy-in/copy-out: Kernel-Adresse,
+  Nullzeiger, obere Hälfte, Integer-Überlauf bei Zeiger+Länge, Länge über die
+  Seitengrenze in ungemapptes Gebiet, und **fremder Adressraum** (Prozess B
+  legt ein Geheimnis an eine Adresse, Prozess A liest dieselbe Adresse und
+  bekommt `NichtGemappt`).
+
 ### Serie 6 beginnt: RING 3 — SpeedOS führt unprivilegierten Code aus
 - **Der Sprung, der SpeedOS zu einem „echten" OS macht.** Bis hierher lief
   JEDER Befehl im Kernel-Privileg (Ring 0). Jetzt läuft Code in **Ring 3**,

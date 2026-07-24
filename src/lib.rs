@@ -29,6 +29,7 @@ use core::panic::PanicInfo;
 // Unsere Treiber- und System-Module — bewusst voneinander isoliert
 // (Mikrokernel-Prinzip).
 pub mod ablage;
+pub mod adressraum;
 pub mod allocator;
 pub mod apps;
 pub mod ata;

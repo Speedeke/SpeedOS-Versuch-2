@@ -71,11 +71,21 @@
 - **(I) DER KERNEL FOLGT NIEMALS BLIND EINEM USER-ZEIGER.** Jeder Zeiger, den
   Ring-3-Code übergibt (Syscall-Argument), wird VOR der Benutzung GEPRÜFT und
   die Daten werden KOPIERT — nie direkt dereferenziert. `ring3::copy_in(ptr,
-  laenge)` ist der einzige Weg: Es prüft JEDE berührte Page auf „gemappt UND
-  USER_ACCESSIBLE" (`memory::seiten_flags`), fängt Längen-Überlauf und absurde
-  Größen ab (`CopyFehler::{Ueberlauf, ZuGross, NichtGemappt, KernelSpeicher}`)
-  und PANICKT NIE. Ein User-Zeiger auf Kernel-Speicher wird abgelehnt, nicht
-  gelesen. (Rückrichtung später analog: copy-out in geprüfte User-Puffer.)
+  laenge)` und `ring3::copy_out(ptr, daten)` sind die EINZIGEN Wege; beide
+  laufen über `ring3::user_bereich_pruefen(ptr, laenge, schreiben)`, das
+  DREISTUFIG prüft: **(a)** liegt [ptr, ptr+len) vollständig im User-Bereich
+  (`adressraum::USER_START..USER_ENDE`, mit checked_add — ein Zeiger nahe
+  u64::MAX darf nicht „hinten wieder rauskommen"), **(b)** ist JEDE berührte
+  Page im ADRESSRAUM DES AUFRUFENDEN PROZESSES gemappt und USER_ACCESSIBLE
+  (nachgeschlagen in den Tabellen aus CR3 via `adressraum::aktive_seiten_flags`
+  — eine Page aus einem FREMDEN Adressraum ist damit schlicht ungemappt),
+  **(c)** beim copy-OUT zusätzlich WRITABLE. Fehlerwerte:
+  `CopyFehler::{Ueberlauf, ZuGross, AusserhalbUserBereich, NichtGemappt,
+  KernelSpeicher, NichtBeschreibbar, FalscherAdressraum}`. PANICKT NIE.
+  `copy_in_prozess`/`copy_out_prozess` nennen den Adressraum explizit und
+  lehnen ab, wenn er nicht der aktive ist. Alle Angriffsvarianten sind in
+  `src/ring3.rs` unit-getestet (Kernel-Adresse, Nullzeiger, obere Hälfte,
+  Integer-Überlauf, Länge über die Seitengrenze, fremder Adressraum).
 - **(II) EIN FEHLER IM USER-MODE DARF DEN KERNEL NIE MITREISSEN.** Page Fault
   oder #GP aus Ring 3 beenden den User-Code und kehren in den Kernel zurück —
   der Kernel läuft weiter. Mechanik: `interrupts::user_recovery()` prüft „kam
@@ -317,6 +327,49 @@
   `ring3test` (+ `ring3test absturz`). Beweise in `tests/ring3.rs`:
   „Hallo aus Ring 3!" + Page Fault aus User-Mode aufgefangen + Ring 3 läuft
   danach weiter.
+- **PRO-PROZESS-ADRESSRÄUME (Serie 6, Juli 2026, `src/adressraum.rs`) — echte
+  Isolation:** Jeder Prozess bekommt eine EIGENE Level-4-Tabelle. GRUNDPRINZIP
+  „Kernel spiegeln, User privat": Beim Anlegen werden die Kernel-P4-EINTRÄGE
+  (8-Byte-Zeiger auf GETEILTE P3-Tabellen) hineinkopiert — nötig, weil ein
+  Interrupt jederzeit mitten im User-Code zuschlägt und die CPU dabei NICHT
+  CR3 wechselt. EHRLICHE ABWEICHUNG VOM LEHRBUCH: „die obere Hälfte spiegeln"
+  gilt bei uns NICHT — bootloader_api 0.11 (`Mapping::Dynamic`) legt ALLES in
+  die untere Hälfte (nachgemessen: P4[0] Frühmappings, P4[2,3] Kernel-Image,
+  P4[4], P4[5] Physik-Komplettmapping, P4[6,7] Stack/BootInfo/Framebuffer,
+  P4[136] Heap; die obere Hälfte ist KOMPLETT leer). Nur die obere Hälfte zu
+  spiegeln gäbe einen sofortigen Triple Fault. Deshalb: gespiegelt wird JEDER
+  belegte Kernel-Slot, privat ist genau **P4-Slot 1** (`USER_START` 512 GiB ..
+  `USER_ENDE` 1 TiB) — der einzige freie Slot. WEIL wir P4-EINTRÄGE kopieren,
+  sind spätere Kernel-Mappings INNERHALB schon gespiegelter Slots (z. B.
+  heap_erweitern) automatisch überall sichtbar; nur ein komplett NEUER
+  Kernel-Slot wäre es nicht — deshalb frischt `aktivieren()` den Spiegel
+  jedes Mal auf. BESITZ/ABRISS: `eigene: Vec<PhysFrame>` führt Buch über P4,
+  ALLE Zwischentabellen (der `BuchAllocator` notiert auch die, die `map_to`
+  im Verborgenen anlegt) und alle Datenseiten; `Drop` schaltet nötigenfalls
+  erst auf den Kernel zurück und gibt exakt diese Frames frei — Kernel-Frames
+  sind nur gespiegelt, stehen nicht in `eigene`. API: `map_benutzer`
+  (PRESENT|WRITABLE|USER_ACCESSIBLE, Frame VORHER GENULLT — sonst leckt der
+  Inhalt des Vorbesitzers nach Ring 3), `bereich_mappen`, `stack_anlegen(top,
+  seiten)` mit UNGEMAPPTER GUARD-PAGE darunter (Stack-Überlauf = Page Fault
+  statt stiller Zerstörung), `schreiben`/`lesen` über das Physik-Komplett-
+  mapping OHNE Aktivierung (das Muster des künftigen ELF-Loaders),
+  `seiten_flags` (auch für INAKTIVE Räume — so testet man den „fremden
+  Adressraum"), `aktivieren`/`adressraum::kernel_aktivieren` (CR3),
+  `abreissen`. Der Page-Table-Läufer (`flags_in`/`uebersetzen_in`) geht die
+  vier Ebenen VON HAND ab: lock-frei (Syscall-Pfad!), funktioniert für
+  Tabellen, die nicht in CR3 stehen, und behandelt HUGE_PAGE korrekt (das
+  Physik-Mapping des Bootloaders benutzt 2-MiB-/1-GiB-Seiten).
+  `memory::map_page_benutzer` ist ERSATZLOS ENTFALLEN — User-Speicher darf es
+  im Kernel-Adressraum nie geben; `memory::kernel_p4_frame()` hält die
+  Kernel-P4 fest (der globale MAPPER schreibt IMMER dorthin, egal was in CR3
+  steht). ring3.rs läuft jetzt komplett darüber: `prozess_aufsetzen` baut
+  Adressraum + Code-Seite + Stack, `nach_ring3` wechselt CR3 und schaltet auf
+  BEIDEN Rückwegen (exit UND Absturz) zurück. Neuer Syscall 2 = `zeit_ms(ptr)`
+  — der erste, der copy-OUT benutzt. Shell: `adressraum`, `ring3test stack`.
+  BEWEISE (`tests/adressraum.rs`, echt in QEMU): zwei Adressräume, dieselbe
+  VA 0x8000100000, Inhalt „A" bzw. „B" je nach CR3; 5x anlegen/abreißen mit
+  Spitzenbedarf 53 Frames → Frame-Bilanz BYTE-EXAKT null (auch nach Absturz
+  und Stack-Überlauf); Guard-Page fängt den Push bei 0x80000fbff8.
 - **FAT32-Treiber (Juli 2026, `src/fs/fat32.rs`) — NUR LESEN:**
   SpeedOS liest fremde FAT32-Medien ("der USB-Stick"), schreibt sie
   aber NIE (jeder Schreib-Weg -> `IoFehler::NurLesen`). Kein/kaputtes

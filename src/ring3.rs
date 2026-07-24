@@ -31,30 +31,47 @@
 //       im KERNEL selbst (Ring 0) hält an (das ist ein echter Bug).
 // ==========================================================================
 
-use crate::{gdt, memory, serial_print, serial_println};
+use crate::adressraum::{self, AdressRaum};
+use crate::{gdt, serial_print, serial_println};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
-use x86_64::structures::paging::{Page, PageTableFlags};
+use x86_64::structures::paging::PageTableFlags;
 use x86_64::VirtAddr;
 
-/// Basis-Adresse des User-Bereichs für diesen ersten Versuch: 512 GiB.
-/// Bewusst in einem eigenen, sonst ungenutzten P4-Slot (Index 1) der unteren
-/// (User-)Adressraumhälfte — weit weg von Heap (~75 TiB), DMA (~122 TiB) und
-/// dem Kernel (obere Hälfte). Eine Page trägt Code + Nachricht, die zweite den
-/// User-Stack.
-const USER_BASIS: u64 = 0x0000_0080_0000_0000;
+// SPEICHER-LAYOUT eines SpeedOS-Prozesses (Serie 6, Teil 2).
+// Alles liegt im PRIVATEN P4-Slot 1 (ab 512 GiB) seines eigenen Adressraums —
+// im Kernel-Adressraum ist an diesen Adressen NICHTS gemappt.
+//
+//   USER_BASIS      +0x0000  Code-Seite  (Programm)
+//                   +0x0100  Nachricht (Daten für debug_print)
+//                   +0x0200  Puffer für copy-OUT (der Kernel schreibt hier hin)
+//   ... Lücke (ungemappt) ...
+//   STACK_GUARD             GUARD-PAGE — bewusst NICHT gemappt
+//   STACK_UNTEN .. STACK_TOP  4 Seiten User-Stack (wächst nach unten)
+
+/// Basis-Adresse des User-Bereichs = Anfang des privaten P4-Slots.
+const USER_BASIS: u64 = adressraum::USER_START;
 /// Offset der Nachricht in der Code-Page (der Code selbst ist << 0x100 Byte).
 const NACHRICHT_OFFSET: u64 = 0x100;
-/// Oberes Ende des User-Stacks (Top der zweiten Page).
-const USER_STACK_TOP: u64 = USER_BASIS + 0x2000;
+/// Offset des copy-out-Puffers in der Code-Page.
+const ZEIT_OFFSET: u64 = 0x200;
+/// Anzahl Seiten des User-Stacks.
+const STACK_SEITEN: usize = 4;
+/// Oberes Ende des User-Stacks (1 MiB über der Code-Seite — die grosse Lücke
+/// dazwischen ist ungemappt und trennt Code und Stack zusätzlich).
+const USER_STACK_TOP: u64 = USER_BASIS + 0x10_0000;
+/// Unterkante des Stacks; direkt DARUNTER liegt die Guard-Page.
+const USER_STACK_UNTEN: u64 = USER_STACK_TOP - (STACK_SEITEN as u64) * 4096;
 
 /// Die Nachricht, die der Ring-3-Code per Syscall drucken soll.
-const NACHRICHT: &[u8] = b"Hallo aus Ring 3!\n";
+const NACHRICHT: &[u8] = b"Hallo aus Ring 3 - mit eigenem Adressraum!\n";
 
-/// Syscall-Nummern (in rax). Für diesen Prompt genügt debug_print; `exit`
-/// ist der triviale Rückweg (aus Ring 3 zurück in den Kernel).
+/// Syscall-Nummern (in rax).
 const SYS_DEBUG_PRINT: u64 = 0;
 const SYS_EXIT: u64 = 1;
+/// zeit_ms(ptr): schreibt die Millisekunden seit dem Boot als 8 Byte in den
+/// User-Puffer — der erste Syscall, der copy-OUT benutzt (die Rückrichtung).
+const SYS_ZEIT_MS: u64 = 2;
 
 // ---------------------------------------------------------------------------
 // DAUERREGEL (I): der geprüfte copy-in-Helfer
@@ -67,55 +84,173 @@ pub enum CopyFehler {
     Ueberlauf,
     /// Der Puffer wäre zu groß (Schutz gegen absurde Längen).
     ZuGross,
-    /// Eine berührte Page ist gar nicht gemappt.
+    /// Der Bereich liegt (ganz oder teilweise) AUSSERHALB des User-Bereichs —
+    /// Kernel-Adresse, Nullseite oder ein Bereich, der über die Obergrenze
+    /// hinausragt. Die Prüfung ist reine Arithmetik und braucht keine
+    /// Page Tables: Sie fängt den Angriff, bevor irgendetwas nachgeschlagen
+    /// wird (Adressraum-Regel (a)).
+    AusserhalbUserBereich,
+    /// Eine berührte Page ist im Adressraum des Aufrufers nicht gemappt —
+    /// z. B. weil sie in einem FREMDEN Adressraum liegt (Regel (b)).
     NichtGemappt,
     /// Eine berührte Page gehört dem KERNEL (nicht USER_ACCESSIBLE) —
     /// ein User-Zeiger, der auf Kernel-Speicher zeigt, wird abgelehnt.
     KernelSpeicher,
+    /// Beim copy-OUT: Die Page ist nur lesbar (Regel (c)).
+    NichtBeschreibbar,
+    /// Der angegebene Prozess-Adressraum steht gar nicht in CR3 — wir würden
+    /// über die Zeiger eines Adressraums in einen ANDEREN schreiben.
+    FalscherAdressraum,
 }
 
-/// Höchstlänge eines copy-in in Bytes (64 KiB — reicht für Debug-Ausgaben,
-/// begrenzt den Schaden eines fehlerhaften/böswilligen Längen-Arguments).
+/// Höchstlänge eines copy-in/copy-out in Bytes (64 KiB — reicht für
+/// Debug-Ausgaben, begrenzt den Schaden eines fehlerhaften/böswilligen
+/// Längen-Arguments).
 const COPY_IN_MAX: usize = 64 * 1024;
 
-/// Kopiert `laenge` Bytes vom User-Zeiger `user_ptr` in einen frischen
-/// Kernel-Vec — ABER erst nach voller Prüfung: jede berührte Page muss
-/// gemappt UND USER_ACCESSIBLE sein. Panickt NIE (Dauerregel I).
-///
-/// (Einschränkung fürs Protokoll: In einem präemptiven System könnte ein
-/// anderer Thread die Page zwischen Prüfung und Kopie unmappen — TOCTOU. Bei
-/// uns läuft alles single-threaded und synchron, deshalb ist die Prüfung-
-/// dann-Kopie hier korrekt; mit echten Prozessen kommt die Absicherung dazu.)
-pub fn copy_in(user_ptr: u64, laenge: usize) -> Result<Vec<u8>, CopyFehler> {
+// ===========================================================================
+// DIE KRITISCHSTE SICHERHEITSFLÄCHE DES KERNELS
+//
+// Hier — und nur hier — folgt Kernel-Code einem Zeiger, den ein
+// unprivilegiertes Programm sich ausgedacht hat. Jeder Fehler in dieser
+// Funktion ist eine vollständige Kernel-Übernahme. Deshalb steht die
+// Prüfung DREISTUFIG und in dieser Reihenfolge da:
+//
+//   (a) BEREICH: Liegt [ptr, ptr+len) vollständig im User-Bereich
+//       (adressraum::USER_START .. USER_ENDE)? Reine Arithmetik MIT
+//       Überlauf-Prüfung — ein Zeiger nahe u64::MAX plus grosse Länge darf
+//       nicht "hinten wieder rauskommen" und dabei den Kernel umschliessen.
+//       Diese Stufe erledigt Kernel-Adressen und Nullzeiger, ohne auch nur
+//       eine Page Table anzufassen.
+//
+//   (b) MAPPING: Ist JEDE berührte Page im Adressraum des AUFRUFENDEN
+//       Prozesses gemappt und USER_ACCESSIBLE? Nachgeschlagen wird in den
+//       Tabellen aus CR3 — beim Syscall steht dort genau der Adressraum des
+//       Aufrufers. Eine Page, die nur in einem FREMDEN Adressraum existiert,
+//       ist hier schlicht ungemappt. Geprüft wird JEDE Page einzeln, nicht
+//       nur die erste: Der klassische Angriff ist ein Zeiger auf das letzte
+//       Byte einer gültigen Seite mit einer Länge, die in ungemapptes (oder
+//       fremdes) Gebiet dahinter reicht.
+//
+//   (c) SCHREIBRECHT (nur copy-out): Trägt die Page WRITABLE? Sonst würde
+//       der Kernel im Ring 0 fröhlich in eine Seite schreiben, die der
+//       Prozess selbst nur lesen darf — die Schreibsperre wäre wertlos.
+//
+// Erst wenn ALLES stimmt, wird kopiert. Und zwar wirklich KOPIERT: Der
+// Kernel arbeitet nie auf User-Speicher weiter, sonst könnte der Prozess
+// ihm die Daten unter den Händen wegändern.
+//
+// PANICKT NIE. Jeder Fehler ist ein Result — ein Programm darf Unsinn
+// übergeben, das ist kein Kernel-Bug.
+//
+// TOCTOU fürs Protokoll: Zwischen Prüfung und Kopie könnte in einem
+// PRÄEMPTIVEN System ein anderer Thread die Page aushängen. Bei uns läuft
+// der Syscall synchron und ohne Task-Wechsel, deshalb ist Prüfen-dann-
+// Kopieren korrekt. Mit dem präemptiven Scheduler kommt hier ein Lock auf
+// den Adressraum dazu.
+// ===========================================================================
+
+/// Die reine Prüfung ohne Kopie — Stufen (a), (b) und (optional) (c).
+/// Geprüft wird gegen den AKTIVEN Adressraum (CR3), also den des
+/// aufrufenden Prozesses.
+pub fn user_bereich_pruefen(
+    user_ptr: u64,
+    laenge: usize,
+    schreiben: bool,
+) -> Result<(), CopyFehler> {
     if laenge == 0 {
-        return Ok(Vec::new());
+        return Ok(());
     }
     if laenge > COPY_IN_MAX {
         return Err(CopyFehler::ZuGross);
     }
-    // Länge darf den Adressraum nicht überlaufen.
-    let ende = (user_ptr as usize)
-        .checked_add(laenge)
+    // (a) Bereich + Überlauf. `im_user_bereich` rechnet mit checked_add:
+    // Ein Überlauf ist damit KEIN gültiger Bereich.
+    let ende = user_ptr
+        .checked_add(laenge as u64)
         .ok_or(CopyFehler::Ueberlauf)?;
+    if !adressraum::im_user_bereich(user_ptr, laenge) {
+        return Err(CopyFehler::AusserhalbUserBereich);
+    }
 
-    // JEDE berührte Page prüfen: gemappt + USER_ACCESSIBLE.
-    let mut seite = user_ptr as usize & !0xfff;
+    // (b)/(c) Jede einzelne berührte Page im Adressraum des Aufrufers.
+    let mut seite = user_ptr & !0xfff;
     while seite < ende {
-        match memory::seiten_flags(VirtAddr::new(seite as u64)) {
-            Some(flags) if flags.contains(PageTableFlags::USER_ACCESSIBLE) => {}
-            Some(_) => return Err(CopyFehler::KernelSpeicher),
+        match adressraum::aktive_seiten_flags(VirtAddr::new(seite)) {
             None => return Err(CopyFehler::NichtGemappt),
+            Some(flags) => {
+                if !flags.contains(PageTableFlags::USER_ACCESSIBLE) {
+                    return Err(CopyFehler::KernelSpeicher);
+                }
+                if schreiben && !flags.contains(PageTableFlags::WRITABLE) {
+                    return Err(CopyFehler::NichtBeschreibbar);
+                }
+            }
         }
         seite += 4096;
     }
+    Ok(())
+}
 
-    // Jetzt ist das Lesen sicher (alle Pages gemappt + user-zugänglich).
+/// Kopiert `laenge` Bytes vom User-Zeiger `user_ptr` in einen frischen
+/// Kernel-Vec — erst nach der vollen Prüfung oben. Panickt NIE.
+pub fn copy_in(user_ptr: u64, laenge: usize) -> Result<Vec<u8>, CopyFehler> {
+    if laenge == 0 {
+        return Ok(Vec::new());
+    }
+    user_bereich_pruefen(user_ptr, laenge, false)?;
+
     let mut ziel = alloc::vec![0u8; laenge];
-    // unsafe: Der gesamte Bereich ist geprüft gemappt — kein Fault möglich.
+    // unsafe: Der gesamte Bereich ist geprüft im aktiven Adressraum gemappt
+    // und user-zugänglich — kein Fault möglich.
     unsafe {
         core::ptr::copy_nonoverlapping(user_ptr as *const u8, ziel.as_mut_ptr(), laenge);
     }
     Ok(ziel)
+}
+
+/// Die Rückrichtung: kopiert Kernel-Daten in einen User-Puffer. Zusätzlich
+/// zu allen copy-in-Prüfungen muss der Zielbereich BESCHREIBBAR sein.
+pub fn copy_out(user_ptr: u64, daten: &[u8]) -> Result<(), CopyFehler> {
+    if daten.is_empty() {
+        return Ok(());
+    }
+    user_bereich_pruefen(user_ptr, daten.len(), true)?;
+
+    // unsafe: Zielbereich ist geprüft gemappt, user-zugänglich UND
+    // beschreibbar — im Adressraum, der gerade in CR3 steht.
+    unsafe {
+        core::ptr::copy_nonoverlapping(daten.as_ptr(), user_ptr as *mut u8, daten.len());
+    }
+    Ok(())
+}
+
+/// Wie `copy_in`, aber mit EXPLIZIT genanntem Prozess-Adressraum: Es wird
+/// zusätzlich geprüft, dass dieser Adressraum wirklich der aktive ist.
+/// Sobald es mehrere Prozesse gibt, ist das die Form, die ein Verwechseln
+/// unmöglich macht — man kann nicht versehentlich die Tabellen von Prozess A
+/// prüfen und in den Speicher von Prozess B greifen.
+pub fn copy_in_prozess(
+    raum: &adressraum::AdressRaum,
+    user_ptr: u64,
+    laenge: usize,
+) -> Result<Vec<u8>, CopyFehler> {
+    if !raum.ist_aktiv() {
+        return Err(CopyFehler::FalscherAdressraum);
+    }
+    copy_in(user_ptr, laenge)
+}
+
+/// Wie `copy_out`, mit explizit genanntem Prozess-Adressraum.
+pub fn copy_out_prozess(
+    raum: &adressraum::AdressRaum,
+    user_ptr: u64,
+    daten: &[u8],
+) -> Result<(), CopyFehler> {
+    if !raum.ist_aktiv() {
+        return Err(CopyFehler::FalscherAdressraum);
+    }
+    copy_out(user_ptr, daten)
 }
 
 // ---------------------------------------------------------------------------
@@ -215,6 +350,20 @@ extern "C" fn syscall_dispatch(frame: *mut TrapFrame) {
                 Err(fehler) => {
                     serial_println!("[syscall] debug_print: ungueltiger Puffer ({:?})", fehler);
                     f.rax = u64::MAX; // Fehler-Kennung
+                }
+            }
+        }
+        SYS_ZEIT_MS => {
+            // zeit_ms(ptr = rdi): 8 Byte in den User-Puffer schreiben.
+            // Die Rückrichtung ist NICHT harmloser als copy-in — im Gegenteil:
+            // Hier schreibt Ring-0-Code an eine Adresse, die sich Ring 3
+            // ausgedacht hat. `copy_out` prüft deshalb zusätzlich WRITABLE.
+            let ms = crate::zeit::ms_seit_boot();
+            match copy_out(f.rdi, &ms.to_le_bytes()) {
+                Ok(()) => f.rax = 0,
+                Err(fehler) => {
+                    serial_println!("[syscall] zeit_ms: ungueltiger Puffer ({:?})", fehler);
+                    f.rax = u64::MAX;
                 }
             }
         }
@@ -344,16 +493,27 @@ pub fn recovery_rsp() -> u64 {
     unsafe { core::ptr::addr_of!(RING3_SPRUNG.rsp).read() }
 }
 
+
 /// Springt nach Ring 3 (Einsprung `user_entry`, User-Stack `user_stack`) und
 /// kehrt erst zurück, wenn der User-Code per `exit` endet oder abstürzt.
+///
+/// NEU in Serie 6, Teil 2: Vorher wird auf den ADRESSRAUM DES PROZESSES
+/// umgeschaltet (CR3). Ab dann sieht die CPU nur noch dessen private Seiten —
+/// plus den gespiegelten Kernel, denn ein Timer-Interrupt kann jederzeit
+/// mitten im User-Code zuschlagen und braucht Kernel-Code und Kernel-Stack
+/// an ihrer gewohnten Adresse. Beim Rückweg (exit ODER Absturz) schalten wir
+/// auf den Kernel-Adressraum zurück.
 ///
 /// WARUM iretq (und nicht sysretq)? `iretq` ist der GENERISCHE Sprung-Befehl:
 /// Er lädt CS:RIP, RFLAGS UND SS:RSP aus einem Stack-Rahmen — wir bauen den
 /// Rahmen, den ein Trap aus Ring 3 hinterlassen HÄTTE, und „springen dorthin".
 /// `sysretq` bräuchte MSR-Einrichtung und eine bestimmte Segment-Anordnung.
-fn nach_ring3(user_entry: u64, user_stack: u64) {
+fn nach_ring3(raum: &mut AdressRaum, user_entry: u64, user_stack: u64) {
     let ucs = gdt::user_code_selektor();
     let uds = gdt::user_data_selektor();
+
+    // Adressraum-Wechsel: ab hier ist der Prozess-Adressraum aktiv.
+    raum.aktivieren();
     RING3_AKTIV.store(true, Ordering::SeqCst);
 
     // setjmp: Kernel-Kontext sichern. Beim ERSTEN Aufruf 0 -> nach Ring 3
@@ -368,17 +528,27 @@ fn nach_ring3(user_entry: u64, user_stack: u64) {
     }
 
     RING3_AKTIV.store(false, Ordering::SeqCst);
+    // Zurück in den Kernel-Adressraum — egal ob der Prozess sauber beendet
+    // hat oder abgestürzt ist. Diese Zeile MUSS auf beiden Wegen laufen.
+    adressraum::kernel_aktivieren();
 }
 
 // ---------------------------------------------------------------------------
-// Die beiden Testprogramme (hand-assemblierter Ring-3-Maschinencode)
+// Die Testprogramme (hand-assemblierter Ring-3-Maschinencode)
 // ---------------------------------------------------------------------------
 
-/// Baut das ERFOLGS-Programm: druckt die Nachricht per Syscall, dann exit.
-/// Position-unabhängig ist es NICHT nötig — wir kennen die Ziel-Adresse
-/// (USER_BASIS) und setzen absolute Adressen ein.
-fn programm_erfolg(nachricht_va: u64, laenge: usize) -> Vec<u8> {
+/// Baut das ERFOLGS-Programm:
+///   1. zeit_ms(puffer)   -> beweist copy-OUT (Kernel schreibt zu Ring 3)
+///   2. debug_print(text) -> beweist copy-IN  (Kernel liest von Ring 3)
+///   3. exit
+///
+/// Position-unabhängig muss es nicht sein — wir kennen die Ziel-Adressen.
+fn programm_erfolg(nachricht_va: u64, laenge: usize, zeit_va: u64) -> Vec<u8> {
     let mut p = Vec::new();
+    p.extend_from_slice(&[0x48, 0xC7, 0xC0, 0x02, 0x00, 0x00, 0x00]); // mov rax, 2 (zeit_ms)
+    p.extend_from_slice(&[0x48, 0xBF]); // movabs rdi, zeit_va
+    p.extend_from_slice(&zeit_va.to_le_bytes());
+    p.extend_from_slice(&[0xCD, 0x80]); // int 0x80
     p.extend_from_slice(&[0x48, 0xC7, 0xC0, 0x00, 0x00, 0x00, 0x00]); // mov rax, 0 (debug_print)
     p.extend_from_slice(&[0x48, 0xBF]); // movabs rdi, nachricht_va
     p.extend_from_slice(&nachricht_va.to_le_bytes());
@@ -402,122 +572,279 @@ fn programm_absturz(kernel_adresse: u64) -> Vec<u8> {
     p
 }
 
-/// Mappt die beiden User-Pages (Code + Stack) und schreibt `code` (und, wenn
-/// gesetzt, die Nachricht bei NACHRICHT_OFFSET) hinein.
-fn user_pages_aufsetzen(code: &[u8], nachricht: Option<&[u8]>) {
-    let code_page = Page::containing_address(VirtAddr::new(USER_BASIS));
-    let stack_page = Page::containing_address(VirtAddr::new(USER_BASIS + 0x1000));
-    memory::map_page_benutzer(code_page).expect("User-Code-Page mappen");
-    memory::map_page_benutzer(stack_page).expect("User-Stack-Page mappen");
-    // unsafe: die Pages sind frisch gemappt (present, writable) — der Kernel
-    // (Ring 0) darf sie beschreiben.
-    unsafe {
-        core::ptr::copy_nonoverlapping(code.as_ptr(), USER_BASIS as *mut u8, code.len());
-        if let Some(n) = nachricht {
-            core::ptr::copy_nonoverlapping(
-                n.as_ptr(),
-                (USER_BASIS + NACHRICHT_OFFSET) as *mut u8,
-                n.len(),
-            );
-        }
-    }
+/// Baut das STACK-ÜBERLAUF-Programm: setzt rsp auf die UNTERKANTE des Stacks
+/// und pusht — der Push landet damit 8 Byte darunter, also mitten in der
+/// GUARD-PAGE. Genau dafür ist sie da: Statt still den Speicher unterhalb des
+/// Stacks zu zerschreiben, gibt es sofort einen Page Fault.
+fn programm_stack_ueberlauf(stack_unterkante: u64) -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(&[0x48, 0xBC]); // movabs rsp, stack_unterkante
+    p.extend_from_slice(&stack_unterkante.to_le_bytes());
+    p.push(0x50); // push rax -> schreibt bei rsp-8 = Guard-Page -> #PF
+    p.extend_from_slice(&[0xEB, 0xFE]); // jmp $ (wird nie erreicht)
+    p
 }
 
-/// Gibt die beiden User-Pages wieder frei (Frames zurück in den Allocator).
-fn user_pages_abraeumen() {
-    for va in [USER_BASIS, USER_BASIS + 0x1000] {
-        let page = Page::containing_address(VirtAddr::new(va));
-        if let Ok(frame) = memory::unmap_page(page) {
-            // unsafe: die Page ist eben ausgehängt, der Frame nirgends mehr in
-            // Benutzung.
-            unsafe { memory::frame_freigeben(frame) };
-        }
+// ---------------------------------------------------------------------------
+// Prozess-Aufbau: ein Adressraum, eine Code-Seite, ein Stack mit Guard-Page
+// ---------------------------------------------------------------------------
+
+/// Baut einen frischen Prozess-Adressraum mit Code-Seite und User-Stack.
+///
+/// Beachte, wie der Kernel den Code hineinbekommt: über `raum.schreiben(...)`
+/// — also über das Physik-Komplettmapping, OHNE den Adressraum zu aktivieren.
+/// Genau dieses Muster wird der ELF-Loader benutzen (Programm laden, während
+/// der Prozess noch gar nicht läuft).
+fn prozess_aufsetzen(code: &[u8], nachricht: Option<&[u8]>) -> AdressRaum {
+    let mut raum = AdressRaum::neu().expect("Prozess-Adressraum anlegen");
+    raum.bereich_mappen(VirtAddr::new(USER_BASIS), 4096)
+        .expect("Code-Seite mappen");
+    raum.stack_anlegen(VirtAddr::new(USER_STACK_TOP), STACK_SEITEN)
+        .expect("User-Stack anlegen");
+    raum.schreiben(VirtAddr::new(USER_BASIS), code)
+        .expect("Code laden");
+    if let Some(n) = nachricht {
+        raum.schreiben(VirtAddr::new(USER_BASIS + NACHRICHT_OFFSET), n)
+            .expect("Nachricht laden");
     }
+    raum
 }
 
-/// TEST 1 (Erfolg): Ring-3-Code druckt „Hallo aus Ring 3!" per Syscall und
-/// kehrt sauber zurück. Der Kernel läuft danach normal weiter.
+/// TEST 1 (Erfolg): Ring-3-Code läuft im EIGENEN Adressraum, holt sich per
+/// copy-out die Uptime, druckt per copy-in seine Nachricht und beendet sich.
 pub fn ring3_erfolg() {
-    let code = programm_erfolg(USER_BASIS + NACHRICHT_OFFSET, NACHRICHT.len());
-    user_pages_aufsetzen(&code, Some(NACHRICHT));
+    let code = programm_erfolg(
+        USER_BASIS + NACHRICHT_OFFSET,
+        NACHRICHT.len(),
+        USER_BASIS + ZEIT_OFFSET,
+    );
+    let mut raum = prozess_aufsetzen(&code, Some(NACHRICHT));
     serial_println!(
-        "[ring3] Springe nach Ring 3 (Einsprung {:#x}, Stack {:#x}) ...",
+        "[ring3] Eigener Adressraum (P4 {:#x}), {} Frames. Einsprung {:#x}, Stack {:#x} ...",
+        raum.p4_frame().start_address().as_u64(),
+        raum.frames_besitz(),
         USER_BASIS,
         USER_STACK_TOP
     );
-    nach_ring3(USER_BASIS, USER_STACK_TOP);
+    nach_ring3(&mut raum, USER_BASIS, USER_STACK_TOP);
     serial_println!("[ring3] Sauber zurueck im Kernel (Ring 0) — System laeuft weiter.");
-    user_pages_abraeumen();
+
+    // BEWEIS für copy-out: Der Kernel hat in den User-Puffer geschrieben.
+    // Wir lesen ihn jetzt aus dem (inaktiven!) Adressraum zurück.
+    let mut puffer = [0u8; 8];
+    if raum
+        .lesen(VirtAddr::new(USER_BASIS + ZEIT_OFFSET), &mut puffer)
+        .is_ok()
+    {
+        let ms = u64::from_le_bytes(puffer);
+        serial_println!(
+            "[ring3] copy-out belegt: Der Prozess hat {} ms Uptime erhalten.",
+            ms
+        );
+    }
+    raum.abreissen();
 }
 
-/// TEST 2 (Absturz): Ring-3-Code greift auf eine KERNEL-Adresse zu. Erwartung:
-/// Page Fault mit klarer Meldung „aus User-Mode", und der KERNEL LEBT WEITER.
+/// TEST 2 (Absturz): Ring-3-Code greift auf eine KERNEL-Adresse zu. Sie ist
+/// in seinem Adressraum zwar GEMAPPT (der Kernel ist ja gespiegelt), aber
+/// ohne U-Bit — Page Fault. Erwartung: klare Meldung „aus User-Mode", und
+/// der KERNEL LEBT WEITER.
 pub fn ring3_absturz() {
-    // Eine garantiert gemappte KERNEL-Adresse (Heap-Start, U=0).
     let kernel_adresse = crate::allocator::HEAP_START as u64;
     let code = programm_absturz(kernel_adresse);
-    user_pages_aufsetzen(&code, None);
+    let mut raum = prozess_aufsetzen(&code, None);
     serial_println!(
         "[ring3] Ring-3-Code greift jetzt VERBOTEN auf Kernel-Adresse {:#x} zu ...",
         kernel_adresse
     );
-    nach_ring3(USER_BASIS, USER_STACK_TOP);
+    nach_ring3(&mut raum, USER_BASIS, USER_STACK_TOP);
     serial_println!(
         "[ring3] Der Absturz wurde aufgefangen — der KERNEL LEBT WEITER. (Genau das ist neu!)"
     );
-    user_pages_abraeumen();
+    raum.abreissen();
+}
+
+/// TEST 3 (Stack-Überlauf): Der Prozess pusht über die Unterkante seines
+/// Stacks hinaus. Die GUARD-PAGE fängt es als Page Fault ab, statt still
+/// fremden Speicher zu zerschreiben.
+pub fn ring3_stack_ueberlauf() {
+    let code = programm_stack_ueberlauf(USER_STACK_UNTEN);
+    let mut raum = prozess_aufsetzen(&code, None);
+    serial_println!(
+        "[ring3] Ring-3-Code pusht unter die Stack-Unterkante {:#x} (Guard-Page bei {:#x}) ...",
+        USER_STACK_UNTEN,
+        USER_STACK_UNTEN - 4096
+    );
+    nach_ring3(&mut raum, USER_BASIS, USER_STACK_TOP);
+    serial_println!("[ring3] Stack-Ueberlauf sauber als Page Fault gefangen (Guard-Page wirkt).");
+    raum.abreissen();
 }
 
 // ---------------------------------------------------------------------------
-// Tests — Dauerregel (I): copy_in gegen ungültige Adressen (nie panicken)
+// Tests — DIE ANGRIFFSVARIANTEN gegen die copy-Helfer
+//
+// Diese Tests sind der Grund, warum copy_in/copy_out überhaupt existieren.
+// Jeder einzelne bildet einen echten Angriff nach, mit dem ein bösartiges
+// Ring-3-Programm den Kernel übernehmen könnte. Erwartet wird IMMER: ein
+// sauberer Fehlerwert, keine Panik, kein Fault, keine Datenpreisgabe.
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use x86_64::structures::paging::Page;
 
-    /// Eine eigene User-Test-Page, getrennt von der Ring-3-Code-Page.
-    const TEST_VA: u64 = USER_BASIS + 0x0010_0000; // +1 MiB
+    /// Eine Test-Adresse im User-Bereich, weit weg von Code und Stack.
+    const TEST_VA: u64 = USER_BASIS + 0x0020_0000; // +2 MiB
 
-    /// copy_in gegen ungültige Eingaben: Kernel-Adresse, ungemappt und
-    /// Längen-Überlauf — ALLE liefern Fehler, KEINE panickt.
-    #[test_case]
-    fn test_copy_in_ungueltig() {
-        // Kernel-Bereich (Heap, U=0) -> KernelSpeicher.
-        assert_eq!(
-            copy_in(crate::allocator::HEAP_START as u64, 8),
-            Err(CopyFehler::KernelSpeicher)
-        );
-        // Nicht gemappte (niedrige, freie) Adresse -> NichtGemappt.
-        assert_eq!(copy_in(0x1_0000, 8), Err(CopyFehler::NichtGemappt));
-        // Länge läuft über den Adressraum hinaus -> Ueberlauf.
-        assert_eq!(copy_in(u64::MAX - 3, 16), Err(CopyFehler::Ueberlauf));
-        // Absurd große Länge -> ZuGross.
-        assert_eq!(copy_in(0x1_0000, 8 * 1024 * 1024), Err(CopyFehler::ZuGross));
-        // Länge 0 ist immer ok (leer), egal welche Adresse.
-        assert_eq!(copy_in(0, 0), Ok(Vec::new()));
-        assert_eq!(copy_in(crate::allocator::HEAP_START as u64, 0), Ok(Vec::new()));
+    /// Legt einen Adressraum mit einer beschreibbaren User-Seite bei TEST_VA
+    /// an und AKTIVIERT ihn — danach ist er „der aufrufende Prozess".
+    fn testraum_aktiv() -> AdressRaum {
+        let mut raum = AdressRaum::neu().expect("Adressraum");
+        raum.map_benutzer(Page::containing_address(VirtAddr::new(TEST_VA)))
+            .expect("User-Page");
+        raum.aktivieren();
+        raum
     }
 
-    /// copy_in gegen eine GÜLTIGE User-Page: liefert die Daten; ein Puffer,
-    /// der über die gemappte Page hinausragt, wird abgelehnt.
+    /// ANGRIFF 1–5: alle Varianten, mit denen ein User-Zeiger den Kernel
+    /// aus der Spur bringen soll.
     #[test_case]
-    fn test_copy_in_gueltig() {
-        let page = Page::containing_address(VirtAddr::new(TEST_VA));
-        memory::map_page_benutzer(page).expect("Test-User-Page mappen");
+    fn test_copy_in_angriffe() {
+        let raum = testraum_aktiv();
+
+        // (1) KERNEL-ADRESSE: Der Prozess zeigt auf den Kernel-Heap. Der
+        //     liegt in SEINEM Adressraum sogar gemappt vor (gespiegelt!) —
+        //     aber ausserhalb des User-Bereichs, also sofort abgelehnt.
+        assert_eq!(
+            copy_in(crate::allocator::HEAP_START as u64, 8),
+            Err(CopyFehler::AusserhalbUserBereich)
+        );
+        // (2) NULLZEIGER / niedrige Adresse: ausserhalb des User-Bereichs.
+        assert_eq!(copy_in(0, 8), Err(CopyFehler::AusserhalbUserBereich));
+        assert_eq!(copy_in(0x1_0000, 8), Err(CopyFehler::AusserhalbUserBereich));
+        // (3) OBERE HÄLFTE (klassische Kernel-Adresse): dito.
+        assert_eq!(
+            copy_in(0xffff_8000_0000_0000, 8),
+            Err(CopyFehler::AusserhalbUserBereich)
+        );
+        // (4) INTEGER-ÜBERLAUF bei Zeiger + Länge: Ein Zeiger dicht unter
+        //     u64::MAX plus Länge darf nicht „hinten wieder rauskommen".
+        assert_eq!(copy_in(u64::MAX - 3, 16), Err(CopyFehler::Ueberlauf));
+        assert_eq!(copy_in(u64::MAX, 1), Err(CopyFehler::Ueberlauf));
+        // (5) ABSURDE LÄNGE: Deckel greift, bevor irgendetwas alloziert wird.
+        assert_eq!(copy_in(TEST_VA, 8 * 1024 * 1024), Err(CopyFehler::ZuGross));
+        // Länge 0 ist immer ok (leer), egal welche Adresse — nichts wird
+        // dereferenziert, es gibt also auch nichts zu schützen.
+        assert_eq!(copy_in(0, 0), Ok(Vec::new()));
+        assert_eq!(
+            copy_in(crate::allocator::HEAP_START as u64, 0),
+            Ok(Vec::new())
+        );
+
+        adressraum::kernel_aktivieren();
+        drop(raum);
+    }
+
+    /// ANGRIFF 6: Länge läuft über die Seitengrenze in UNGEMAPPTES Gebiet.
+    /// Der Klassiker — die erste Seite ist gültig, deshalb reicht es nicht,
+    /// nur den Anfangszeiger zu prüfen.
+    #[test_case]
+    fn test_copy_in_ueber_seitengrenze() {
+        let mut raum = testraum_aktiv();
         let daten = b"copy-in funktioniert";
-        // unsafe: frisch gemappte, beschreibbare Page.
-        unsafe {
-            core::ptr::copy_nonoverlapping(daten.as_ptr(), TEST_VA as *mut u8, daten.len());
-        }
+        // schreiben() geht über das Physik-Mapping und braucht den Adressraum
+        // nicht aktiv — er ist es hier nur, weil copy_in gleich prüfen soll.
+        raum.schreiben(VirtAddr::new(TEST_VA), daten)
+            .expect("Daten in den Prozess legen");
+
+        // Der gültige Fall: liefert genau die Bytes.
         assert_eq!(copy_in(TEST_VA, daten.len()), Ok(daten.to_vec()));
 
-        // Ein Puffer, der in die (ungemappte) Folge-Page ragt, scheitert
-        // sauber — der geprüfte Teil wird NICHT halb kopiert.
+        // Der Angriff: 6 Byte vor Seitenende beginnen, 32 Byte verlangen —
+        // die Folgeseite ist nicht gemappt. Es wird NICHTS kopiert.
         assert_eq!(copy_in(TEST_VA + 4090, 32), Err(CopyFehler::NichtGemappt));
+        // Auch der Kopf des Bereichs bleibt unangetastet: ein zweiter,
+        // gültiger Zugriff liefert weiter die Originaldaten.
+        assert_eq!(copy_in(TEST_VA, daten.len()), Ok(daten.to_vec()));
 
-        let frame = memory::unmap_page(page).expect("Test-User-Page aushaengen");
-        // unsafe: eben ausgehängt.
-        unsafe { memory::frame_freigeben(frame) };
+        adressraum::kernel_aktivieren();
+        drop(raum);
+    }
+
+    /// ANGRIFF 7: FREMDER ADRESSRAUM. Prozess B hat bei TEST_VA eine Seite;
+    /// Prozess A (der gerade läuft) nicht. A darf sie unter KEINEN Umständen
+    /// sehen — obwohl die Adresse identisch ist und die Seite physisch
+    /// existiert. Das ist die eigentliche Isolations-Prüfung.
+    #[test_case]
+    fn test_copy_in_fremder_adressraum() {
+        // Prozess B: hat die Seite und legt ein Geheimnis hinein.
+        let mut b = AdressRaum::neu().expect("Adressraum B");
+        b.map_benutzer(Page::containing_address(VirtAddr::new(TEST_VA)))
+            .expect("User-Page in B");
+        b.schreiben(VirtAddr::new(TEST_VA), b"GEHEIMNIS-VON-PROZESS-B")
+            .expect("Geheimnis schreiben");
+
+        // Prozess A: hat bei TEST_VA NICHTS und läuft jetzt.
+        let mut a = AdressRaum::neu().expect("Adressraum A");
+        a.aktivieren();
+        assert_eq!(copy_in(TEST_VA, 23), Err(CopyFehler::NichtGemappt));
+        // Auch die explizite Form schützt: Wer den Adressraum von B nennt,
+        // während A läuft, bekommt einen Fehler statt B's Daten.
+        assert_eq!(
+            copy_in_prozess(&b, TEST_VA, 23),
+            Err(CopyFehler::FalscherAdressraum)
+        );
+
+        adressraum::kernel_aktivieren();
+        drop(a);
+        drop(b);
+    }
+
+    /// copy-OUT: dieselben Prüfungen plus Schreibrecht — und der Nachweis,
+    /// dass wirklich in den User-Speicher geschrieben wurde.
+    #[test_case]
+    fn test_copy_out_angriffe_und_erfolg() {
+        let mut raum = testraum_aktiv();
+
+        // Erfolgsfall: schreiben und im Adressraum wiederfinden.
+        assert_eq!(copy_out(TEST_VA, b"Kernel war hier"), Ok(()));
+        let mut zurueck = [0u8; 15];
+        adressraum::kernel_aktivieren();
+        raum.lesen(VirtAddr::new(TEST_VA), &mut zurueck)
+            .expect("zurueck lesen");
+        assert_eq!(&zurueck, b"Kernel war hier");
+        raum.aktivieren();
+
+        // Kernel-Adresse als ZIEL — der gefährlichste Fall überhaupt
+        // (der Kernel würde sich selbst überschreiben lassen).
+        assert_eq!(
+            copy_out(crate::allocator::HEAP_START as u64, b"boese"),
+            Err(CopyFehler::AusserhalbUserBereich)
+        );
+        // Ungemappt, Überlauf und über die Seitengrenze hinaus:
+        assert_eq!(copy_out(TEST_VA + 4096, b"x"), Err(CopyFehler::NichtGemappt));
+        assert_eq!(
+            copy_out(u64::MAX - 3, b"abcdefgh"),
+            Err(CopyFehler::Ueberlauf)
+        );
+        assert_eq!(
+            copy_out(TEST_VA + 4090, &[0u8; 32]),
+            Err(CopyFehler::NichtGemappt)
+        );
+
+        adressraum::kernel_aktivieren();
+        drop(raum);
+    }
+
+    /// Ohne aktiven User-Adressraum (reiner Kernel-Kontext) ist im
+    /// User-Bereich NICHTS gemappt — jeder User-Zeiger läuft ins Leere.
+    /// Der Kernel kann also gar nicht versehentlich User-Daten anfassen,
+    /// wenn kein Prozess läuft.
+    #[test_case]
+    fn test_copy_in_ohne_prozess() {
+        adressraum::kernel_aktivieren();
+        assert_eq!(copy_in(TEST_VA, 8), Err(CopyFehler::NichtGemappt));
+        assert_eq!(copy_out(TEST_VA, b"x"), Err(CopyFehler::NichtGemappt));
     }
 }

@@ -94,6 +94,7 @@ pub fn alle_befehle() -> Vec<Box<dyn Befehl>> {
         Box::new(Hole),
         // Serie 6: der erste Sprung nach Ring 3 (User-Mode).
         Box::new(Ring3Test),
+        Box::new(AdressraumTest),
     ]
 }
 
@@ -1750,16 +1751,124 @@ impl Befehl for Ring3Test {
 
         // Teil 2: Absturz-Lauf — nur mit Argument 'absturz' (er erzeugt
         // absichtlich einen Page Fault; die Meldung ist gewollt).
-        if argumente.trim() == "absturz" {
-            println!();
-            println!("[2] Ring-3-Code greift verboten auf Kernel-Speicher zu:");
-            konsole::set_color(Color::Yellow, Color::Black);
-            crate::ring3::ring3_absturz();
-            konsole::set_color(Color::LightGreen, Color::Black);
-            println!("Der Kernel hat den Absturz ueberlebt.");
-            konsole::set_color(Color::LightGray, Color::Black);
-        } else {
-            println!("(Absturz-Beweis: 'ring3test absturz' — erzeugt absichtlich einen Page Fault)");
+        match argumente.trim() {
+            "absturz" => {
+                println!();
+                println!("[2] Ring-3-Code greift verboten auf Kernel-Speicher zu:");
+                konsole::set_color(Color::Yellow, Color::Black);
+                crate::ring3::ring3_absturz();
+                konsole::set_color(Color::LightGreen, Color::Black);
+                println!("Der Kernel hat den Absturz ueberlebt.");
+                konsole::set_color(Color::LightGray, Color::Black);
+            }
+            "stack" => {
+                println!();
+                println!("[2] Ring-3-Code pusht unter seinen Stack (Guard-Page):");
+                konsole::set_color(Color::Yellow, Color::Black);
+                crate::ring3::ring3_stack_ueberlauf();
+                konsole::set_color(Color::LightGreen, Color::Black);
+                println!("Die Guard-Page hat den Stack-Ueberlauf gefangen.");
+                konsole::set_color(Color::LightGray, Color::Black);
+            }
+            _ => {
+                println!("(Absturz-Beweis:      'ring3test absturz' - erzeugt einen Page Fault)");
+                println!("(Guard-Page-Beweis:   'ring3test stack'   - Stack-Ueberlauf in Ring 3)");
+            }
         }
+    }
+}
+
+/// adressraum — DER Isolations-Beweis (Serie 6, Teil 2): zwei Adressraeume,
+/// dieselbe virtuelle Adresse, unterschiedlicher Inhalt. Und: Abreissen gibt
+/// alle Frames zurueck.
+struct AdressraumTest;
+
+impl Befehl for AdressraumTest {
+    fn name(&self) -> &'static str {
+        "adressraum"
+    }
+    fn beschreibung(&self) -> &'static str {
+        "Beweist Prozess-Isolation: gleiche Adresse, zwei Adressraeume"
+    }
+    fn ausfuehren(
+        &self,
+        _argumente: &str,
+        _kontext: &mut ShellKontext,
+        _registry: &[Box<dyn Befehl>],
+    ) {
+        use crate::adressraum::{self, AdressRaum};
+        use x86_64::structures::paging::Page;
+        use x86_64::VirtAddr;
+
+        konsole::set_color(Color::LightCyan, Color::Black);
+        println!("=== Adressraum-Test (Prozess-Isolation) ===");
+        konsole::set_color(Color::LightGray, Color::Black);
+
+        let probe = adressraum::USER_START + 0x10_0000;
+        let (frei_vorher, _) = crate::memory::frame_statistik();
+
+        let mut a = match AdressRaum::neu() {
+            Ok(r) => r,
+            Err(f) => {
+                println!("Adressraum A anlegen fehlgeschlagen: {:?}", f);
+                return;
+            }
+        };
+        let mut b = match AdressRaum::neu() {
+            Ok(r) => r,
+            Err(f) => {
+                println!("Adressraum B anlegen fehlgeschlagen: {:?}", f);
+                return;
+            }
+        };
+        let page = Page::containing_address(VirtAddr::new(probe));
+        if a.map_benutzer(page).is_err() || b.map_benutzer(page).is_err() {
+            println!("Mapping fehlgeschlagen.");
+            return;
+        }
+        let _ = a.schreiben(VirtAddr::new(probe), b"Ich bin Prozess A");
+        let _ = b.schreiben(VirtAddr::new(probe), b"Ich bin Prozess B");
+
+        println!("Virtuelle Adresse:  {:#x} (in BEIDEN Adressraeumen gemappt)", probe);
+        println!("Physisch dahinter:  A = P4 {:#x} / B = P4 {:#x}",
+            a.p4_frame().start_address().as_u64(),
+            b.p4_frame().start_address().as_u64());
+        println!();
+
+        // Derselbe Lesevorgang, zweimal — nur CR3 unterscheidet sich.
+        let mut puffer = [0u8; 17];
+        for (name, raum) in [("A", &mut a), ("B", &mut b)] {
+            raum.aktivieren();
+            // unsafe: Der Adressraum ist aktiv und die Seite ist gemappt;
+            // Ring 0 darf User-Seiten lesen.
+            unsafe {
+                core::ptr::copy_nonoverlapping(probe as *const u8, puffer.as_mut_ptr(), 17);
+            }
+            adressraum::kernel_aktivieren();
+            konsole::set_color(Color::LightGreen, Color::Black);
+            println!(
+                "  Nach dem Wechsel zu {}: \"{}\"",
+                name,
+                core::str::from_utf8(&puffer).unwrap_or("?")
+            );
+            konsole::set_color(Color::LightGray, Color::Black);
+        }
+
+        let besitz = a.frames_besitz() + b.frames_besitz();
+        a.abreissen();
+        b.abreissen();
+        let (frei_nachher, _) = crate::memory::frame_statistik();
+        println!();
+        println!(
+            "Abgerissen: {} Frames zurueckgegeben. Frei vorher {} / nachher {} -> {}",
+            besitz,
+            frei_vorher,
+            frei_nachher,
+            if frei_vorher == frei_nachher {
+                "kein Leck"
+            } else {
+                "LECK!"
+            }
+        );
     }
 }

@@ -46,6 +46,12 @@ static MAPPER: Mutex<Option<OffsetPageTable<'static>>> = Mutex::new(None);
 static FRAME_ALLOCATOR: Mutex<Option<BitmapFrameAllocator>> = Mutex::new(None);
 /// Der Offset des Komplett-Mappings (für phys_offset()).
 static PHYS_OFFSET: AtomicU64 = AtomicU64::new(0);
+/// Physische Adresse der KERNEL-Level-4-Tabelle (der Adressraum, in dem
+/// SpeedOS bootet). Seit den Pro-Prozess-Adressräumen (Serie 6) ist das
+/// NICHT mehr automatisch das, was in CR3 steht — deshalb merken wir sie
+/// uns beim Boot. `adressraum` spiegelt aus ihr den Kernel-Bereich in
+/// jeden neuen Adressraum und kehrt beim Verlassen hierher zurück.
+static KERNEL_P4: AtomicU64 = AtomicU64::new(0);
 /// Nächste freie virtuelle Adresse für allocate_pages() —
 /// ein simpler Vorwärts-Zähler (virtuellen Adressraum haben wir
 /// im Überfluss; Wiederverwenden freigegebener Bereiche kommt,
@@ -61,6 +67,8 @@ static NAECHSTE_VIRT_ADRESSE: AtomicUsize = AtomicUsize::new(KERNEL_ALLOC_START)
 /// Mapping, und die Memory Regions beschreiben den RAM korrekt.
 pub fn init(physical_memory_offset: VirtAddr, memory_regions: &'static MemoryRegions) {
     PHYS_OFFSET.store(physical_memory_offset.as_u64(), Ordering::Relaxed);
+    // Die Kernel-P4 festhalten, SOLANGE sie noch in CR3 steht.
+    KERNEL_P4.store(Cr3::read().0.start_address().as_u64(), Ordering::Relaxed);
 
     // unsafe: Wir lesen CR3 und erzeugen die einzige &mut-Referenz auf
     // die Level-4-Tabelle — sie wandert sofort in den globalen Mutex,
@@ -80,6 +88,14 @@ pub fn init(physical_memory_offset: VirtAddr, memory_regions: &'static MemoryReg
 /// Der Offset, ab dem der komplette physische Speicher gemappt ist.
 pub fn phys_offset() -> VirtAddr {
     VirtAddr::new(PHYS_OFFSET.load(Ordering::Relaxed))
+}
+
+/// Die Level-4-Tabelle des KERNEL-Adressraums (beim Boot festgehalten).
+/// WICHTIG: Der globale MAPPER schreibt IMMER in DIESE Tabelle, egal was
+/// gerade in CR3 steht — Kernel-Mappings landen also nie versehentlich im
+/// Adressraum eines User-Prozesses.
+pub fn kernel_p4_frame() -> PhysFrame {
+    PhysFrame::containing_address(PhysAddr::new(KERNEL_P4.load(Ordering::Relaxed)))
 }
 
 /// Führt eine Operation mit Mapper + Frame-Allocator aus — kapselt
@@ -140,69 +156,19 @@ pub fn map_page(page: Page) -> Result<(), MapToError<Size4KiB>> {
     })
 }
 
-/// Mappt eine Page auf einen frischen Frame und macht sie RING-3-ZUGÄNGLICH
-/// (PRESENT | WRITABLE | USER_ACCESSIBLE). Genau das braucht User-Mode-Code:
-/// Ohne das USER_ACCESSIBLE-Flag löst jeder Zugriff aus Ring 3 sofort einen
-/// Page Fault aus (Schutzverletzung). Für den ersten Ring-3-Sprung (Serie 6).
-///
-/// WICHTIG: Die CPU UND-verknüpft das U-Bit über ALLE vier Page-Table-Ebenen
-/// (P4→P3→P2→P1) — ein einziges U=0 unterwegs sperrt Ring 3. `map_to_with_
-/// table_flags` setzt U nur auf NEU angelegten Zwischentabellen; existierten
-/// sie schon (ohne U), müssen wir nachhelfen (`benutzer_pfad_freischalten`).
-pub fn map_page_benutzer(page: Page) -> Result<(), MapToError<Size4KiB>> {
-    // Expliziter Closure-Rückgabetyp pinnt S = Size4KiB (OffsetPageTable
-    // implementiert Mapper für mehrere Seitengrößen — sonst mehrdeutig).
-    mit_speicher(|mapper, frame_allocator| -> Result<(), MapToError<Size4KiB>> {
-        let frame: PhysFrame = frame_allocator
-            .allocate_frame()
-            .ok_or(MapToError::FrameAllocationFailed)?;
-        let flags = PageTableFlags::PRESENT
-            | PageTableFlags::WRITABLE
-            | PageTableFlags::USER_ACCESSIBLE;
-        // unsafe: frischer, exklusiver Frame; parent_table_flags ebenfalls
-        // mit U, damit neu angelegte Zwischentabellen ring-3-zugänglich sind.
-        let flush = unsafe {
-            mapper.map_to_with_table_flags(page, frame, flags, flags, frame_allocator)?
-        };
-        flush.flush();
-        Ok(())
-    })?;
-    benutzer_pfad_freischalten(page.start_address());
-    Ok(())
-}
+// HINWEIS (Serie 6, Teil 2): Hier stand `map_page_benutzer` — es mappte
+// User-Pages IN DEN KERNEL-ADRESSRAUM (inklusive eines Helfers, der das
+// U-Bit auf schon vorhandenen Zwischentabellen nachträglich setzte, denn
+// die CPU UND-verknüpft U über alle vier Ebenen). Mit den Pro-Prozess-
+// Adressräumen ist es ERSATZLOS ENTFALLEN, und zwar mit Absicht: User-
+// Speicher darf es im Kernel-Adressraum NIE geben. Er entsteht jetzt
+// ausschliesslich über `adressraum::AdressRaum::map_benutzer` — in
+// frischen, komplett eigenen Tabellen, wo das U-Bit von Anfang an auf
+// allen Ebenen stimmt und niemand nachträglich Kernel-Tabellen aufbohrt.
 
-/// Setzt das USER_ACCESSIBLE-Bit (und PRESENT|WRITABLE) auf den P4/P3/P2-
-/// Einträgen für `addr` — die drei ZWISCHEN-Ebenen. Nötig, falls sie schon
-/// ohne U existierten (map_to lässt vorhandene Tabellen unverändert). Die
-/// P1-Leaf-Ebene trägt ihre Flags bereits vom Mapping.
-fn benutzer_pfad_freischalten(addr: VirtAddr) {
-    x86_64::instructions::interrupts::without_interrupts(|| {
-        let offset = phys_offset();
-        let (p4_frame, _) = Cr3::read();
-        let extra =
-            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
-        // unsafe: Wir lesen/ändern die aktiven Page Tables über das Komplett-
-        // Mapping. Single-threaded, keine gleichzeitige Mapper-Nutzung während
-        // dieses Aufrufs (nur beim Ring-3-Aufsetzen aufgerufen).
-        unsafe {
-            let mut table_frame = p4_frame;
-            for shift in [39u64, 30, 21] {
-                let table: &mut PageTable = &mut *((offset
-                    + table_frame.start_address().as_u64())
-                .as_mut_ptr::<PageTable>());
-                let index = ((addr.as_u64() >> shift) & 0x1ff) as usize;
-                let entry = &mut table[index];
-                entry.set_flags(entry.flags() | extra);
-                table_frame = PhysFrame::containing_address(entry.addr());
-            }
-        }
-    });
-    x86_64::instructions::tlb::flush(addr);
-}
-
-/// Die Mapping-Flags einer virtuellen Adresse (None = nicht gemappt). Der
-/// copy-in-Helfer (ring3.rs) prüft damit, ob eine User-Adresse wirklich zum
-/// User-Bereich gehört (USER_ACCESSIBLE gesetzt) — die Kernel/User-Grenze.
+/// Die Mapping-Flags einer virtuellen Adresse im KERNEL-Adressraum
+/// (None = nicht gemappt). Für Diagnose und Tests — die copy-Helfer
+/// prüfen gegen den AKTIVEN Adressraum (`adressraum::aktive_seiten_flags`).
 pub fn seiten_flags(addr: VirtAddr) -> Option<PageTableFlags> {
     use x86_64::structures::paging::mapper::TranslateResult;
     mit_speicher(|mapper, _| match mapper.translate(addr) {

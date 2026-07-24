@@ -359,10 +359,15 @@ könnte — die unteren Schichten und die Socket-API blieben dabei unsere.
       Bestandsaufnahme: [docs/serie5-netzwerk.md](docs/serie5-netzwerk.md)
 - [ ] **User Space (Serie 6, läuft):** **Ring 3 steht** — SpeedOS führt
       unprivilegierten Code aus (`ring3test`), der per Syscall (INT 0x80,
-      geprüfter copy-in) druckt und sauber zurückkehrt; ein Absturz im
-      User-Mode wird aufgefangen, **der Kernel läuft weiter**. Als Nächstes:
-      eigener Adressraum pro Prozess, präemptiver Scheduler, ELF-Loader —
-      Fahrplan in [docs/serie6-bestandsaufnahme.md](docs/serie6-bestandsaufnahme.md)
+      geprüfter copy-in/copy-out) druckt und sauber zurückkehrt; ein Absturz
+      im User-Mode wird aufgefangen, **der Kernel läuft weiter**. **Und jeder
+      Prozess hat jetzt seinen eigenen Adressraum** (`adressraum`): eigene
+      Level-4-Tabelle, Kernel hineingespiegelt, untere Hälfte privat —
+      dieselbe virtuelle Adresse zeigt in zwei Prozessen auf verschiedene
+      Daten, der User-Stack hat eine Guard-Page, und das Abreißen gibt jeden
+      Frame zurück (Bilanz byte-exakt null). Als Nächstes: präemptiver
+      Scheduler, ELF-Loader — Fahrplan in
+      [docs/serie6-bestandsaufnahme.md](docs/serie6-bestandsaufnahme.md)
 - [ ] Ferner: HTML-Text-Browser (Kernel-App), TLS/HTTPS (geprüfte Krypto),
       Sound
 
