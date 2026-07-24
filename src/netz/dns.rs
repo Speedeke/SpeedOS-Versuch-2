@@ -27,8 +27,12 @@ use x86_64::instructions::interrupts::without_interrupts;
 const DNS_PORT: u16 = 53;
 const TYP_A: u16 = 1; // A-Record (IPv4)
 const KLASSE_IN: u16 = 1; // Internet
-/// Höchstdauer, die wir auf eine DNS-Antwort warten.
-const TIMEOUT_MS: u64 = 3000;
+/// Wie lange wir je VERSUCH auf eine Antwort warten, bevor wir die Anfrage
+/// ERNEUT senden (UDP ist unzuverlässig — Anfrage oder Antwort kann verloren
+/// gehen, dann hilft nur ein zweiter Versuch).
+const VERSUCH_MS: u64 = 1200;
+/// So oft senden wir die Anfrage höchstens (Gesamtfrist = MAX·VERSUCH_MS).
+const MAX_VERSUCHE: u32 = 3;
 
 /// Fehler bei der Namensauflösung.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -256,35 +260,35 @@ pub fn aufloesen(name: &str) -> Result<Ipv4, DnsFehler> {
     udp::binden(quell_port);
     while udp::empfangen(quell_port).is_some() {} // alte Datagramme weg
 
-    if let Err(fehler) = udp::senden(server, quell_port, DNS_PORT, &abfrage) {
-        udp::freigeben(quell_port);
-        return Err(DnsFehler::Netz(fehler));
-    }
-
-    let deadline = crate::zeit::ms_seit_boot() + TIMEOUT_MS;
-    let ergebnis = loop {
-        super::rx_verarbeiten();
-        let mut antwort = None;
-        while let Some(datagramm) = udp::empfangen(quell_port) {
-            if let Some((ip, ttl)) = antwort_parsen(&datagramm.daten, id) {
-                antwort = Some(Ok((ip, ttl)));
-                break;
+    // MEHRERE VERSUCHE mit Neu-Senden: Geht die Anfrage oder die Antwort
+    // verloren, feuern wir nach VERSUCH_MS erneut — sonst würde ein einziger
+    // verlorener DNS-Datagramm die ganze Auflösung scheitern lassen.
+    let ergebnis = 'aufloesen: {
+        for _ in 0..MAX_VERSUCHE {
+            if let Err(fehler) = udp::senden(server, quell_port, DNS_PORT, &abfrage) {
+                break 'aufloesen Err(DnsFehler::Netz(fehler));
             }
-            // Antwort mit passender ID, aber ohne A-Record -> nicht gefunden.
-            if datagramm.daten.len() >= 2
-                && u16::from_be_bytes([datagramm.daten[0], datagramm.daten[1]]) == id
-            {
-                antwort = Some(Err(DnsFehler::NichtGefunden));
-                break;
+            let versuch_frist = crate::zeit::ms_seit_boot() + VERSUCH_MS;
+            loop {
+                super::rx_verarbeiten();
+                while let Some(datagramm) = udp::empfangen(quell_port) {
+                    if let Some((ip, ttl)) = antwort_parsen(&datagramm.daten, id) {
+                        break 'aufloesen Ok((ip, ttl));
+                    }
+                    // Passende ID, aber kein A-Record -> Name nicht gefunden.
+                    if datagramm.daten.len() >= 2
+                        && u16::from_be_bytes([datagramm.daten[0], datagramm.daten[1]]) == id
+                    {
+                        break 'aufloesen Err(DnsFehler::NichtGefunden);
+                    }
+                }
+                if crate::zeit::ms_seit_boot() >= versuch_frist {
+                    break; // dieser Versuch ist um -> erneut senden
+                }
+                x86_64::instructions::hlt();
             }
         }
-        if let Some(a) = antwort {
-            break a;
-        }
-        if crate::zeit::ms_seit_boot() >= deadline {
-            break Err(DnsFehler::Zeitueberschreitung);
-        }
-        x86_64::instructions::hlt();
+        Err(DnsFehler::Zeitueberschreitung)
     };
 
     udp::freigeben(quell_port);

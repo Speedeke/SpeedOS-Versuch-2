@@ -251,6 +251,28 @@
   eine Testsuite darf nicht von fremden Servern abhängen. Nächster Hebel bei
   Bedarf laut Messung: Fast-Retransmit + niedrigerer RTO-Deckel, DANN erst
   SACK/smoltcp.
+- **SERIE-5-ABSCHLUSS (Juli 2026) — Härtetests + unsafe-Audit + Serie-6-Naht:**
+  Feature-Lücken geschlossen: DNS-RETRY (`dns::aufloesen` sendet bis 3× erneut,
+  1,2 s/Versuch — ein verlorenes Datagramm scheitert nicht mehr alles);
+  DHCP-LEASE-ERNEUERUNG (NetzKonfig trägt `lease_start_ms`, reine getestete
+  `erneuerung_faellig`/`abgelaufen` bei T1=50 %, `dhcp::erneuerung_task` in
+  main.rs). RX-DMA-HÄRTUNG (Audit): `virtio::net::empfange_frame` KLEMMT die
+  gerätegemeldete Länge auf PUFFER_BYTES vor dem Slice — buggy/böses Gerät kann
+  nie über den DMA-Puffer hinaus lesen. unsafe-Fläche: `src/netz/` = 0 unsafe
+  (reine Byte-Logik), riskante Fläche nur in `virtio/net.rs` (Port-I/O + DMA,
+  alle mit `# Safety`). TESTS (`tests/netz_abschluss.rs`): SPEICHER — 150
+  Zyklen hole/nslookup/ping → 0 B Heap-Wachstum, 0 geleakte Frames/Sockets
+  (Frame-Allocator byte-exakt stabil); ROBUSTHEIT — Kabel weg
+  (`geraet::verlust_setzen(100)`), Server stumm, DNS tot, Gateway-MAC-Wechsel
+  (ARP-Cache übernimmt) → alles saubere Fehler in Frist, kein Hänger/Panik;
+  LEISTUNG — Durchsatz ~0,6 MiB/s (8-KiB-Fenster ohne Scaling + synchrones
+  Pumpen/Segment), Ping-RTT ~0,2 ms. `tests/netz_shell.rs` fährt die
+  Netz-Befehle end-to-end durch die Registry (die README-Beispielsitzung ist
+  ihr Mitschnitt). SERIE-6-BESTANDSAUFNAHME: `docs/serie6-bestandsaufnahme.md`
+  (User-Space braucht Ring 3 + Adressraum-Trennung + präemptiven Scheduler +
+  ELF-Loader; APIC/MSI erzwingt erst SMP, NICHT User-Space; die Handle-/
+  copy-in/out-APIs sind schon Syscall-fertig; kleinster erster Prozess = Ring-3-
+  „Hallo Welt" per INT 0x80; TLS ist der Browser-Blocker).
 - **FAT32-Treiber (Juli 2026, `src/fs/fat32.rs`) — NUR LESEN:**
   SpeedOS liest fremde FAT32-Medien ("der USB-Stick"), schreibt sie
   aber NIE (jeder Schreib-Weg -> `IoFehler::NurLesen`). Kein/kaputtes

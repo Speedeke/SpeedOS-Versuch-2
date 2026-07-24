@@ -132,6 +132,8 @@ pub struct NetzKonfig {
     pub quelle: Quelle,
     /// Lease-Dauer in Sekunden (nur bei DHCP; 0 sonst).
     pub lease_sekunden: u32,
+    /// Boot-Zeit (ms), zu der die Lease bezogen wurde (für die Erneuerung).
+    pub lease_start_ms: u64,
 }
 
 /// Die aktuelle Konfiguration (Blatt-Lock, nur aus Task-Kontext). Beginnt
@@ -144,6 +146,7 @@ static KONFIG: Mutex<NetzKonfig> = Mutex::new(NetzKonfig {
     gesetzt: false,
     quelle: Quelle::Keine,
     lease_sekunden: 0,
+    lease_start_ms: 0,
 });
 
 /// Liest die aktuelle Konfiguration (Kopie).
@@ -163,12 +166,15 @@ pub fn konfig_setzen(ip: Ipv4, maske: Ipv4, gateway: Ipv4) {
             gesetzt: true,
             quelle: Quelle::Statisch,
             lease_sekunden: 0,
+            lease_start_ms: 0,
         };
     });
 }
 
-/// Übernimmt eine per DHCP bezogene Konfiguration (inkl. DNS + Lease).
+/// Übernimmt eine per DHCP bezogene Konfiguration (inkl. DNS + Lease). Der
+/// Lease-Startzeitpunkt wird auf JETZT gesetzt (für die spätere Erneuerung).
 pub fn konfig_setzen_dhcp(ip: Ipv4, maske: Ipv4, gateway: Ipv4, dns: Ipv4, lease_sekunden: u32) {
+    let jetzt = crate::zeit::ms_seit_boot();
     without_interrupts(|| {
         *KONFIG.lock() = NetzKonfig {
             ip,
@@ -178,6 +184,7 @@ pub fn konfig_setzen_dhcp(ip: Ipv4, maske: Ipv4, gateway: Ipv4, dns: Ipv4, lease
             gesetzt: true,
             quelle: Quelle::Dhcp,
             lease_sekunden,
+            lease_start_ms: jetzt,
         };
     });
 }

@@ -5,6 +5,51 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### Serie-5-Abschluss: Härtetests, unsafe-Audit, Serie-6-Bestandsaufnahme
+- **Feature-Lücken geschlossen (mit Tests):**
+  - **DNS-Retry**: `dns::aufloesen` sendet die Anfrage jetzt bis zu 3× erneut
+    (1,2 s je Versuch) — ein einzelnes verlorenes UDP-Datagramm scheitert nicht
+    mehr die ganze Auflösung.
+  - **DHCP-Lease-Erneuerung**: `NetzKonfig` trägt den Lease-Startzeitpunkt;
+    reine, getestete Zeit-Logik (`erneuerung_faellig`/`abgelaufen`, T1 = 50 %)
+    plus ein Erneuerungs-Task, der die Lease bei T1 neu bezieht.
+  - **Socket-Erschöpfung/Leak-Test**: die Tabelle läuft nicht über
+    (`KeinPlatz` statt Panik bei MAX_SOCKETS), und Öffnen+Schließen im Kreis
+    sammelt sich nicht an.
+  - **IRQ-Sturm-Test**: ein Schwung, der ALLE 16 RX-Puffer auf einmal erledigt,
+    wird über viele Runden vollständig abgeholt + neu eingestellt — kein
+    DMA-Puffer geht verloren oder doppelt.
+- **Speicher-Stabilitäts-Pass** (`tests/netz_abschluss.rs`): 150 Zyklen aus
+  Socket-auf/zu + Ping + regelmäßigem HTTP-Abruf ergaben **0 Byte Heap-Wachstum,
+  0 geleakte Frames, 0 geleakte Sockets** (der Frame-Allocator ist byte-exakt
+  stabil, TIME_WAIT wird sauber abgeräumt).
+- **Robustheit-Pass** (alles saubere Fehler in begrenzter Zeit, kein Hänger/
+  Panik): Kabel weg (100 % Verlust → Fehler + Erholung nach Link-up), Server
+  stumm (RST/Timeout), DNS-Server tot (`Zeitueberschreitung` nach ~3,6 s),
+  Gateway-MAC-Wechsel (der ARP-Cache übernimmt die neue MAC in beide
+  Richtungen). Neues Testwerkzeug bleibt: `netz::geraet::verlust_setzen`.
+- **Leistungs-Pass (ehrlich)**: Durchsatz von `hole` über LAN **~0,6 MiB/s**
+  (512 KiB), Ping-RTT ~0,2 ms (erster Ping ~4 ms durch ARP). Langsam, klar
+  begründet: 8-KiB-Fenster ohne Scaling + synchrones Pumpen pro Segment. Kein
+  Fix — nur Transparenz.
+- **unsafe-Audit** des Netz-Pfads: `src/netz/` hat **0 unsafe** (reine
+  Byte-Logik); die riskante Fläche liegt allein in `virtio/net.rs`
+  (Port-I/O + DMA, alle mit `# Safety`-Begründung, 1 `unsafe impl Send`).
+  KONKRETE HÄRTUNG: `empfange_frame` **klemmt die vom Gerät gemeldete Länge auf
+  PUFFER_BYTES**, bevor daraus ein Slice entsteht — ein buggy/böses Gerät kann
+  uns so nie über den DMA-Puffer hinaus lesen lassen.
+- **README** mit echter Netz-Beispielsitzung (netz-status/nslookup/ping/hole/
+  arp — der serielle Mitschnitt von `tests/netz_shell.rs`) und den gemessenen
+  Grenzen; **`docs/serie6-bestandsaufnahme.md`** beantwortet ehrlich, was echte
+  User-Space-Prozesse brauchen (Ring 3, Adressraum-Trennung, präemptiver
+  Scheduler, ELF-Loader), warum APIC/MSI erst **SMP** erzwingt (nicht User-Space
+  an sich), wie aus Socket-/VFS-/Fenster-APIs Syscalls werden (Trap-Gate,
+  copy-in/out, Handle-Tabelle pro Prozess), der kleinste erste Ring-3-Prozess,
+  und wo **TLS** zum Browser-Blocker wird.
+- 190 Lib-Tests grün (vorher 187) + `tests/netz_abschluss.rs`,
+  `tests/netz_shell.rs`. `cargo clippy --all-targets` warnungsfrei; Desktop
+  bootet sauber.
+
 ### Serie 5: Der Reißleinen-Entscheid — das Eigenbau-TCP BLEIBT
 - **Der bewusst eingeplante Ingenieur-Entscheid**, durchgeführt statt
   übersprungen — auch nachdem der HTTP-Client funktionierte.

@@ -231,6 +231,57 @@ tests/               Integrationstests (booten einzeln in QEMU)
 docs/                Migrationsplan bootloader 0.9 -> 0.11, Screenshots
 ```
 
+## Netzwerk in Aktion
+
+Eine echte Sitzung in der SpeedShell (die IP kommt beim Boot per DHCP;
+Beispiel gegen `python -m http.server 8000` auf dem Host, über QEMU-slirp als
+`10.0.2.2` erreichbar):
+
+```text
+SpeedOS:/> netz-status
+Netz-Status:
+  MAC      52:54:00:12:34:56
+  Quelle   DHCP
+  IP       10.0.2.15
+  Maske    255.255.255.0
+  Gateway  10.0.2.2
+  DNS      10.0.2.3
+  Lease    86400 s
+
+SpeedOS:/> nslookup example.com
+  Server   10.0.2.3
+  Name     example.com
+  Adresse  104.20.23.154
+
+SpeedOS:/> ping 10.0.2.2
+PING 10.0.2.2: 56 Datenbytes
+64 Bytes von 10.0.2.2: seq=0 ttl=255 zeit=3,95 ms
+64 Bytes von 10.0.2.2: seq=1 ttl=255 zeit=0,19 ms
+64 Bytes von 10.0.2.2: seq=2 ttl=255 zeit=0,17 ms
+64 Bytes von 10.0.2.2: seq=3 ttl=255 zeit=0,25 ms
+--- 10.0.2.2 Ping-Statistik ---
+4 gesendet, 4 empfangen, 0% Verlust
+RTT min/schnitt/max = 0,17 ms / 1,14 ms / 3,95 ms
+
+SpeedOS:/> hole http://10.0.2.2:8000/probe.txt
+HTTP 200 OK
+  Content-type: text/plain
+  Content-Length: 21700
+  ...
+Rumpf: 21700 Byte
+--- Rumpf ---
+Zeile 00001: SpeedOS LAN-Test — abcdefghijklmnopqrstuvwxyz
+...
+
+SpeedOS:/> arp
+ARP-Cache:
+  10.0.2.2        52:55:0a:00:02:02  (vor 1 s gelernt)
+  10.0.2.3        52:55:0a:00:02:03  (vor 1 s gelernt)
+```
+
+(Diese Ausgaben sind der echte serielle Mitschnitt von `cargo test --test
+netz_shell` — sie laufen also als Test mit, nicht nur im Devlog.)
+
 ## Bekannte Grenzen des Netzwerk-Stacks
 
 Der TCP/IP-Stack ist **komplett selbst gebaut** — vom Ethernet-Frame bis zum
@@ -242,7 +293,14 @@ HTTP-Client. Das ist der Punkt des Projekts, aber es heißt auch: Er ist ein
   verschiedene echte Internet-Server sauber (93 %); sieben der acht Server
   100 %, typisch 250–500 ms. Gegen einen LAN-Server 10/10 mit exakt
   passender Byte-Zahl. Keine falschen Daten, keine Deadlocks, keine
-  Socket-/TIME_WAIT-Lecks.
+  Socket-/TIME_WAIT-Lecks (200-Zyklen-Speichertest: **0 Byte Heap-Wachstum,
+  0 geleakte Frames/Sockets**).
+- **Durchsatz gemessen ~0,6 MiB/s** (512 KiB über LAN). Langsam — und ehrlich
+  begründet: das **feste 8-KiB-Fenster ohne Scaling** lässt höchstens 8 KiB pro
+  Round-Trip unterwegs sein, und der Client **pumpt synchron pro Segment** (ein
+  VM-Exit je Notify). Für LAN und Lernzweck völlig ausreichend, aber kein
+  Datendurchsatz-Kraftpaket. Ping-RTT im LAN: ~0,2 ms (der erste Ping ~4 ms
+  wegen der ARP-Auflösung).
 - **Unter Paketverlust wird TCP sehr langsam.** 21 KB brauchen bei 10 %
   Verlust zwischen 0,3 s und 12 s; gelegentlich reißt ein 15-Sekunden-Budget.
   Ursache sind drei bewusst weggelassene Mechanismen: **kein Fast-Retransmit**
@@ -300,8 +358,11 @@ könnte — die unteren Schichten und die Socket-API blieben dabei unsere.
       Umfang/Reißleine: [docs/tcp-scope.md](docs/tcp-scope.md),
       Bestandsaufnahme: [docs/serie5-netzwerk.md](docs/serie5-netzwerk.md)
 - [ ] **User Space (Serie 6):** Ring-3-Prozesse, Syscalls, präemptiver
-      Scheduler
-- [ ] Ferner: eigene Programme laden (ELF), DNS/TLS/HTTP, Sound
+      Scheduler, ELF-Loader — ehrliche Bestandsaufnahme mit Weichenstellungen
+      (auch: was zwingt zu APIC/SMP, wo blockt TLS den Browser) in
+      [docs/serie6-bestandsaufnahme.md](docs/serie6-bestandsaufnahme.md)
+- [ ] Ferner: HTML-Text-Browser (Kernel-App), TLS/HTTPS (geprüfte Krypto),
+      Sound
 
 ## Lizenz
 

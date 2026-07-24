@@ -129,7 +129,7 @@ struct Eintrag {
 
 /// So viele Sockets dürfen gleichzeitig existieren (inkl. der Sockets, die
 /// gerade ihren TIME_WAIT absitzen).
-const MAX_SOCKETS: usize = 32;
+pub const MAX_SOCKETS: usize = 32;
 
 /// Die Socket-Tabelle (Blatt-Lock, nur aus Task-Kontext).
 static SOCKETS: Mutex<Vec<Eintrag>> = Mutex::new(Vec::new());
@@ -563,5 +563,43 @@ mod tests {
         schliessen(h).expect("schliessen");
         assert_eq!(zustand(h), Err(SocketFehler::UngueltigerHandle));
         bedienen();
+    }
+
+    /// ERSCHÖPFUNG + LEAK: die Tabelle darf nicht überlaufen (KeinPlatz statt
+    /// Panik), und Öffnen+Schließen im Kreis darf sich NICHT ansammeln.
+    #[test_case]
+    fn test_socket_erschoepfung_und_leak() {
+        // Sauberer Ausgangspunkt.
+        bedienen();
+        let basis = anzahl();
+
+        // Bis zur Kapazität öffnen — der nächste MUSS KeinPlatz liefern.
+        let mut handles = alloc::vec::Vec::new();
+        loop {
+            match oeffnen(SocketTyp::Udp) {
+                Ok(h) => handles.push(h),
+                Err(fehler) => {
+                    assert_eq!(fehler, SocketFehler::KeinPlatz, "erwartet: KeinPlatz");
+                    break;
+                }
+            }
+            assert!(handles.len() <= MAX_SOCKETS, "Tabelle laeuft ueber MAX hinaus");
+        }
+        assert_eq!(anzahl(), MAX_SOCKETS, "voll bei MAX_SOCKETS");
+
+        // Alle wieder schließen -> die Tabelle leert sich bis zur Basis.
+        for h in &handles {
+            schliessen(*h).expect("schliessen");
+        }
+        bedienen();
+        assert_eq!(anzahl(), basis, "nach dem Schliessen zurueck auf Basis");
+
+        // LEAK-TEST: 100x öffnen+schließen darf NICHTS ansammeln.
+        for _ in 0..100 {
+            let h = oeffnen(SocketTyp::Udp).expect("oeffnen im Leak-Test");
+            schliessen(h).expect("schliessen im Leak-Test");
+        }
+        bedienen();
+        assert_eq!(anzahl(), basis, "kein Leak nach 100 Zyklen");
     }
 }

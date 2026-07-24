@@ -250,6 +250,11 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         "Socket-Takt",
         speed_os::netz::socket::takt_task(),
     ));
+    // DHCP-Lease-Erneuerung: bezieht die Lease bei T1 (50 %) neu.
+    executor.spawn(Task::new(
+        "DHCP-Erneuerung",
+        speed_os::netz::dhcp::erneuerung_task(),
+    ));
     executor.spawn(
         Task::new("Compositor", speed_os::fenster::compositor_task()).mit_art(TaskArt::Fenster),
     );

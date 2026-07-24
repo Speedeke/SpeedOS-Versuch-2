@@ -251,10 +251,18 @@ impl NetzGeraet for VirtioNet {
     /// Aufrufer (frames_einsammeln) überspringt ihn, drainiert aber weiter.
     fn empfange_frame(&mut self) -> Option<Vec<u8>> {
         let (index, laenge) = self.rx.abholen()?;
-        let laenge = laenge as usize;
+        // AUDIT-HÄRTUNG: `laenge` kommt aus dem Used-Ring, also VOM GERÄT. Ein
+        // fehlerhaftes/böswilliges Gerät könnte mehr melden, als der Puffer
+        // fasst — wir KLEMMEN deshalb auf PUFFER_BYTES, bevor wir daraus einen
+        // Slice bauen. So gilt die Sicherheits-Invariante unten IMMER, egal was
+        // das Gerät behauptet.
+        let laenge = (laenge as usize).min(PUFFER_BYTES);
         let hdr = self.hdr_len;
         let frame = if laenge > hdr {
-            // unsafe: der Puffer `index` gehört uns, laenge <= PUFFER_BYTES.
+            // SICHERHEIT: `index` ist ein gültiger, uns gehörender Puffer-Index
+            // (aus abholen, 0..RX_ANZAHL), und laenge <= PUFFER_BYTES ist durch
+            // die Klemmung oben garantiert — der Slice bleibt also vollständig
+            // im DMA-Puffer.
             let slice = unsafe {
                 core::slice::from_raw_parts(
                     self.rx.puffer_virt[index].as_ptr::<u8>().add(hdr),
@@ -470,6 +478,47 @@ mod tests {
         rx.vq.test_geraet_erledigt(0, 42);
         let (i2, l2) = rx.abholen().unwrap();
         assert_eq!((i2, l2), (0, 42));
+    }
+
+    /// IRQ-STURM-ROBUSTHEIT: Kommen VIELE Pakete in kurzer Zeit (das Gerät
+    /// erledigt alle Puffer auf einmal), müssen wir JEDEN Puffer abholen und
+    /// wieder einstellen — über viele Runden, OHNE dass ein Puffer verloren
+    /// geht oder die Zuordnung durcheinandergerät. (Ein voller Ring bedeutet,
+    /// dass die NIC weitere Pakete verwirft — das ist erlaubt, TCP sendet
+    /// erneut; verboten ist nur, einen unserer DMA-Puffer zu VERLIEREN.)
+    #[test_case]
+    fn test_virtio_net_rx_sturm() {
+        // Ring mit 16 Slots, alle 16 Puffer belegt = der Ring ist voll.
+        let mut rx = RxRing::neu(16, 16, PUFFER_BYTES);
+        rx.alle_einstellen();
+
+        for runde in 0..8 {
+            // Das Gerät erledigt in EINEM Schwung ALLE 16 Deskriptoren
+            // (alle Köpfe 0..15 tragen einen unserer Puffer, da 16 Puffer in
+            // 16 Slots -> jeder Deskriptor ist belegt).
+            for kopf in 0..16u16 {
+                rx.vq.test_geraet_erledigt(kopf, 100);
+            }
+            // Alle abholen + sofort wieder einstellen.
+            let mut gesehen = alloc::vec::Vec::new();
+            while let Some((index, laenge)) = rx.abholen() {
+                assert_eq!(laenge, 100);
+                assert!(index < 16, "Puffer-Index im Bereich");
+                assert!(rx.einstellen(index), "wieder einstellen muss klappen");
+                gesehen.push(index);
+            }
+            // GENAU 16 Puffer, jeder GENAU einmal — nichts verloren, nichts doppelt.
+            assert_eq!(gesehen.len(), 16, "Runde {}: alle 16 Puffer abgeholt", runde);
+            gesehen.sort_unstable();
+            gesehen.dedup();
+            assert_eq!(gesehen.len(), 16, "Runde {}: kein Puffer doppelt/verloren", runde);
+        }
+
+        // Nach dem Sturm ist der Ring wieder voll (alle 16 eingestellt) — der
+        // nächste einzelne Frame kommt sauber durch.
+        rx.vq.test_geraet_erledigt(0, 55);
+        let (_index, laenge) = rx.abholen().expect("nach dem Sturm weiter empfangsbereit");
+        assert_eq!(laenge, 55);
     }
 
     /// Die virtio-net-NIC wird am PCI-Bus gefunden (der Runner hängt sie

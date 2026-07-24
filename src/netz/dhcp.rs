@@ -336,6 +336,58 @@ pub fn autokonfig(timeout_ms: u64) {
 }
 
 // ---------------------------------------------------------------------------
+// Lease-Erneuerung — reine Zeit-Logik (testbar) + der Erneuerungs-Task
+// ---------------------------------------------------------------------------
+//
+// Eine DHCP-Lease gilt nur `lease_sekunden` lang. Nach der Hälfte (T1, RFC
+// 2131) SOLL der Client sie erneuern, damit sie nicht abläuft und ein anderer
+// die IP bekommt. Die Entscheidung „jetzt erneuern?" ist reine Zeit-Rechnung
+// — deshalb als eigene, unit-getestete Funktion (die echte Uhr wird nur im
+// Task übergeben).
+
+/// Ist die Lease-Erneuerung fällig? T1 = 50 % der Lease-Dauer. `lease_sekunden
+/// == 0` (keine DHCP-Lease) heißt „nie".
+pub fn erneuerung_faellig(jetzt_ms: u64, lease_start_ms: u64, lease_sekunden: u32) -> bool {
+    if lease_sekunden == 0 {
+        return false;
+    }
+    let t1_ms = lease_start_ms + (lease_sekunden as u64) * 1000 / 2;
+    jetzt_ms >= t1_ms
+}
+
+/// Ist die Lease bereits ABGELAUFEN (100 % verstrichen)?
+pub fn abgelaufen(jetzt_ms: u64, lease_start_ms: u64, lease_sekunden: u32) -> bool {
+    if lease_sekunden == 0 {
+        return false;
+    }
+    jetzt_ms >= lease_start_ms + (lease_sekunden as u64) * 1000
+}
+
+/// Der Lease-Erneuerungs-Task: prüft regelmäßig, ob die Lease-Hälfte (T1)
+/// erreicht ist, und bezieht dann eine frische Lease. In QEMU (Lease
+/// 86400 s) feuert das praktisch nie — aber die Mechanik steht und ist
+/// getestet. Läuft ruhig (alle 30 s ein Blick auf die Uhr).
+pub async fn erneuerung_task() {
+    loop {
+        crate::zeit::warte_ms(30_000).await;
+        let k = super::konfig();
+        if k.quelle != super::Quelle::Dhcp {
+            continue;
+        }
+        let jetzt = crate::zeit::ms_seit_boot();
+        if erneuerung_faellig(jetzt, k.lease_start_ms, k.lease_sekunden) {
+            serial_println!("[dhcp] Lease-Haelfte erreicht — erneuere ...");
+            if let Some(e) = beziehen(4000) {
+                super::konfig_setzen_dhcp(e.ip, e.maske, e.gateway, e.dns, e.lease_sekunden);
+                serial_println!("[dhcp] Lease erneuert: IP {}, {} s.", e.ip, e.lease_sekunden);
+            } else {
+                serial_println!("[dhcp] Erneuerung fehlgeschlagen — behalte alte Lease vorerst.");
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests — laufen in QEMU über unser eigenes Test-Framework (cargo test)
 // ---------------------------------------------------------------------------
 
@@ -399,5 +451,25 @@ mod tests {
         let mut n = DhcpNachricht::default();
         optionen_parsen(&paket[240..], &mut n);
         assert_eq!(n.typ, DHCP_DISCOVER);
+    }
+
+    /// Die Lease-Erneuerungs-Logik: vor T1 (50 %) nichts, ab T1 fällig, ab
+    /// 100 % abgelaufen; ohne Lease (0 s) nie.
+    #[test_case]
+    fn test_dhcp_lease_erneuerung() {
+        // Lease über 100 s, bezogen bei t = 1000 ms.
+        let start = 1000;
+        let dauer = 100; // Sekunden -> T1 bei 50 000 ms nach Start
+        assert!(!erneuerung_faellig(start + 49_999, start, dauer), "vor T1 nicht");
+        assert!(erneuerung_faellig(start + 50_000, start, dauer), "ab T1 faellig");
+        assert!(erneuerung_faellig(start + 80_000, start, dauer));
+
+        // Ablauf erst bei 100 %.
+        assert!(!abgelaufen(start + 99_999, start, dauer));
+        assert!(abgelaufen(start + 100_000, start, dauer));
+
+        // Keine Lease (0 s) -> nie fällig, nie abgelaufen.
+        assert!(!erneuerung_faellig(u64::MAX, 0, 0));
+        assert!(!abgelaufen(u64::MAX, 0, 0));
     }
 }
