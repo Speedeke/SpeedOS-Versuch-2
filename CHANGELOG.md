@@ -5,6 +5,46 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### Serie 5: Der Reißleinen-Entscheid — das Eigenbau-TCP BLEIBT
+- **Der bewusst eingeplante Ingenieur-Entscheid**, durchgeführt statt
+  übersprungen — auch nachdem der HTTP-Client funktionierte.
+- **Neuer Stresstest `tests/netz_stress.rs`** (viel härter als die bisherigen
+  Einzelmessungen): 20 Abrufe gegen **8 verschiedene echte Internet-Server**
+  (verschiedene TCP-Stacks, 0–11,5 KB, `Content-Length` und `chunked`, auch
+  ein `204`), dazu Läufe mit **künstlichem Paketverlust**.
+  Neues Testwerkzeug `netz::geraet::verlust_setzen(prozent)` verwirft Frames
+  je Richtung an der Geräte-Naht (auf einem Windows-Host gibt es kein
+  tc/netem); zusätzlich im Runner **`SPEEDOS_NET_DELAY=<µs>`** →
+  QEMUs eingebauter `filter-buffer` für Verzögerung/Bursts.
+- **Messergebnis (protokolliert in docs/tcp-scope.md):**
+  - Internet, 3 Läufe à 20 Abrufe: **56/60 sauber = 93 %**. Alle vier
+    Fehlschläge entfielen auf **denselben** Server, der auch im Erfolgsfall
+    5–15× langsamer ist als die anderen; die übrigen sieben: **100 %**.
+  - LAN (kontrolliert, 21 700 Byte): **10/10** und **10/10**.
+  - Mit 10 % / 20 % Paketverlust: 4/5 bzw. 2/3 durchgekommen.
+- **Fehlerbild ehrlich benannt:** KEINE Deadlocks (jeder Fehlschlag war ein
+  Timeout mit teilweise empfangenem Rumpf, der Stack war danach sofort wieder
+  benutzbar), KEINE falschen Daten (Content-Length exakt, Anfang und Ende
+  geprüft), KEINE Socket-/TIME_WAIT-Lecks (0 Einträge nach allen Phasen).
+  **DIE Schwäche: krasse Verlangsamung unter Verlust** (21 KB brauchen bei
+  10 % Verlust 0,3–12 s) durch die drei bewusst weggelassenen Mechanismen —
+  kein Fast-Retransmit, Out-of-Order wird verworfen, RTO-Backoff bis 8 s.
+- **ENTSCHEIDUNG: Das vorher registrierte Kriterium (≥ 9/10) ist erfüllt →
+  die smoltcp-Reißleine wird NICHT gezogen, das Eigenbau-TCP bleibt.**
+  Ein vorher festgelegtes Kriterium wird hinterher nicht verschoben. Die
+  Grenzen stehen jetzt ehrlich in der **README** („Bekannte Grenzen des
+  Netzwerk-Stacks") und im Messprotokoll.
+- **Cargo-Feature `tcp-eigen`** (Standard an) markiert die Tausch-Stelle
+  hinter der Socket-API; ohne das Feature bricht der Bau mit einer
+  erklärenden `compile_error!`-Meldung ab (es ist bewusst keine Alternative
+  eingebunden). Die unteren Schichten und die Socket-Fassade blieben bei einem
+  Tausch in jedem Fall unsere.
+- **Testmethodik:** Das HARTE Gate liegt auf dem kontrollierbaren LAN-Server;
+  der Internet-Lauf ist Bericht + Grundschwelle, die Verlust-Läufe fordern
+  ERHOLUNG (Mehrheit kommt durch) statt Perfektion — eine Testsuite darf
+  weder von fremden Servern abhängen noch eine dokumentierte, akzeptierte
+  Schwäche als Fehler werten.
+
 ### Serie 5: Socket-API + HTTP-Client — die öffentliche Fassade des Stacks
 - **`src/netz/socket.rs` — DIE NAHT FÜR SERIE 6 (User-Space).** Anwendungen
   reden nur noch hierüber, nie mit `tcp::Verbindung`/`udp` direkt:

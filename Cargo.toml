@@ -78,6 +78,17 @@ noto-sans-mono-bitmap = { version = "0.3.2", default-features = false, features 
 ] }
 
 [features]
+# Standard: unser EIGENES TCP (siehe tcp-eigen unten).
+default = ["tcp-eigen"]
+
+# DER REISSLEINEN-SCHALTER (docs/tcp-scope.md): `tcp-eigen` waehlt unsere
+# selbstgebaute TCP-Schicht hinter der Socket-API. Die Messung vom Juli 2026
+# hat das Kriterium erfuellt, also ist sie der Standard geblieben. Der
+# Schalter markiert die Stelle, an der eine Fremd-Implementierung (smoltcp)
+# eingehaengt WUERDE — die unteren Schichten (Ethernet/ARP/IPv4/ICMP/UDP/
+# DHCP/DNS) und die Socket-API blieben davon in jedem Fall unberuehrt.
+tcp-eigen = []
+
 # Zum Lernen: alternative Heap-Allocatoren (Standard ist der
 # linked_list_allocator). Aktivieren mit z. B.:
 #   cargo test --features bump-allocator

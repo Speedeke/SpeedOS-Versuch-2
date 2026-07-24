@@ -223,6 +223,20 @@ fn main() {
     // pcap-Mitschnitt fuer die Wireshark-Gegenpruefung.
     qemu.arg("-netdev").arg("user,id=net0");
     qemu.arg("-device").arg("virtio-net-pci,netdev=net0");
+    // SPEEDOS_NET_DELAY=<mikrosekunden>: QEMUs eingebauter filter-buffer
+    // sammelt Pakete und laesst sie erst im gewaehlten Takt los — das ergibt
+    // Verzoegerung UND Bursts (die Netem-Ersatzloesung fuer Windows-Hosts,
+    // wo tc/netem nicht zur Verfuegung steht). Fuer den TCP-Stresstest.
+    if let Ok(us) = std::env::var("SPEEDOS_NET_DELAY") {
+        if us.parse::<u64>().is_ok() {
+            qemu.arg("-object").arg(format!(
+                "filter-buffer,id=netdelay0,netdev=net0,interval={us}"
+            ));
+            if !test_modus {
+                eprintln!("[Runner] SPEEDOS_NET_DELAY={us} us — filter-buffer aktiv.");
+            }
+        }
+    }
     if std::env::var("SPEEDOS_NET_DUMP").map(|v| v == "1").unwrap_or(false) {
         qemu.arg("-object")
             .arg("filter-dump,id=netdump0,netdev=net0,file=speedos-net.pcap");

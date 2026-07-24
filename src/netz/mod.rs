@@ -32,8 +32,24 @@ pub mod http;
 pub mod ipv4;
 pub mod puffer;
 pub mod socket;
-pub mod tcp;
 pub mod udp;
+
+// DIE REISSLEINEN-STELLE (docs/tcp-scope.md): Hinter der Socket-API steckt
+// die TCP-Schicht. `tcp-eigen` (Standard) waehlt UNSERE — die Messung vom
+// Juli 2026 hat das vorher festgelegte Kriterium erfuellt, also ist sie
+// geblieben. Waere sie durchgefallen, haetten wir hier CHIRURGISCH eine
+// Fremd-Implementierung (smoltcp) eingehaengt: nur TCP, waehrend Ethernet,
+// ARP, IPv4, ICMP, UDP, DHCP, DNS und die Socket-Fassade unveraendert
+// unsere bleiben. Der Lerncode bleibt so oder so im Baum.
+#[cfg(feature = "tcp-eigen")]
+pub mod tcp;
+
+#[cfg(not(feature = "tcp-eigen"))]
+compile_error!(
+    "Feature `tcp-eigen` ist aus, aber es ist KEINE alternative TCP-Schicht \
+     eingebunden: Die Reissleine wurde nach der Messung in docs/tcp-scope.md \
+     NICHT gezogen. Bitte mit dem Standard-Feature bauen (`tcp-eigen`)."
+);
 
 pub use ethernet::Mac;
 pub use geraet::{NetzFehler, NetzGeraet};

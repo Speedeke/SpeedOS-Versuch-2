@@ -27,7 +27,7 @@
 use super::ethernet::Mac;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use core::task::Poll;
 use futures_util::task::AtomicWaker;
 use spin::Mutex;
@@ -119,10 +119,52 @@ pub fn mac() -> Option<Mac> {
 
 /// Sendet ein rohes Ethernet-Frame über die registrierte NIC.
 pub fn sende_frame(frame: &[u8]) -> Result<(), NetzFehler> {
+    // TEST-Verlust: so tun, als wäre das Frame auf der Leitung verlorengegangen
+    // (der Absender erfährt davon nichts — genau wie in echt).
+    if verlust_wuerfeln() {
+        return Ok(());
+    }
     without_interrupts(|| match GERAET.lock().as_mut() {
         Some(geraet) => geraet.sende_frame(frame),
         None => Err(NetzFehler::KeinGeraet),
     })
+}
+
+// ---------------------------------------------------------------------------
+// Künstlicher Paketverlust — ein TEST-/DIAGNOSE-Werkzeug
+// ---------------------------------------------------------------------------
+//
+// Um den Retransmit-Pfad gegen ECHTE Gegenstellen zu prüfen, brauchen wir
+// Verlust. Auf einem Windows-Host mit QEMU-slirp gibt es kein tc/netem, also
+// werfen wir die Frames an UNSERER Geräte-Naht weg — in beide Richtungen.
+// Für die obere Schicht ist das ununterscheidbar von echtem Verlust.
+// STANDARD 0 (aus); nur Tests/Diagnose schalten es ein.
+
+static VERLUST_PROZENT: AtomicU32 = AtomicU32::new(0);
+static VERLUST_RNG: AtomicU64 = AtomicU64::new(0x1234_5678_9abc_def0);
+
+/// Setzt den künstlichen Verlust je Richtung in Prozent (0 = aus).
+pub fn verlust_setzen(prozent: u32) {
+    VERLUST_PROZENT.store(prozent.min(100), Ordering::Relaxed);
+}
+
+/// Der aktuell eingestellte künstliche Verlust.
+pub fn verlust_prozent() -> u32 {
+    VERLUST_PROZENT.load(Ordering::Relaxed)
+}
+
+/// Würfelt lock-frei, ob dieses Frame "verlorengeht".
+fn verlust_wuerfeln() -> bool {
+    let p = VERLUST_PROZENT.load(Ordering::Relaxed) as u64;
+    if p == 0 {
+        return false;
+    }
+    let alt = VERLUST_RNG.load(Ordering::Relaxed);
+    let neu = alt
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
+    VERLUST_RNG.store(neu, Ordering::Relaxed);
+    (neu >> 33) % 100 < p
 }
 
 /// Wird vom GERÄTE-IRQ (über den Treiber) gerufen: RX-Bereitschaft
@@ -146,7 +188,8 @@ pub fn frames_einsammeln() -> Vec<Vec<u8>> {
         if let Some(geraet) = lock.as_mut() {
             while let Some(frame) = geraet.empfange_frame() {
                 // Leere Frames (Runts) überspringen, aber weiter drainieren.
-                if !frame.is_empty() {
+                // TEST-Verlust wirkt auch auf dem Empfangsweg.
+                if !frame.is_empty() && !verlust_wuerfeln() {
                     frames.push(frame);
                 }
             }

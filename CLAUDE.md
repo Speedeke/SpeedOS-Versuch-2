@@ -231,6 +231,26 @@
   wahlweise aufs Dateisystem (mit sync). MEILENSTEIN protokolliert in
   docs/tcp-scope.md: LAN-Server 10/10 à 21 700 Byte (> Fenster!), Internet
   10/10; Body byte-identisch auf /platte.
+- **REISSLEINEN-ENTSCHEID (Juli 2026) — Eigenbau-TCP BLEIBT:** Der
+  Stresstest (`tests/netz_stress.rs`) misst gegen 8 verschiedene echte
+  Internet-Server und mit künstlichem Paketverlust
+  (`netz::geraet::verlust_setzen(prozent)`, je Richtung — auf Windows gibt es
+  kein tc/netem; zusätzlich QEMU `SPEEDOS_NET_DELAY=<µs>` → filter-buffer).
+  ERGEBNIS: 56/60 Internet-Abrufe sauber (93 %, alle 4 Fehlschläge auf EINEM
+  auffällig langsamen Server), LAN 10/10, unter 10–20 % Verlust 4/5 bzw. 2/3.
+  Fehlerbild ehrlich: KEINE Deadlocks, KEINE falschen Daten, KEINE
+  Socket-/TIME_WAIT-Lecks (0 Einträge danach) — ausschließlich TIMEOUTS durch
+  krasse VERLANGSAMUNG unter Verlust (kein Fast-Retransmit, Out-of-Order wird
+  verworfen, RTO-Backoff bis 8 s). Das vorher registrierte Kriterium (≥ 9/10)
+  ist erfüllt ⇒ Reißleine NICHT gezogen (Kriterien werden nachträglich nicht
+  verschoben). Cargo-Feature `tcp-eigen` (Standard an) markiert die
+  Tausch-Stelle; ohne das Feature schlägt der Bau mit einer erklärenden
+  `compile_error!`-Meldung fehl (es ist keine Alternative eingebunden).
+  TESTMETHODIK: Das HARTE Gate liegt auf dem kontrollierbaren LAN-Server
+  (`tests/netz_http.rs`); der Internet-Lauf ist Bericht + Grundschwelle —
+  eine Testsuite darf nicht von fremden Servern abhängen. Nächster Hebel bei
+  Bedarf laut Messung: Fast-Retransmit + niedrigerer RTO-Deckel, DANN erst
+  SACK/smoltcp.
 - **FAT32-Treiber (Juli 2026, `src/fs/fat32.rs`) — NUR LESEN:**
   SpeedOS liest fremde FAT32-Medien ("der USB-Stick"), schreibt sie
   aber NIE (jeder Schreib-Weg -> `IoFehler::NurLesen`). Kein/kaputtes

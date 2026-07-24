@@ -128,13 +128,111 @@ mehrsegmentige Daten + Close auch bei **20 % Paketverlust** durchkommen
 `test_http_auf_platte_speichern`, dass ein über den eigenen Stack geholter
 Body byte-identisch auf der SpeedFS-Platte landet.
 
+### Messung 3 — Der Stresstest (`tests/netz_stress.rs`)
+
+Die Messungen 1 und 2 liefen gegen je EINEN Server und ohne Störung — für eine
+Ingenieur-Entscheidung zu wenig. Der Stresstest geht härter ran.
+
+**Phase 1 — 20 Abrufe gegen 8 verschiedene echte Internet-Server**
+(verschiedene TCP-Stacks, RTTs, Größen von 0 bis 11,5 KB, `Content-Length`
+und `chunked`, auch ein `204 No Content`). Drei Läufe:
+
+| Lauf | sauber | TCP-Fehler | Quote |
+|------|--------|-----------|-------|
+| A    | 20/20  | 0         | 100 % |
+| B    | 18/20  | 2         | 90 %  |
+| C    | 18/20  | 2         | 90 %  |
+| **Summe** | **56/60** | **4** | **93 %** |
+
+**Alle vier Fehlschläge entfielen auf DENSELBEN Server** (`neverssl.com`) —
+und zwar als Timeout nach 15 s. Die übrigen sieben Server: 100 %, typisch
+250–500 ms je Abruf (auch die 11,5-KB-Seite). Bezeichnend: `neverssl.com`
+braucht selbst im Erfolgsfall 1,6–3,9 s, also das 5–15-fache der anderen —
+der Pfad dorthin verliert offenbar Pakete, und **genau da schlägt unsere
+Schwäche durch**.
+
+**Phase 2 — LAN-Server (21 700 Byte) mit künstlichem Paketverlust**
+(je Richtung, an unserer Geräte-Naht eingespeist; auf einem Windows-Host gibt
+es kein tc/netem):
+
+| Verlust | sauber | Dauern der Erfolge |
+|---------|--------|--------------------|
+| 10 %    | 4/5    | 0,26 s / 1,5 s / 2,6 s / 12,3 s |
+| 20 %    | 2/3    | 10,5 s / 11,9 s |
+
+**Phase 3 — Internet mit 10 % Verlust:** 3/4 sauber (6,2 s / 1,7 s / 1,5 s),
+ein Timeout.
+
+### Fehlerbild — ehrlich benannt
+
+* **Kein Hänger im Sinne eines Deadlocks.** Jeder Fehlschlag war ein
+  *Timeout* (15 s, das Limit unseres HTTP-Clients) mit TEILWEISE empfangenem
+  Rumpf — der Transfer lief also, nur zu langsam. Nach jedem Fehlschlag war
+  der Stack sofort wieder benutzbar.
+* **Keine kaputten Bodies.** Kein einziger Fall von falschen/vertauschten
+  Daten: Was ankam, war korrekt (Content-Length exakt, Anfang und Ende
+  geprüft). Die Sequenz-/ACK-Logik arbeitet richtig.
+* **Kein TIME_WAIT-Problem, keine Handle-Lecks.** Nach allen Phasen: **0**
+  Einträge in der Socket-Tabelle, Abschluss-Abruf sofort erfolgreich.
+* **DIE Schwäche: katastrophale Verlangsamung unter Verlust.** 21 KB brauchen
+  bei 10 % Verlust zwischen 0,3 s und 12 s. Ursachen — genau die oben bewusst
+  weggelassenen Mechanismen:
+  1. **Kein Fast-Retransmit**: jeder Verlust kostet eine volle RTO (≥ 500 ms).
+  2. **Out-of-Order wird verworfen**: ein verlorenes Segment entwertet alles
+     danach Empfangene, es muss erneut übertragen werden (Go-Back-N-Effekt).
+  3. **RTO-Backoff bis 8 s**: nach mehreren Verlusten hintereinander kostet
+     der nächste Verlust volle 8 Sekunden.
+
+## DIE ENTSCHEIDUNG (Juli 2026): Eigenbau-TCP BLEIBT
+
+Gemessen am **vorher festgelegten** Kriterium (≥ 9/10 saubere Läufe auf einem
+normalen Netz):
+
+* LAN, kontrolliert: **10/10** und **10/10**
+* Internet, 60 Abrufe: **56/60 = 93 %**
+
+Das Kriterium ist erfüllt → **die smoltcp-Reißleine wird NICHT gezogen.**
+Das ist die disziplinierte Antwort: Ein vorher registriertes Kriterium wird
+hinterher nicht verschoben — weder nach oben noch nach unten.
+
+**Ehrlich dazu gesagt:** Das ist kein glänzender, sondern ein *knapper und
+klar begrenzter* Bestand. Auf sauberen Pfaden ist der Stack tadellos (100 %,
+schnell, byte-korrekt). Auf einem verlustbehafteten Pfad wird er zäh und
+reißt gelegentlich ein 15-s-Budget. Wer diesen Stack benutzt, muss das
+wissen — deshalb steht es in der README unter „Bekannte Grenzen".
+
+**Was das NICHT ist:** ein Korrektheitsproblem. Es gab keine falschen Daten,
+keine Deadlocks, keine Ressourcenlecks. Es ist ein reines *Effizienz*-Defizit
+mit drei bekannten, benannten Ursachen.
+
+**Wenn es später stören sollte**, ist der billigste wirksame Hebel
+**Fast-Retransmit** (3 doppelte ACKs → sofort erneut senden, ~20 Zeilen) und
+ein niedrigerer RTO-Deckel; erst danach lohnt SACK oder der Wechsel auf
+smoltcp. Diese Reihenfolge ergibt sich direkt aus den Messungen oben.
+
+**Der Schalter bleibt im Baum:** Das Cargo-Feature `tcp-eigen` (Standard an)
+markiert die Stelle, an der eine Fremd-Implementierung einzuhängen wäre. Die
+unteren Schichten und die Socket-API blieben dabei in jedem Fall unsere —
+Anwendungen und der HTTP-Client würden nichts davon merken.
+
 ### Reproduktion der LAN-Messung
 
 ```
 # auf dem Host (Verzeichnis mit probe.txt):
 python -m http.server 8000
 # dann im Projekt:
-cargo test --test netz_http
+cargo test --test netz_http     # das HARTE Gate: 10/10
+cargo test --test netz_stress   # Vielfalt + Verlust (Bericht + Grundschwellen)
 ```
 Läuft kein Server, überspringt der Test die Messung sauber (statt rot zu
 werden) — der TCP-Kern ist ohnehin per Loopback-Unit-Test abgesichert.
+
+Der Stresstest kann Verlust selbst einspeisen
+(`netz::geraet::verlust_setzen(prozent)`, je Richtung). Für Verzögerung/Bursts
+gibt es zusätzlich QEMUs Bordmittel: `SPEEDOS_NET_DELAY=<µs>` hängt einen
+`filter-buffer` an das Netzwerk-Backend.
+
+**Testmethodik (bewusst):** Das harte Reißleinen-Gate liegt auf dem
+KONTROLLIERBAREN LAN-Server. Der Internet-Lauf ist ein *Bericht* mit einer
+Grundschwelle — eine Testsuite darf nicht davon abhängen, wie es fremden
+Servern gerade geht.

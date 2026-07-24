@@ -231,6 +231,36 @@ tests/               Integrationstests (booten einzeln in QEMU)
 docs/                Migrationsplan bootloader 0.9 -> 0.11, Screenshots
 ```
 
+## Bekannte Grenzen des Netzwerk-Stacks
+
+Der TCP/IP-Stack ist **komplett selbst gebaut** — vom Ethernet-Frame bis zum
+HTTP-Client. Das ist der Punkt des Projekts, aber es heißt auch: Er ist ein
+**Lern-Artefakt mit klar vermessenen Grenzen**. Ehrlich, damit niemand
+überrascht wird (Details + Messprotokoll: [docs/tcp-scope.md](docs/tcp-scope.md)):
+
+- **Auf sauberen Netzen tadellos.** Gemessen: 56 von 60 Abrufen gegen acht
+  verschiedene echte Internet-Server sauber (93 %); sieben der acht Server
+  100 %, typisch 250–500 ms. Gegen einen LAN-Server 10/10 mit exakt
+  passender Byte-Zahl. Keine falschen Daten, keine Deadlocks, keine
+  Socket-/TIME_WAIT-Lecks.
+- **Unter Paketverlust wird TCP sehr langsam.** 21 KB brauchen bei 10 %
+  Verlust zwischen 0,3 s und 12 s; gelegentlich reißt ein 15-Sekunden-Budget.
+  Ursache sind drei bewusst weggelassene Mechanismen: **kein Fast-Retransmit**
+  (jeder Verlust kostet eine volle Timeout-Runde), **Out-of-Order-Segmente
+  werden verworfen** statt zwischengespeichert, und der **RTO-Backoff geht bis
+  8 s**. Es ist ein Effizienz-, kein Korrektheitsproblem.
+- **Ebenfalls bewusst nicht vorhanden:** Congestion-Control, SACK,
+  Window-Scaling (festes 8-KiB-Fenster), IP-Fragment-Reassemblierung.
+- **Kein HTTPS/TLS.** `hole` spricht nur `http://`; eine https-URL wird sauber
+  abgelehnt statt halbherzig versucht. TLS braucht geprüfte Krypto — das wäre
+  eine eigene Serie.
+- **Ein Socket-Typ pro Verbindung, keine Nebenläufigkeit im Client:** Die
+  Shell-Befehle pumpen den Stack synchron; währenddessen steht der Desktop.
+
+Der Cargo-Schalter `tcp-eigen` (Standard an) markiert die Stelle, an der man
+die TCP-Schicht gegen eine Fremd-Implementierung (z. B. smoltcp) tauschen
+könnte — die unteren Schichten und die Socket-API blieben dabei unsere.
+
 ## Roadmap (Kurzfassung)
 
 - [x] Boot, Seriell, Exceptions, Interrupts, Tastatur (QWERTZ)
