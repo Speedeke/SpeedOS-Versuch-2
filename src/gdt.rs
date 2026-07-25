@@ -16,6 +16,7 @@
 // bekannt gemacht — einer alten Segment-Tabelle aus 16-Bit-Zeiten,
 // die im 64-Bit-Modus fast nur noch für genau solche Dinge da ist.
 
+use core::cell::UnsafeCell;
 use lazy_static::lazy_static;
 use x86_64::structures::gdt::{Descriptor, GlobalDescriptorTable, SegmentSelector};
 use x86_64::structures::tss::TaskStateSegment;
@@ -26,44 +27,93 @@ use x86_64::VirtAddr;
 /// und TSS (hier) dieselbe verwenden.
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 
-lazy_static! {
-    /// Das Task State Segment: Notfall-Stack (IST) UND — neu für Ring 3 —
-    /// der Kernel-Stack für Traps aus dem User-Mode (RSP0).
-    static ref TSS: TaskStateSegment = {
-        let mut tss = TaskStateSegment::new();
-        tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = {
-            // 5 Seiten (20 KiB) reichen für den Handler locker aus.
-            const STACK_SIZE: usize = 4096 * 5;
-            // Der Notfall-Stack selbst: ein simples statisches Array.
-            // (Später, mit Speicherverwaltung, bekommt er eine richtige
-            // Guard Page — für jetzt genügt das.)
-            static mut STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
+/// Grösse der beiden statischen Kernel-Stacks (Notfall-Stack für Double
+/// Faults und der STANDARD-RSP0-Stack für Traps aus Ring 3).
+const STACK_GROESSE: usize = 4096 * 5; // 20 KiB
 
-            // Stacks wachsen auf x86 nach UNTEN, deshalb tragen wir das
-            // obere Ende des Arrays als Startadresse ein.
-            let stack_start = VirtAddr::from_ptr(&raw const STACK);
-            stack_start + STACK_SIZE
-        };
+/// Ein 16-Byte-ausgerichteter Stack-Block. Die Ausrichtung ist Pflicht, nicht
+/// Kosmetik: Unsere Trap-Dispatcher sind normale Rust-Funktionen (C-ABI) und
+/// dürfen SSE-Befehle nutzen, die einen 16-ausgerichteten Stack verlangen —
+/// ein nacktes `[u8; N]` garantiert das nicht.
+#[repr(align(16))]
+#[allow(dead_code)] // nur als ausgerichteter Speicher genutzt, nie gelesen
+struct Stack([u8; STACK_GROESSE]);
+
+// TEURE LEKTION (Serie 6, Teil 3): Diese beiden MÜSSEN `static mut` sein!
+// Ein unveränderliches `static` legt der Compiler ins Segment `.rodata`, und
+// der Bootloader mappt das SCHREIBGESCHÜTZT. Ein schreibgeschützter Stack
+// bedeutet: Der erste `push` der CPU beim Ring-3-Trap gibt einen Page Fault,
+// dessen Handler wieder pushen will -> Double Fault -> dessen IST-Stack ist
+// AUCH schreibgeschützt -> Triple Fault, Reboot ohne jede Meldung. Adressiert
+// werden sie nur über `&raw const` (roher Zeiger, keine Referenz).
+
+/// Der Notfall-Stack für den Double-Fault-Handler (IST-Eintrag 0).
+static mut NOTFALL_STACK: Stack = Stack([0; STACK_GROESSE]);
+/// Der STANDARD-Kernel-Stack für Traps aus Ring 3 (TSS.RSP0), solange kein
+/// Prozess eingeplant ist. Sobald der Scheduler läuft, trägt RSP0 den
+/// Kernel-Stack des JEWEILS laufenden Prozesses (siehe `rsp0_setzen`).
+static mut RSP0_STACK: Stack = Stack([0; STACK_GROESSE]);
+
+/// Das Task State Segment — in einer `UnsafeCell`, weil `RSP0` ab Serie 6
+/// Teil 3 bei JEDEM Kontext-Wechsel neu geschrieben wird (jeder Prozess hat
+/// seinen eigenen Kernel-Stack). Ein `lazy_static` wäre unveränderlich.
+///
+/// SICHERHEIT: SpeedOS läuft auf EINEM Kern, und geschrieben wird
+/// ausschliesslich in `tss_aufsetzen()` (beim Boot) und in `rsp0_setzen()` —
+/// letzteres nur aus dem Kontext-Wechsel, wo Interrupts aus sind. Es gibt
+/// also nie zwei gleichzeitige Schreiber. Gelesen wird das TSS von der CPU
+/// (nicht von Rust-Code), und zwar erst beim NÄCHSTEN Trap.
+struct TssHalter(UnsafeCell<TaskStateSegment>);
+// unsafe impl: siehe Sicherheits-Absatz oben (Einzelkern, Schreiber nur mit
+// ausgeschalteten Interrupts).
+unsafe impl Sync for TssHalter {}
+
+static TSS: TssHalter = TssHalter(UnsafeCell::new(TaskStateSegment::new()));
+
+/// Zeiger auf das TSS (die einzige Stelle, die ihn erzeugt).
+fn tss_zeiger() -> *mut TaskStateSegment {
+    TSS.0.get()
+}
+
+/// Füllt IST-Eintrag 0 und den Standard-RSP0. Läuft VOR dem GDT-Bau.
+fn tss_aufsetzen() {
+    // Stacks wachsen auf x86 nach UNTEN, deshalb tragen wir jeweils das
+    // OBERE Ende des Arrays ein.
+    let notfall_oben = VirtAddr::from_ptr(&raw const NOTFALL_STACK) + STACK_GROESSE;
+    let rsp0_oben = VirtAddr::from_ptr(&raw const RSP0_STACK) + STACK_GROESSE;
+    // unsafe: Einziger Schreiber, noch vor dem ersten Trap (siehe TssHalter).
+    unsafe {
+        (*tss_zeiger()).interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = notfall_oben;
         // RSP0 = der Kernel-Stack, auf den die CPU AUTOMATISCH umschaltet,
         // wenn aus Ring 3 (User-Mode) ein Trap/Interrupt/Syscall kommt. OHNE
         // ihn würde die CPU beim ersten Syscall aus Ring 3 versuchen, auf dem
         // (User-)Stack weiterzumachen bzw. hätte gar keinen gültigen Kernel-
         // Stack — Triple Fault. Getrennt vom IST-Stack (der ist nur für
         // Double Faults, dieser für den normalen Ring-3→Ring-0-Übergang).
-        tss.privilege_stack_table[0] = {
-            const RSP0_SIZE: usize = 4096 * 5;
-            // 16-Byte-ausgerichtet: Der Syscall-Dispatcher (Rust/C-ABI) darf
-            // SSE-Befehle nutzen, die einen 16-aligned Stack verlangen — ein
-            // [u8;N] allein garantiert das nicht.
-            #[repr(align(16))]
-            #[allow(dead_code)] // nur als ausgerichteter Speicher genutzt
-            struct Stack([u8; RSP0_SIZE]);
-            static mut RSP0_STACK: Stack = Stack([0; RSP0_SIZE]);
-            let start = VirtAddr::from_ptr(&raw const RSP0_STACK);
-            start + RSP0_SIZE
-        };
-        tss
-    };
+        (*tss_zeiger()).privilege_stack_table[0] = rsp0_oben;
+    }
+}
+
+/// Setzt RSP0 — den Kernel-Stack, auf dem der NÄCHSTE Trap aus Ring 3 landet.
+///
+/// DER vierte, leicht vergessene Schritt jedes Kontext-Wechsels: Jeder Prozess
+/// hat seinen eigenen Kernel-Stack, damit sein gesicherter Trap-Rahmen liegen
+/// bleiben kann, während ein anderer Prozess läuft. Zeigte RSP0 noch auf den
+/// Stack des vorigen Prozesses, würde der nächste Trap dessen gesicherten
+/// Kontext überschreiben — der Fehler äussert sich viel später als
+/// Register-Korruption in einem völlig anderen Prozess.
+pub fn rsp0_setzen(kern_stack_oben: VirtAddr) {
+    // unsafe: einziger Schreiber, Interrupts sind im Kontext-Wechsel aus.
+    unsafe {
+        (*tss_zeiger()).privilege_stack_table[0] = kern_stack_oben;
+    }
+}
+
+/// Das obere Ende des STANDARD-RSP0-Stacks (der Kernel-Prozess benutzt ihn:
+/// Traps aus Ring 0 wechseln den Stack ohnehin nicht, aber ein gültiger Wert
+/// muss dort stehen, falls doch einmal ein Ring-3-Trap kommt).
+pub fn rsp0_standard() -> VirtAddr {
+    VirtAddr::from_ptr(&raw const RSP0_STACK) + STACK_GROESSE
 }
 
 /// Die Selektoren merken wir uns, um sie nach dem Laden der GDT
@@ -87,7 +137,10 @@ lazy_static! {
         // Ring-3-Segmente (DPL 3): Code und Daten für den User-Mode.
         let user_code_selector = gdt.add_entry(Descriptor::user_code_segment());
         let user_data_selector = gdt.add_entry(Descriptor::user_data_segment());
-        let tss_selector = gdt.add_entry(Descriptor::tss_segment(&TSS));
+        // unsafe: `tss_segment` liest aus der Referenz nur BASIS-ADRESSE und
+        // Länge für den Deskriptor und behält sie nicht — der spätere
+        // Schreibzugriff über `rsp0_setzen` kollidiert damit nicht.
+        let tss_selector = gdt.add_entry(Descriptor::tss_segment(unsafe { &*tss_zeiger() }));
         (
             gdt,
             Selectors {
@@ -126,6 +179,9 @@ pub fn init() {
     use x86_64::instructions::segmentation::{Segment, CS, DS, ES, SS};
     use x86_64::instructions::tables::load_tss;
 
+    // Erst das TSS füllen (Notfall-Stack + Standard-RSP0), dann die GDT
+    // laden, die darauf verweist.
+    tss_aufsetzen();
     GDT.0.load();
     // `unsafe`: Wir müssen der CPU gültige Selektoren geben —
     // falsche Werte würden das System sofort crashen. Unsere stammen

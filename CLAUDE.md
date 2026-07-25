@@ -370,6 +370,70 @@
   VA 0x8000100000, Inhalt „A" bzw. „B" je nach CR3; 5x anlegen/abreißen mit
   Spitzenbedarf 53 Frames → Frame-Bilanz BYTE-EXAKT null (auch nach Absturz
   und Stack-Überlauf); Guard-Page fängt den Push bei 0x80000fbff8.
+- **PRÄEMPTIVER SCHEDULER (Serie 6, Teil 3, Juli 2026, `src/prozess.rs` +
+  `src/scheduler.rs`) — der PIT wird zum Scheduler-Herz:** Entwurf VOR dem
+  Code in `docs/scheduler-design.md`. DIE ENTSCHEIDUNG: Der kooperative
+  Executor wird NICHT ersetzt, sondern ist SELBST ein schedulebarer Kontext —
+  der KERNEL-PROZESS PID 0. Er steht als normaler Eintrag in der
+  Prozess-Tabelle, bekommt seine Zeitscheibe wie jeder User-Prozess und
+  multiplext INNERHALB seiner Scheibe weiter kooperativ (Compositor,
+  netz_task, Shell-Sitzungen). Folgen: EIN Wechsel-Mechanismus ohne
+  Sonderfälle; der LEERLAUF BLEIBT WIE ER WAR (PID 0 mit leerer Task-Queue
+  schläft per hlt — er IST der Idle-Prozess, „nichts lauffähig" kann es nicht
+  geben); die Oberfläche verhungert nicht. Verworfene Alternativen mit
+  Begründung im Entwurf §1.
+  DER KONTEXT-WECHSEL: Ein gesicherter Kontext ist EINE ZAHL — der RSP, an
+  dem der Trap-Rahmen auf dem EIGENEN Kernel-Stack des Prozesses liegt (die
+  CPU legt RIP/CS/RFLAGS/RSP/SS dort ab, bei Ring-3-Traps dank TSS.RSP0; der
+  Assembler-Einstieg die 15 GP-Register dahinter). DREI EINSTIEGE
+  (`timer_entry` = Präemption, `syscall_entry` = INT 0x80/freiwillig,
+  `prozess_sterben` = Ring-0-Stub nach einem Fault), EIN AUSSTIEG:
+  `schalte_auf_rahmen` (mov rsp, rdi / pop x15 / iretq) ist der EINZIGE
+  Kontext-Lade-Punkt des Kernels. Jeder Dispatcher LIEFERT einen Rahmen
+  ZURÜCK — denselben (kein Wechsel) oder den eines anderen Prozesses. Die
+  VIER SCHRITTE eines Wechsels stehen in `wechsel_ausfuehren` beieinander:
+  Kontext-RSP merken, CPU-Zeit abrechnen, CR3 wechseln, **TSS.RSP0 setzen**
+  (der vergessene vierte — sonst überschreibt der nächste Ring-3-Trap den
+  Kontext eines FREMDEN Prozesses; `gdt::rsp0_setzen`).
+  PROZESS-START IST KEIN SONDERFALL: Ein neuer Prozess bekommt von Hand einen
+  Trap-Rahmen ans obere Kernel-Stack-Ende — er sieht aus wie „schon gelaufen
+  und gerade verdrängt". INVARIANTE 1: Der erste Wechsel zu ihm passiert IMMER
+  im Timer/Syscall, also dort, wo PID 0s Kontext ohnehin gesichert wird
+  („einplanen", nicht „starten"). TABELLE: festes `[Option<Prozess>; 8]` —
+  KEIN Vec, der Timer liest sie und darf nicht allozieren; Kernel-Kontext
+  sperrt IMMER mit `without_interrupts` (dann kann der Timer nicht feuern),
+  der Interrupt nur mit `try_lock` (wartet NIE). BEENDETE PROZESSE WERDEN NIE
+  IM INTERRUPT ABGERÄUMT (Drop nimmt memory-Locks + Heap) — der Timer
+  markiert, `aufraeum_task` räumt ab, und zwar erst AUSSERHALB des Locks.
+  Zeitscheibe 5 Ticks = 20 ms bei 250 Hz; `wechsel_entscheiden` ist eine REINE
+  Funktion (4 Regeln, Fairness über 200 Runden nachgerechnet). Kernel-Stack je
+  Prozess = 4 Seiten mit GUARD-PAGE (5 mappen, unterste aushängen).
+  DAUERREGEL II JETZT PROZESS-WEISE: `user_recovery` erkennt „eingeplanter
+  User-Prozess" und biegt den Rahmen auf den Sterbe-Stub um (Ring 0,
+  Kernel-Stack des Sterbenden, IF aus) — der Prozess stirbt, Kernel und alle
+  anderen Prozesse laufen weiter. Syscalls neu: 3 schlafen(ms) (erster
+  BLOCKIERENDER, Zustand `Wartend`), 4 yield, 5 getpid; `yield` benutzt der
+  EXECUTOR selbst (`sleep_if_idle` gibt bei lauffähigen Prozessen sofort ab
+  statt zu hlt-en, und rechnet die FREMDZEIT aus der hlt-Messung heraus).
+  Shell: `prozesse`, `prozess-start`, `prozess-stop`, `praemptionstest`;
+  Task-Manager zeigt ZWEI Tabellen (Prozesse präemptiv / Kernel-Tasks
+  kooperativ). SYSCALL-RANDBEDINGUNG (Entwurf §8): Ein Syscall darf nur Locks
+  anfassen, die im Kernel AUSSCHLIESSLICH mit ausgeschalteten Interrupts
+  gehalten werden (KONSOLE/FRAMEBUFFER/MANAGER/SERIAL/Blatt-Locks erfüllen
+  das) — `fs::mit_fs` NICHT, deshalb braucht ein VFS-Syscall erst das
+  Warte-Modell. BEWEISE (`tests/scheduler.rs`, `tests/scheduler_executor.rs`):
+  2 Zähler-Prozesse ohne jede Abgabe → je 26 Präemptionen aus Ring 3, 0
+  Abgaben, verschränkte Ausgabe, CPU-Zeit auf 1 % gleich; Kontext-Sicherung
+  gegen synthetische Registersätze (SAVE- UND RESTORE-Pfad) + TrapFrame-Layout
+  per `offset_of!` (size == 160, sonst stimmt die C-ABI-Ausrichtung am `call`
+  nicht); XMM0-15 über 24 Wechsel unverändert (der nackte Einstieg sichert nur
+  GP — „Kernel ist fließkomma-frei" ist damit GEMESSEN); Koexistenz mit dem
+  echten Executor; Frame-Bilanz byte-exakt null. LEKTION: Statische
+  Kernel-Stacks MÜSSEN `static mut` sein — ohne `mut` landen sie in `.rodata`
+  → Page Fault → Double Fault → TRIPLE FAULT ohne Meldung. Der alte
+  Einzelschuss-Pfad (`ring3test`) und der `adressraum`-Befehl juggeln CR3 im
+  Kontext von PID 0 und SPERREN deshalb die Planung
+  (`scheduler::sperre_erhoehen/senken`) — die einzigen zwei Stellen.
 - **FAT32-Treiber (Juli 2026, `src/fs/fat32.rs`) — NUR LESEN:**
   SpeedOS liest fremde FAT32-Medien ("der USB-Stick"), schreibt sie
   aber NIE (jeder Schreib-Weg -> `IoFehler::NurLesen`). Kein/kaputtes
@@ -909,6 +973,8 @@
   manuell vor großen Puffern aufrufen.
 - **Boot-/Init-Reihenfolge (main.rs):** GDT/TSS → IDT → PIC → Interrupts an
   → memory::init (globaler Mapper + Frame-Allocator) → Heap → Dateisystem
+  → scheduler::init (trägt den LAUFENDEN Kontext als Kernel-Prozess PID 0
+  ein — muss NACH dem Heap laufen und VOR dem ersten Prozess)
   → Executor + Shell.
   Statics mit einmaligem Seiteneffekt (Scancode-Queue) über conquer_once
   OnceCell explizit initialisieren, NICHT lazy_static (sonst passiert die
@@ -935,7 +1001,11 @@
   Volle Warteschlangen panicken NICHT: Überlauf setzt ein Notfall-Flag,
   die nächste Runde pollt alle Tasks — kein Wecken geht verloren.
   Kapazität konfigurierbar (`Executor::mit_kapazitaet`, Standard 128).
-  Präemptiver Scheduler kommt erst mit User-Space-Prozessen.
+  SEIT SERIE 6, TEIL 3 ist dieser Executor selbst der KERNEL-PROZESS
+  (PID 0) des präemptiven Schedulers — Kernel-Tasks bleiben kooperativ,
+  PROZESSE werden präemptiv umgeschaltet (siehe Scheduler-Eintrag und
+  docs/scheduler-design.md). `sleep_if_idle` ist damit der Idle-Zustand
+  des ganzen Systems.
 - **Shell-Befehle als Registry:** Jeder Befehl = Struct mit `Befehl`-Trait
   (`src/shell/befehle.rs`, `Send + Sync`), eingetragen in `alle_befehle()`.
   Gemeinsamer Zustand (aktuelles Verzeichnis) nur über `ShellKontext`.

@@ -95,6 +95,10 @@ pub fn alle_befehle() -> Vec<Box<dyn Befehl>> {
         // Serie 6: der erste Sprung nach Ring 3 (User-Mode).
         Box::new(Ring3Test),
         Box::new(AdressraumTest),
+        Box::new(Prozesse),
+        Box::new(ProzessStart),
+        Box::new(ProzessStop),
+        Box::new(PraemptionsTest),
     ]
 }
 
@@ -1836,6 +1840,13 @@ impl Befehl for AdressraumTest {
         println!();
 
         // Derselbe Lesevorgang, zweimal — nur CR3 unterscheidet sich.
+        //
+        // PLANUNGS-SPERRE (Serie 6, Teil 3): Zwischen `aktivieren()` und dem
+        // Lesen darf KEIN Kontext-Wechsel liegen. Sonst käme der Kernel-Prozess
+        // mit Kernel-CR3 zurück, und die User-Adresse waere ploetzlich
+        // ungemappt — ein Page Fault in Ring 0, also ein Kernel-Halt. Dieselbe
+        // Begruendung wie bei ring3::nach_ring3 (docs/scheduler-design.md §6).
+        crate::scheduler::sperre_erhoehen();
         let mut puffer = [0u8; 17];
         for (name, raum) in [("A", &mut a), ("B", &mut b)] {
             raum.aktivieren();
@@ -1853,6 +1864,7 @@ impl Befehl for AdressraumTest {
             );
             konsole::set_color(Color::LightGray, Color::Black);
         }
+        crate::scheduler::sperre_senken();
 
         let besitz = a.frames_besitz() + b.frames_besitz();
         a.abreissen();
@@ -1870,5 +1882,273 @@ impl Befehl for AdressraumTest {
                 "LECK!"
             }
         );
+    }
+}
+
+/// prozesse — die Prozess-Tabelle des praeemptiven Schedulers.
+struct Prozesse;
+
+impl Befehl for Prozesse {
+    fn name(&self) -> &'static str {
+        "prozesse"
+    }
+    fn beschreibung(&self) -> &'static str {
+        "Zeigt die Prozess-Tabelle (PID, Name, Zustand, CPU-Zeit)"
+    }
+    fn ausfuehren(
+        &self,
+        _argumente: &str,
+        _kontext: &mut ShellKontext,
+        _registry: &[Box<dyn Befehl>],
+    ) {
+        if !crate::scheduler::aktiv() {
+            println!("Der Scheduler ist nicht aktiv (kein scheduler::init()).");
+            return;
+        }
+        konsole::set_color(Color::LightCyan, Color::Black);
+        println!(
+            "{:>4}  {:<26} {:<11} {:>10} {:>8} {:>7} {:>8}",
+            "PID", "Name", "Zustand", "CPU-Zeit", "Praeem.", "Abgab.", "Syscalls"
+        );
+        konsole::set_color(Color::LightGray, Color::Black);
+        for zeile in crate::scheduler::momentaufnahme() {
+            println!(
+                "{:>4}  {:<26} {:<11} {:>10} {:>8} {:>7} {:>8}",
+                zeile.pid,
+                zeile.name,
+                zeile.zustand.text(),
+                crate::taskmanager::cpu_zeit_text(zeile.cpu_us),
+                zeile.praemptionen,
+                zeile.abgaben,
+                zeile.syscalls
+            );
+        }
+        println!();
+        println!(
+            "Zeitscheibe {} Ticks (~{} ms), {} Kontext-Wechsel seit dem Boot.",
+            crate::scheduler::SCHEIBE_TICKS,
+            crate::zeit::ms_von_ticks(crate::scheduler::SCHEIBE_TICKS as u64),
+            crate::scheduler::wechsel_gesamt()
+        );
+        println!("PID 0 ist der Kernel-Prozess: in IHM laufen alle Kernel-Tasks kooperativ.");
+    }
+}
+
+/// prozess-start — plant einen Demo-Prozess ein (zaehler | schlaefer | absturz).
+struct ProzessStart;
+
+impl Befehl for ProzessStart {
+    fn name(&self) -> &'static str {
+        "prozess-start"
+    }
+    fn beschreibung(&self) -> &'static str {
+        "Plant einen Ring-3-Prozess ein (zaehler <A-Z> | schlaefer | absturz)"
+    }
+    fn ausfuehren(
+        &self,
+        argumente: &str,
+        _kontext: &mut ShellKontext,
+        _registry: &[Box<dyn Befehl>],
+    ) {
+        let mut teile = argumente.split_whitespace();
+        let art = teile.next().unwrap_or("zaehler");
+        let prozess = match art {
+            "zaehler" => {
+                // Kennung: erstes Zeichen des zweiten Arguments, sonst 'A'.
+                let kennung = teile
+                    .next()
+                    .and_then(|s| s.bytes().next())
+                    .unwrap_or(b'A');
+                crate::prozess::zaehler_prozess(kennung)
+            }
+            "schlaefer" => {
+                let ms = teile.next().and_then(|s| s.parse::<u32>().ok()).unwrap_or(200);
+                crate::prozess::schlaefer_prozess(ms)
+            }
+            "absturz" => crate::prozess::absturz_prozess(),
+            _ => {
+                println!("Benutzung: prozess-start [zaehler <Kennung> | schlaefer <ms> | absturz]");
+                return;
+            }
+        };
+        match prozess.and_then(crate::scheduler::einplanen) {
+            Some(pid) => {
+                konsole::set_color(Color::LightGreen, Color::Black);
+                println!("Prozess mit PID {} eingeplant — er laeuft ab dem naechsten Tick.", pid);
+                konsole::set_color(Color::LightGray, Color::Black);
+                println!("(Ausgaben laufen SERIELL — ein Syscall darf den MANAGER-Lock nicht");
+                println!(" anfassen. 'prozesse' zeigt die CPU-Zeit, 'prozess-stop {}' beendet.)", pid);
+            }
+            None => println!("Prozess konnte nicht eingeplant werden (Tabelle voll oder kein Speicher)."),
+        }
+    }
+}
+
+/// prozess-stop — beendet einen Prozess.
+struct ProzessStop;
+
+impl Befehl for ProzessStop {
+    fn name(&self) -> &'static str {
+        "prozess-stop"
+    }
+    fn beschreibung(&self) -> &'static str {
+        "Beendet einen Prozess (prozess-stop <pid>, 'alle' fuer alle)"
+    }
+    fn ausfuehren(
+        &self,
+        argumente: &str,
+        _kontext: &mut ShellKontext,
+        _registry: &[Box<dyn Befehl>],
+    ) {
+        let argument = argumente.trim();
+        if argument.is_empty() {
+            println!("Benutzung: prozess-stop <pid>   (oder 'prozess-stop alle')");
+            return;
+        }
+        let mut beendet = 0usize;
+        if argument == "alle" {
+            for zeile in crate::scheduler::momentaufnahme() {
+                if zeile.ist_user && crate::scheduler::beenden(zeile.pid) {
+                    beendet += 1;
+                }
+            }
+        } else {
+            match argument.parse::<crate::prozess::Pid>() {
+                Ok(pid) if crate::scheduler::beenden(pid) => beendet = 1,
+                Ok(pid) => println!("PID {} gibt es nicht (oder sie ist schon beendet).", pid),
+                Err(_) => println!("'{}' ist keine Prozess-Nummer.", argument),
+            }
+        }
+        if beendet > 0 {
+            println!(
+                "{} Prozess(e) beendet. Der Aufraeum-Task gibt Adressraum und",
+                beendet
+            );
+            println!("Kernel-Stack in Kuerze zurueck (nie im Interrupt — dort ist Freigeben verboten).");
+        }
+    }
+}
+
+/// praemptionstest — DER PRAEMPTIONS-BEWEIS als Shell-Befehl (Serie 6, Teil 3):
+/// zwei Ring-3-Prozesse, die in Endlosschleifen zaehlen und NIE freiwillig
+/// abgeben. Verschraenkt sich ihre Ausgabe, wurde ihnen die CPU WEGGENOMMEN.
+struct PraemptionsTest;
+
+impl Befehl for PraemptionsTest {
+    fn name(&self) -> &'static str {
+        "praemptionstest"
+    }
+    fn beschreibung(&self) -> &'static str {
+        "Beweist Praemption: zwei Zaehler-Prozesse ohne freiwillige Abgabe"
+    }
+    fn ausfuehren(
+        &self,
+        argumente: &str,
+        _kontext: &mut ShellKontext,
+        _registry: &[Box<dyn Befehl>],
+    ) {
+        use crate::prozess::Pid;
+
+        if !crate::scheduler::aktiv() {
+            println!("Der Scheduler ist nicht aktiv.");
+            return;
+        }
+        let sekunden = argumente
+            .trim()
+            .parse::<u64>()
+            .unwrap_or(2)
+            .clamp(1, 10);
+
+        konsole::set_color(Color::LightCyan, Color::Black);
+        println!("=== Praemptionstest (Serie 6, Teil 3) ===");
+        konsole::set_color(Color::LightGray, Color::Black);
+        println!("Zwei Ring-3-Prozesse zaehlen in Endlosschleifen und drucken per");
+        println!("Syscall. Ihr Maschinencode enthaelt KEINE freiwillige Abgabe.");
+        println!("Laufzeit: {} s. (Die Zaehler-Ausgabe laeuft seriell.)", sekunden);
+        println!();
+
+        crate::scheduler::spur_loeschen();
+        let mut pids: Vec<Pid> = Vec::new();
+        for kennung in *b"AB" {
+            match crate::prozess::zaehler_prozess(kennung).and_then(crate::scheduler::einplanen) {
+                Some(pid) => pids.push(pid),
+                None => {
+                    println!("Prozess '{}' konnte nicht eingeplant werden.", kennung as char);
+                    for pid in &pids {
+                        crate::scheduler::beenden(*pid);
+                    }
+                    return;
+                }
+            }
+        }
+
+        // Warten — und dabei selbst verdraengt werden. Der Shell-Task laeuft im
+        // Kernel-Prozess; hlt gibt die CPU frei, bis der Timer tickt.
+        let ziel = crate::zeit::ms_seit_boot() + sekunden * 1000;
+        while crate::zeit::ms_seit_boot() < ziel {
+            x86_64::instructions::hlt();
+        }
+
+        // Auswertung: erst die Zahlen aus der Tabelle, dann die Ausgabe-Spur.
+        let moment = crate::scheduler::momentaufnahme();
+        konsole::set_color(Color::LightCyan, Color::Black);
+        println!("{:>4}  {:<12} {:>10} {:>8} {:>7}", "PID", "Name", "CPU-Zeit", "Praeem.", "Abgab.");
+        konsole::set_color(Color::LightGray, Color::Black);
+        let mut praemptionen_min = u64::MAX;
+        let mut abgaben_summe = 0u64;
+        for zeile in moment.iter().filter(|z| pids.contains(&z.pid)) {
+            println!(
+                "{:>4}  {:<12} {:>10} {:>8} {:>7}",
+                zeile.pid,
+                zeile.name,
+                crate::taskmanager::cpu_zeit_text(zeile.cpu_us),
+                zeile.praemptionen,
+                zeile.abgaben
+            );
+            praemptionen_min = praemptionen_min.min(zeile.praemptionen);
+            abgaben_summe += zeile.abgaben;
+        }
+
+        let spur: Vec<Pid> = crate::scheduler::spur_lesen().iter().map(|(p, _)| *p).collect();
+        let befund = crate::scheduler::spur_auswerten(&spur);
+        println!();
+        println!("Ausgabe-Reihenfolge der ERSTEN {} Ausgaben (| = Prozess-Wechsel):", crate::scheduler::SPUR_LAENGE);
+        // Die Spur als Blockfolge, damit die Verschraenkung ins Auge springt.
+        let mut zeile = String::new();
+        let mut letzte: Option<Pid> = None;
+        for (pid, zeichen) in crate::scheduler::spur_lesen().iter().take(120) {
+            if letzte != Some(*pid) {
+                zeile.push(' ');
+                zeile.push('|');
+                zeile.push(' ');
+                letzte = Some(*pid);
+            }
+            zeile.push(*zeichen as char);
+        }
+        println!(" {}", zeile.trim());
+        println!();
+        println!(
+            "{} Ausgaben von {} Prozessen, {} Wechsel in der Spur.",
+            befund.gesamt, befund.beteiligte, befund.wechsel
+        );
+
+        // Das Urteil — genau die drei Aussagen aus tests/scheduler.rs.
+        let bewiesen = befund.beteiligte >= 2 && befund.wechsel >= 2
+            && praemptionen_min > 0 && abgaben_summe == 0;
+        if bewiesen {
+            konsole::set_color(Color::LightGreen, Color::Black);
+            println!("BEWIESEN: Beide kamen voran, beide wurden aus Ring 3 verdraengt,");
+            println!("und KEINER hat freiwillig abgegeben. Die CPU wurde weggenommen.");
+        } else {
+            konsole::set_color(Color::Yellow, Color::Black);
+            println!("Kein vollstaendiger Beweis in diesem Lauf — laenger laufen lassen:");
+            println!("praemptionstest {}", (sekunden * 2).min(10));
+        }
+        konsole::set_color(Color::LightGray, Color::Black);
+
+        for pid in &pids {
+            crate::scheduler::beenden(*pid);
+        }
+        println!("Beide Prozesse beendet.");
     }
 }

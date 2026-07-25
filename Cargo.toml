@@ -116,6 +116,13 @@ harness = false
 name = "async_task"
 harness = false
 
+# Der Koexistenz-Test (Serie 6, Teil 3) laesst den ECHTEN Executor als
+# Kernel-Prozess neben einem Ring-3-Prozess laufen. Executor::run() kehrt nie
+# zurueck, also faellt das Urteil aus einem Task heraus — kein Test-Framework.
+[[test]]
+name = "scheduler_executor"
+harness = false
+
 # Der Kernel läuft auch im dev-Profil OPTIMIERT (opt-level 2): Der
 # Compositor schiebt pro Frame Millionen Pixel durch Zeichner::pixel —
 # unoptimiert dauert ein Frame hunderte Millisekunden (Maus-Lag!).

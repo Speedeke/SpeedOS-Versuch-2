@@ -142,7 +142,17 @@ lazy_static! {
                 .set_stack_index(gdt::DOUBLE_FAULT_IST_INDEX);
         }
         // Hardware-Interrupts (nach dem PIC-Remapping):
-        idt[InterruptIndex::Timer.as_usize()].set_handler_fn(timer_interrupt_handler);
+        // DER TIMER (Serie 6, Teil 3): kein `extern "x86-interrupt"`-Handler
+        // mehr, sondern ein NACKTER Assembler-Einstieg (scheduler.rs). Grund:
+        // Ein Kontext-Wechsel muss den STACK-POINTER umbiegen (auf den
+        // gesicherten Trap-Rahmen eines anderen Prozesses) — das kann eine
+        // gewöhnliche Rust-Funktion nicht, deren Epilog der Compiler schreibt.
+        // unsafe: set_handler_addr traut uns eine GÜLTIGE Handler-Adresse zu;
+        // sie stammt aus unserem eigenen global_asm-Symbol.
+        unsafe {
+            idt[InterruptIndex::Timer.as_usize()]
+                .set_handler_addr(VirtAddr::new(crate::scheduler::timer_handler_adresse()));
+        }
         idt[InterruptIndex::Keyboard.as_usize()].set_handler_fn(keyboard_interrupt_handler);
         idt[InterruptIndex::Maus.as_usize()].set_handler_fn(maus_interrupt_handler);
         // PCI-Interrupts (virtio-net, Serie 5): Welche IRQ das Gerät
@@ -189,27 +199,68 @@ extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
 /// Handler für Page Faults: Zugriff auf Speicher, der nicht gemappt
 /// oder geschützt ist. Gibt alle Infos lesbar aus und hält dann an —
 /// weiterlaufen wäre gefährlich, ohne den Fehler zu beheben.
-/// Gemeinsame User-Mode-Recovery (Dauerregel II): Kam der Trap aus Ring 3 und
-/// läuft gerade unser Ring-3-Code, biegen wir den Interrupt-Rahmen auf den
-/// Kernel-Recovery-Punkt um (return -> Epilog-iretq -> Kernel) und liefern
-/// `true`. Sonst `false` (der Aufrufer behandelt es als Kernel-Bug).
+/// Gemeinsame User-Mode-Recovery (Dauerregel II): Kam der Trap aus Ring 3,
+/// biegen wir den Interrupt-Rahmen um, sodass der Epilog-`iretq` in den KERNEL
+/// zurückkehrt statt nach Ring 3 (wo derselbe Fehler sofort wieder käme), und
+/// liefern `true`. Sonst `false` — dann ist es ein Fehler im Kernel selbst,
+/// also ein echter Bug, und der Aufrufer hält an.
+///
+/// ZWEI Rückwege, weil es zwei Arten von Ring-3-Code gibt:
+///
+///  (a) EINGEPLANTER PROZESS (Scheduler, Serie 6 Teil 3): Der Prozess wird
+///      auf `Beendet` gesetzt, und der Rahmen zeigt auf den Ring-0-Sterbe-Stub
+///      — der schaltet auf den nächsten lauffähigen Prozess um. Der Kernel
+///      merkt nur, dass ein Prozess weniger da ist.
+///
+///  (b) EINZELSCHUSS-PFAD (`ring3test`, Serie 6 Teil 1): Der Rahmen zeigt auf
+///      den setjmp-Landeplatz, der den gesicherten Kernel-Kontext
+///      wiederherstellt.
+///
+/// Reihenfolge ist wichtig: (a) zuerst, denn ein eingeplanter Prozess hat
+/// keinen setjmp-Puffer, auf den man zurückspringen könnte.
 fn user_recovery(stack_frame: &mut InterruptStackFrame) -> bool {
     let aus_user_mode = (stack_frame.code_segment & 3) == 3;
-    if !(aus_user_mode && crate::ring3::ring3_aktiv()) {
+    if !aus_user_mode {
         return false;
     }
+
+    // (a) Läuft ein eingeplanter User-Prozess? Dann stirbt genau der.
+    // Wir bauen dafür eine TrapFrame-Ansicht der fünf CPU-Felder, damit
+    // scheduler.rs mit derselben Struktur arbeitet wie überall sonst.
     // unsafe: as_mut() gibt volatilen Zugriff auf den echten Rahmen auf dem
     // Stack — genau den benutzt der iretq gleich.
-    unsafe {
-        let mut rahmen = stack_frame.as_mut();
-        let mut wert = rahmen.read();
-        wert.instruction_pointer = VirtAddr::new(crate::ring3::recovery_rip());
-        wert.stack_pointer = VirtAddr::new(crate::ring3::recovery_rsp());
-        wert.code_segment = gdt::kernel_code_selektor();
-        wert.stack_segment = gdt::kernel_data_selektor();
-        wert.cpu_flags = 0x202; // IF gesetzt
-        rahmen.write(wert);
+    let mut rahmen_zugriff = unsafe { stack_frame.as_mut() };
+    let wert = rahmen_zugriff.read();
+    let mut trap = crate::prozess::TrapFrame {
+        rip: wert.instruction_pointer.as_u64(),
+        cs: wert.code_segment,
+        rflags: wert.cpu_flags,
+        rsp: wert.stack_pointer.as_u64(),
+        ss: wert.stack_segment,
+        ..Default::default()
+    };
+    if crate::scheduler::user_prozess_toeten(&mut trap) {
+        let mut neu = wert;
+        neu.instruction_pointer = VirtAddr::new(trap.rip);
+        neu.stack_pointer = VirtAddr::new(trap.rsp);
+        neu.code_segment = trap.cs;
+        neu.stack_segment = trap.ss;
+        neu.cpu_flags = trap.rflags;
+        rahmen_zugriff.write(neu);
+        return true;
     }
+
+    // (b) Der Einzelschuss-Pfad aus Serie 6, Teil 1.
+    if !crate::ring3::ring3_aktiv() {
+        return false;
+    }
+    let mut neu = wert;
+    neu.instruction_pointer = VirtAddr::new(crate::ring3::recovery_rip());
+    neu.stack_pointer = VirtAddr::new(crate::ring3::recovery_rsp());
+    neu.code_segment = gdt::kernel_code_selektor();
+    neu.stack_segment = gdt::kernel_data_selektor();
+    neu.cpu_flags = 0x202; // IF gesetzt
+    rahmen_zugriff.write(neu);
     true
 }
 
@@ -302,10 +353,16 @@ pub fn timer_ticks() -> u64 {
     TICKS.load(Ordering::Relaxed)
 }
 
-/// Timer-Interrupt: Zähler erhöhen und wartende Tick-Futures wecken
-/// (beides lock-frei!) — KEINE Ausgabe, das würde den Bildschirm
-/// ~18x pro Sekunde vollspammen.
-extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
+/// Die BASISARBEIT jedes Timer-Ticks: Zähler erhöhen, wartende Tick-Futures
+/// wecken (beides lock-frei!) und dem PIC den Interrupt quittieren — KEINE
+/// Ausgabe, das würde den Bildschirm 250x pro Sekunde vollspammen.
+///
+/// Das war bis Serie 6 Teil 3 der komplette Timer-Handler. Jetzt ruft
+/// `scheduler::timer_dispatch` diese Funktion als ersten Schritt und macht
+/// danach die Prozess-Planung. Herausgezogen bleibt sie, weil sie mit dem
+/// Scheduler nichts zu tun hat — und weil so sichtbar bleibt, dass sich das
+/// alte Verhalten NICHT geändert hat.
+pub fn timer_basisarbeit() {
     TICKS.fetch_add(1, Ordering::Relaxed);
     crate::zeit::tick_waker_wecken();
 

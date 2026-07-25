@@ -231,6 +231,14 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
             id
         }
     };
+    // 6b. DER PRÄEMPTIVE SCHEDULER (Serie 6, Teil 3): Der Kontext, in dem wir
+    //     hier gerade laufen — und der gleich der Executor wird — wird als
+    //     KERNEL-PROZESS PID 0 in die Prozess-Tabelle eingetragen. Ab jetzt ist
+    //     jeder PIT-Tick ein möglicher Kontext-Wechsel; solange nur PID 0
+    //     existiert, wechselt aber nichts. Der Executor merkt davon nichts —
+    //     genau das ist Präemption (docs/scheduler-design.md).
+    speed_os::scheduler::init();
+
     let mut executor = Executor::new();
     executor.spawn(Task::new("Eingabe-Router", shell::eingabe_router()));
     executor.spawn(
@@ -261,6 +269,13 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     executor.spawn(
         Task::new("Desktop-Uhr", speed_os::fenster::uhr_task()).mit_art(TaskArt::Fenster),
     );
+    // Der Prozess-Aufräumer: gibt Adressraum-Frames und Kernel-Stacks
+    // beendeter Prozesse zurück. WARUM ein Task und nicht der Timer: Freigeben
+    // nimmt Locks und Heap-Speicher — im Interrupt-Kontext verboten.
+    executor.spawn(Task::new(
+        "Prozess-Aufraeumer",
+        speed_os::scheduler::aufraeum_task(),
+    ));
     executor.run();
 }
 

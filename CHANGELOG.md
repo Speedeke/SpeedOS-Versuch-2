@@ -5,6 +5,132 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### Serie 6, Teil 3: DER PRÄEMPTIVE SCHEDULER — der PIT wird zum Herz
+- **Der Sprung:** Multitasking war in SpeedOS immer KOOPERATIV — ein Task
+  lief, bis er `await`-te. Ab jetzt kann der Kernel einem Programm die CPU
+  **wegnehmen**. Bewiesen mit zwei Ring-3-Prozessen, die in Endlosschleifen
+  zählen und deren Maschinencode **keinen einzigen Abgabe-Syscall** enthält —
+  und die trotzdem beide vorankommen.
+- **DIE ARCHITEKTUR-ENTSCHEIDUNG, vor dem Code aufgeschrieben**
+  (`docs/scheduler-design.md`, wie schon `speedfs-format.md` und
+  `tcp-scope.md`): Der kooperative Executor wird NICHT ersetzt, sondern ist
+  **selbst ein schedulebarer Kontext — der Kernel-Prozess PID 0**. Er steht
+  als normaler Eintrag in der Prozess-Tabelle und bekommt seine Zeitscheibe
+  wie jeder User-Prozess; *innerhalb* seiner Scheibe multiplext er weiter
+  kooperativ zwischen Compositor, netz_task, Shell-Sitzungen & Co.
+  ```
+   praeemptiv (PIT, 20 ms):  PID 0 -> PID 1 -> PID 2 -> PID 0 -> ...
+                               |
+                               +-- kooperativ (await): Compositor, Netz, Shell
+  ```
+  Drei Dinge fallen dadurch geschenkt an: **(1)** EIN Wechsel-Mechanismus,
+  keine Sonderfälle „Kernel vs. Prozess"; **(2)** der **Leerlauf bleibt, wie
+  er war** — PID 0 mit leerer Task-Queue schläft per `hlt`, er IST der
+  Idle-Prozess, ein separater wäre überflüssig (und „nichts lauffähig" kann
+  es nicht geben, denn PID 0 ist immer lauffähig); **(3)** die Oberfläche
+  verhungert nicht. Vier Alternativen sind im Entwurf begründet verworfen.
+- **DER KONTEXT-WECHSEL** (`src/prozess.rs`, `src/scheduler.rs`) — die
+  Kernidee macht ihn erstaunlich klein: **Ein gesicherter Prozess-Kontext ist
+  EINE ZAHL.** Jeder Prozess hat einen eigenen Kernel-Stack; beim Trap legt
+  die CPU dort RIP/CS/RFLAGS/RSP/SS ab (bei Traps aus Ring 3 dank
+  `TSS.RSP0`), unser Assembler-Einstieg die 15 General-Register dahinter.
+  Zusammen ist das der vollständige Zustand — und er liegt auf SEINEM Stack,
+  wo er beliebig lange liegen bleiben darf. „Umschalten" heißt deshalb: `RSP`
+  auf den Rahmen des anderen Prozesses setzen, poppen, `iretq`.
+- **DREI EINSTIEGE, EIN AUSSTIEG.** `timer_entry` (Präemption),
+  `syscall_entry` (INT 0x80, freiwillige Abgabe) und `prozess_sterben`
+  (Ring-0-Stub nach einem Fault) sichern jeweils den Rahmen, rufen ihren
+  Rust-Dispatcher — und der **liefert einen Rahmen zurück**. Geladen wird er
+  ausschließlich von `schalte_auf_rahmen`, drei Assembler-Zeilen, der einzige
+  Kontext-Lade-Punkt des Kernels. Präemption, Yield, Prozess-Start und
+  Prozess-Tod laufen damit durch denselben Pfad.
+- **Der Timer ist kein `extern "x86-interrupt"`-Handler mehr**, sondern ein
+  nackter Assembler-Einstieg — eine gewöhnliche Rust-Funktion kann ihren
+  Stack-Pointer nicht umbiegen. Die alte Basisarbeit (Tick-Zähler,
+  Weck-Waker, EOI) steht unverändert als `interrupts::timer_basisarbeit()`,
+  damit sichtbar bleibt: daran hat sich nichts geändert.
+- **Prozess-Start ist kein Sonderfall.** Ein neuer Prozess bekommt von Hand
+  einen Trap-Rahmen an das obere Ende seines Kernel-Stacks geschrieben — er
+  sieht aus, als wäre er schon gelaufen und gerade verdrängt worden. Daraus
+  folgt **Invariante 1**: Der erste Wechsel zu einem Prozess passiert IMMER
+  im Timer (oder Syscall), also dort, wo der Kontext von PID 0 ohnehin
+  gesichert wird. Es gibt keinen Pfad, auf dem PID 0 ohne gesicherten Kontext
+  verlassen wird.
+- **`src/prozess.rs`** — PCB (PID, Name, Zustand, Adressraum, Kernel-Stack,
+  gesicherter Kontext, Startzeit, CPU-Zeit, Präemptionen, Abgaben, Syscalls)
+  und die Tabelle als **festes Array `[Option<Prozess>; 8]`** — kein `Vec`,
+  denn der Timer-Interrupt liest sie und darf nicht allozieren. Jeder
+  Kernel-Stack hat eine **Guard-Page** (5 Seiten mappen, die unterste sofort
+  aushängen).
+- **Round-Robin, 5 Ticks = 20 ms** bei 250 Hz. Die Entscheidung ist eine
+  **reine Funktion** `wechsel_entscheiden(zustaende, aktuell,
+  scheibe_abgelaufen, freiwillig)` mit vier Regeln — Fairness ist dadurch
+  über 200 Runden nachgerechnet statt geglaubt (jeder von 4 Lauffähigen
+  bekommt exakt 50 Scheiben, in strikter Reihum-Folge).
+- **Lock-Disziplin, die neue Gefahrenstelle:** Aus Kernel-Kontext wird die
+  Tabelle immer mit `without_interrupts` gesperrt — während der Sperre kann
+  der Timer gar nicht feuern. Im Interrupt selbst nur `try_lock`: kein
+  Wechsel in diesem Tick ist harmlos, der nächste kommt in 4 ms. Und
+  **beendete Prozesse werden NIE im Interrupt abgeräumt** (Freigeben nimmt
+  Locks und Heap) — der Timer markiert, ein Kernel-Task („Prozess-Aufräumer")
+  räumt auf, und zwar erst außerhalb des Tabellen-Locks.
+- **Dauerregel II jetzt PROZESS-WEISE.** Ein Page Fault aus Ring 3 setzt den
+  Prozess auf `Beendet` und biegt den Interrupt-Rahmen auf einen
+  Ring-0-Sterbe-Stub um (Kernel-Stack des Sterbenden); der schaltet auf den
+  nächsten lauffähigen Prozess. Bewiesen: **PID 7 stirbt, PID 6 rechnet
+  weiter, der Kernel lebt** — und alle Frames kommen zurück.
+- **Neue Syscalls:** 3 = `schlafen(ms)` (der erste BLOCKIERENDE — Zustand
+  `Wartend`, der Timer weckt), 4 = `yield`, 5 = `getpid`. `yield` benutzt
+  **der Executor selbst**: Findet `sleep_if_idle` keine Arbeit, aber es gibt
+  lauffähige Prozesse, gibt er die Scheibe sofort ab statt zu `hlt`-en. Die
+  hlt-Messung rechnet die **Fremdzeit** heraus, sonst zeigte der Task-Manager
+  0 %, während zwei Prozesse rechnen.
+- **Der alte Einzelschuss-Pfad (`ring3test`) bleibt** — er führt Ring-3-Code
+  im Kontext von PID 0 mit fremdem CR3 aus, verträgt also keinen Wechsel.
+  Also **sperrt** er die Planung (`scheduler::sperre_erhoehen`). Dieselbe
+  Falle steckte im `adressraum`-Befehl (CR3 juggeln in der Shell) — auch
+  dort jetzt gesperrt. Bewiesen, dass beides koexistiert.
+- **Task-Manager zeigt jetzt ZWEI Tabellen** und macht die Architektur
+  sichtbar: oben PROZESSE (PID, Name, Zustand, CPU-Zeit, Präemptionen) —
+  präemptiv, eigener Adressraum; unten KERNEL-TASKS — kooperativ, alle
+  innerhalb von PID 0.
+- **Shell:** `prozesse`, `prozess-start [zaehler <Kennung> | schlaefer <ms> |
+  absturz]`, `prozess-stop <pid>|alle`, `praemptionstest [sekunden]` (fällt
+  am Ende ein maschinelles Urteil).
+- **BEWEISE** (`tests/scheduler.rs`, `tests/scheduler_executor.rs`, echt in
+  QEMU):
+  - **Präemptions-Beweis:** 2 Zähler-Prozesse, 1,5 s. Gemessen PID 2:
+    521 352 µs / **26 Präemptionen aus Ring 3** / **0 Abgaben**, PID 3:
+    526 047 µs / 26 / 0 (Round-Robin-Fairness bis auf 1 %!), Ausgabe-Spur
+    verschränkt. Wer nie abgibt und trotzdem vorankommt, dem wurde die CPU
+    weggenommen.
+  - **Kontext-Sicherung gegen synthetische Registersätze:** Ein Stub lädt alle
+    15 Register mit Magic-Werten, löst `int 0x80` aus; geprüft wird der
+    SAVE-Pfad (gesicherter Rahmen) UND der RESTORE-Pfad (Register danach).
+    Dazu `TrapFrame`-Layout per `offset_of!` auf alle 20 Offsets festgenagelt
+    (`size == 160` — nur so stimmt die C-ABI-Ausrichtung am `call`).
+  - **SSE bleibt unberührt:** XMM0-XMM15 mit Mustern füllen, sich über 24
+    Kontext-Wechsel verdrängen lassen, nachmessen. Der nackte Einstieg
+    sichert nur GP-Register — dass der Kernel wirklich fließkomma-frei
+    bleibt, ist damit gemessen statt gehofft.
+  - **Koexistenz mit dem ECHTEN Executor:** Kernel-Task schafft 20
+    kooperative Runden in 1242 ms (Soll 1000) neben einem endlos rechnenden
+    Prozess mit 60 Präemptionen — die Kernel-Welt verhungert nicht.
+  - **`Wartend` ist echt:** Schläfer 26 µs CPU gegen Dauerrechner 600 899 µs.
+  - **Frame-Bilanz byte-exakt null** nach jedem Test — auch nach Abstürzen.
+- **Zwei eigene Fehler, unterwegs gefunden und behoben:** (1) Die statischen
+  Kernel-Stacks landeten ohne `mut` in `.rodata` — ein schreibgeschützter
+  Stack heißt Page Fault → Double Fault → **Triple Fault ohne jede Meldung**
+  (Lektion steht jetzt im Code). (2) `spur_auswerten` zählte Beteiligte über
+  `pid as usize` als Array-Index — eine PID ist aber KEIN Tabellen-Index, sie
+  wächst monoton weiter; bei PID 12/13 verschluckte das den halben Beweis.
+- **Bewusst NICHT dabei** (`docs/scheduler-design.md` §8): Prioritäten (reines
+  Round-Robin — 2 rechnende Prozesse drücken den Desktop auf ~1/3 CPU, das
+  ist korrekt und nicht versteckt), blockierende VFS-/Socket-Syscalls (dafür
+  braucht es erst das Warte-Modell: `fs::mit_fs` sperrt OHNE Interrupts
+  auszuschalten und wäre aus einem Syscall ein Deadlock-Risiko), SMP/APIC
+  (unverändert vertagt), PCID, Einsammeln leerer Page-Tables.
+
 ### Serie 6, Teil 2: EIGENER ADRESSRAUM PRO PROZESS — echte Isolation
 - **Der zweite große Schritt in den User-Space.** Bis eben lief Ring-3-Code
   zwar unprivilegiert, aber in DENSELBEN Page Tables wie der Kernel — zwei

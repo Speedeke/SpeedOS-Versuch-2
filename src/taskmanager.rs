@@ -18,8 +18,19 @@
 // Aktualisierung 1x pro Sekunde über App::tick (wie die
 // Einstellungen-Info-Seite); die Auswahl überlebt das Neu-Laden,
 // weil sie als Task-ID gemerkt wird, nicht als Zeilen-Index.
+//
+// SEIT DEM PRÄEMPTIVEN SCHEDULER (Serie 6, Teil 3) zeigt die App ZWEI
+// Tabellen — und macht damit die Architektur-Entscheidung sichtbar:
+//   * OBEN die PROZESSE (PID, Name, Zustand, CPU-Zeit): präemptiv
+//     umgeschaltet, jeder mit eigenem Adressraum. PID 0 ist der
+//     Kernel-Prozess — also genau der Executor, dessen Tasks darunter
+//     stehen.
+//   * UNTEN die KERNEL-TASKS: kooperativ, alle INNERHALB von PID 0.
+// Wer die beiden Listen nebeneinander sieht, versteht die Zwei-Ebenen-
+// Architektur aus docs/scheduler-design.md auf einen Blick.
 
 use crate::grafik::{Icon, Rechteck, Zeichner};
+use crate::prozess::ProzessMoment;
 use crate::task::uebersicht::{self, TaskArt, TaskMoment};
 use crate::theme::{self, metrik};
 use crate::ui::widgets::{Button, Label, ListenEintrag, ScrollListe, Trennlinie};
@@ -70,6 +81,25 @@ pub fn graph_punkte(werte: &[u8], breite: i32, hoehe: i32) -> Vec<(i32, i32)> {
             (x, y)
         })
         .collect()
+}
+
+/// CPU-Zeit lesbar. Anders als `laufzeit_text` (mm:ss) braucht die
+/// VERBRAUCHTE Zeit eines Prozesses feine Auflösung: Ein Prozess, der eine
+/// halbe Sekunde gerechnet hat, darf nicht als "00:00" erscheinen — genau das
+/// hat die erste Fassung der Prozess-Tabelle getan und den Unterschied
+/// zwischen Schläfer (26 µs!) und Dauerrechner (600 ms) unsichtbar gemacht.
+/// Unter 1 s in Millisekunden, darunter/darüber in Sekunden mit Komma, ab
+/// 100 s wieder mm:ss.
+pub fn cpu_zeit_text(us: u64) -> String {
+    if us < 1_000 {
+        format!("{} us", us)
+    } else if us < 1_000_000 {
+        format!("{} ms", us / 1_000)
+    } else if us < 100_000_000 {
+        format!("{},{:03} s", us / 1_000_000, (us / 1_000) % 1_000)
+    } else {
+        laufzeit_text(us)
+    }
 }
 
 /// Laufzeit lesbar: "mm:ss", ab einer Stunde "h:mm:ss".
@@ -148,6 +178,8 @@ async fn demo_zaehler(nummer: u64) {
 pub struct TaskManagerApp {
     /// Letzte Momentaufnahme (nach Id sortiert — siehe uebersicht).
     tasks: Vec<TaskMoment>,
+    /// Die PROZESSE (präemptiv, eigener Adressraum) — nach PID sortiert.
+    prozesse: Vec<ProzessMoment>,
     /// Poll-Stände der VORIGEN Aufnahme -> Polls/s als Differenz.
     letzte_polls: BTreeMap<u64, u64>,
     letzte_aufnahme_us: u64,
@@ -166,6 +198,7 @@ impl TaskManagerApp {
     pub fn neu() -> Self {
         let mut app = TaskManagerApp {
             tasks: Vec::new(),
+            prozesse: Vec::new(),
             letzte_polls: BTreeMap::new(),
             letzte_aufnahme_us: 0,
             polls_pro_s: BTreeMap::new(),
@@ -185,6 +218,10 @@ impl TaskManagerApp {
     fn aktualisieren(&mut self) {
         let jetzt_us = zeit::us_seit_boot();
         self.tasks = uebersicht::momentaufnahme();
+        // Die Prozess-Tabelle ist ein BLATT-Lock (mit ausgeschalteten
+        // Interrupts genommen) — unter dem MANAGER-Lock also erlaubt, genau
+        // wie die Task-Übersicht.
+        self.prozesse = crate::scheduler::momentaufnahme();
 
         // Polls/s: Differenz zur letzten Aufnahme, auf Sekunden
         // normiert (der Tick kommt nur UNGEFÄHR sekündlich).
@@ -253,11 +290,13 @@ impl App for TaskManagerApp {
         // heap_statistik liefert (belegt, frei) — gesamt ist die Summe.
         let (heap_belegt, heap_frei) = self.heap.unwrap_or((0, 0));
         let kopf_text = format!(
-            "CPU:   {:>3} %\nHeap:  {} von {}\nTasks: {}",
+            "CPU:      {:>3} %\nHeap:     {} von {}\nTasks:    {}\nProzesse: {}  (Wechsel: {})",
             self.cpu_prozent,
             crate::explorer::groesse_formatieren(heap_belegt),
             crate::explorer::groesse_formatieren(heap_belegt + heap_frei),
             self.tasks.len(),
+            self.prozesse.len(),
+            crate::scheduler::wechsel_gesamt(),
         );
         let kopf = hbox(vec![
             Box::new(Label::neu(&kopf_text)) as Box<dyn Widget>,
@@ -265,7 +304,37 @@ impl App for TaskManagerApp {
             Box::new(CpuGraph { werte: self.cpu_verlauf.clone() }),
         ]);
 
-        // --- Tabelle: Kopfzeile + eine Zeile pro Task ---
+        // --- PROZESS-Tabelle (präemptiv): PID, Name, Zustand, CPU-Zeit ---
+        // Präemptionen stehen mit dabei, denn sie sind der sichtbare
+        // Unterschied zur kooperativen Welt: Sie zählen, wie oft dem Prozess
+        // die CPU WEGGENOMMEN wurde.
+        let prozess_kopf = format!(
+            " {:>3}  {:<24} {:<11} {:>9} {:>7}",
+            "PID", "Name", "Zustand", "CPU-Zeit", "Praeem."
+        );
+        let prozess_eintraege = self
+            .prozesse
+            .iter()
+            .map(|prozess| {
+                let name: String = prozess.name.chars().take(24).collect();
+                ListenEintrag {
+                    icon: None,
+                    text: format!(
+                        "{:>3}  {:<24} {:<11} {:>9} {:>7}",
+                        prozess.pid,
+                        name,
+                        prozess.zustand.text(),
+                        cpu_zeit_text(prozess.cpu_us),
+                        prozess.praemptionen,
+                    ),
+                }
+            })
+            .collect();
+        // Reine Anzeige-Liste (keine Nachrichten, kein Fokus) — beendet werden
+        // Prozesse über die Shell (`prozess-stop <pid>`).
+        let prozess_liste = ScrollListe::neu(prozess_eintraege, 0, 0).mit_layout(160, 1);
+
+        // --- TASK-Tabelle (kooperativ): Kopfzeile + eine Zeile pro Task ---
         // (Monospace-Font: Spalten entstehen durch feste Breiten.)
         let kopfzeile = format!(
             " {:>3}  {:<22} {:<7} {:>8} {:>8}  {}",
@@ -293,7 +362,8 @@ impl App for TaskManagerApp {
             .collect();
         let liste = ScrollListe::mit_index_nachrichten(eintraege, N_LISTE, N_LISTE)
             .mit_auswahl(auswahl_index)
-            .mit_fokus(true);
+            .mit_fokus(true)
+            .mit_layout(160, 2);
 
         // --- Fußzeile: Aktionen + die ehrliche Kooperativ-Zeile ---
         let beenden_erlaubt = self.auswahl_task().map(|t| t.beendbar).unwrap_or(false);
@@ -307,12 +377,22 @@ impl App for TaskManagerApp {
         Box::new(vbox(vec![
             Box::new(kopf) as Box<dyn Widget>,
             Box::new(Trennlinie),
+            // ZWEI EBENEN, sichtbar getrennt:
+            Box::new(Label::neu("PROZESSE — praeemptiv, eigener Adressraum")),
+            Box::new(Label::sekundaer(&prozess_kopf)),
+            Box::new(prozess_liste),
+            Box::new(Trennlinie),
+            Box::new(Label::neu(
+                "KERNEL-TASKS — kooperativ, alle innerhalb von PID 0",
+            )),
             Box::new(Label::sekundaer(&kopfzeile)),
             Box::new(liste),
             Box::new(aktionen),
             Box::new(Label::sekundaer(
-                "Kooperativ: 'Beenden' laesst den Task beim naechsten Durchlauf\n\
-                 an seinem await-Punkt fallen. Kernel-/Fenster-Tasks sind geschuetzt.",
+                "Kooperativ: 'Beenden' laesst den Task beim naechsten Durchlauf an\n\
+                 seinem await-Punkt fallen; Kernel-/Fenster-Tasks sind geschuetzt.\n\
+                 Prozesse dagegen werden per Zeitscheibe (20 ms) umgeschaltet —\n\
+                 beenden mit 'prozess-stop <pid>' in der Shell.",
             )),
         ]))
     }
@@ -406,6 +486,26 @@ mod tests {
         assert_eq!(graph_punkte(&[50], 60, 101).len(), 1);
         // Werte über 100 werden geklemmt statt aus dem Kasten zu laufen.
         assert_eq!(graph_punkte(&[255], 60, 101)[0].1, 0);
+    }
+
+    /// CPU-Zeit-Formatierung: Genau die feine Auflösung, die der
+    /// Prozess-Tabelle vorher gefehlt hat (ein Schläfer mit 26 µs und ein
+    /// Dauerrechner mit 600 ms sahen beide wie "00:00" aus).
+    #[test_case]
+    fn test_cpu_zeit_text() {
+        assert_eq!(cpu_zeit_text(0), "0 us");
+        assert_eq!(cpu_zeit_text(26), "26 us");
+        assert_eq!(cpu_zeit_text(999), "999 us");
+        assert_eq!(cpu_zeit_text(1_000), "1 ms");
+        assert_eq!(cpu_zeit_text(600_899), "600 ms");
+        assert_eq!(cpu_zeit_text(999_999), "999 ms");
+        assert_eq!(cpu_zeit_text(1_000_000), "1,000 s");
+        assert_eq!(cpu_zeit_text(1_242_638), "1,242 s");
+        assert_eq!(cpu_zeit_text(99_999_999), "99,999 s");
+        // Ab 100 s wieder die kompakte mm:ss-Form.
+        assert_eq!(cpu_zeit_text(100_000_000), "01:40");
+        // Und: Ein Schlaefer und ein Rechner sind jetzt UNTERSCHEIDBAR.
+        assert_ne!(cpu_zeit_text(26), cpu_zeit_text(600_899));
     }
 
     /// Laufzeit-Formatierung: Sekunden, Minuten, Stundenübergang.

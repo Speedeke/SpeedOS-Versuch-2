@@ -210,6 +210,13 @@ impl Executor {
     /// unserer Prüfung ("Queue leer") und dem hlt, würde die CPU
     /// schlafen gehen, obwohl gerade Arbeit hereingekommen ist — bis
     /// zum nächsten Timer-Tick wäre die Eingabe verzögert.
+    ///
+    /// SEIT DEM PRÄEMPTIVEN SCHEDULER (Serie 6, Teil 3): Dieser Executor ist
+    /// der KERNEL-PROZESS (PID 0), und damit ist dieses `hlt` der
+    /// Idle-Zustand des ganzen Systems — ein separater Idle-Prozess wäre
+    /// überflüssig. Gibt es aber rechnende User-Prozesse, wäre Schlafen
+    /// falsch: dann geben wir die Zeitscheibe SOFORT ab (yield), statt bis
+    /// zum nächsten Tick zu warten.
     fn sleep_if_idle(&self) {
         use x86_64::instructions::interrupts::{self, enable_and_hlt};
 
@@ -222,12 +229,27 @@ impl Executor {
             && spawn_queue_leer
             && !self.ueberlauf.load(Ordering::Relaxed)
         {
+            // Ist ein User-Prozess lauffähig? Dann nicht schlafen, sondern
+            // ihm den Rest unserer Scheibe schenken. (Die Abfrage nimmt einen
+            // Lock, aber Interrupts sind aus — es kann nichts dazwischen.)
+            if crate::scheduler::andere_lauffaehig() {
+                interrupts::enable();
+                crate::scheduler::abgeben();
+                return;
+            }
             // RUHE messen: Der TSC läuft auch mit Interrupts aus
             // weiter; die Handler-Zeit nach dem Aufwachen zählt mit
             // zur Ruhe — Handler sind minimal, das ist ehrlich genug.
+            // ABER: Während des hlt kann uns der Scheduler verdrängt haben.
+            // Diese FREMDZEIT ist Arbeit (nur eben nicht unsere) und darf
+            // nicht als Ruhe gelten, sonst zeigt der Task-Manager 0 % an,
+            // während zwei Prozesse rechnen.
             let start_us = crate::zeit::us_seit_boot();
+            let fremd_vorher = crate::scheduler::fremdzeit_us();
             enable_and_hlt();
-            uebersicht::cpu_verbuchen(0, crate::zeit::us_seit_boot() - start_us);
+            let dauer_us = crate::zeit::us_seit_boot() - start_us;
+            let fremd_us = crate::scheduler::fremdzeit_us() - fremd_vorher;
+            uebersicht::cpu_verbuchen(fremd_us, dauer_us.saturating_sub(fremd_us));
         } else {
             interrupts::enable();
         }

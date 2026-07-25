@@ -32,7 +32,8 @@
 // ==========================================================================
 
 use crate::adressraum::{self, AdressRaum};
-use crate::{gdt, serial_print, serial_println};
+use crate::prozess::TrapFrame;
+use crate::{gdt, scheduler, serial_print, serial_println};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 use x86_64::structures::paging::PageTableFlags;
@@ -66,12 +67,29 @@ const USER_STACK_UNTEN: u64 = USER_STACK_TOP - (STACK_SEITEN as u64) * 4096;
 /// Die Nachricht, die der Ring-3-Code per Syscall drucken soll.
 const NACHRICHT: &[u8] = b"Hallo aus Ring 3 - mit eigenem Adressraum!\n";
 
-/// Syscall-Nummern (in rax).
-const SYS_DEBUG_PRINT: u64 = 0;
-const SYS_EXIT: u64 = 1;
+// ---------------------------------------------------------------------------
+// Syscall-Nummern (in rax). Argumente in rdi/rsi, Rückgabe in rax
+// (Linux-x86_64-Konvention als erprobte Vorlage).
+// ---------------------------------------------------------------------------
+
+/// debug_print(ptr, len): Bytes des Prozesses seriell ausgeben (copy-IN).
+pub const SYS_DEBUG_PRINT: u64 = 0;
+/// exit(): Prozess beenden.
+pub const SYS_EXIT: u64 = 1;
 /// zeit_ms(ptr): schreibt die Millisekunden seit dem Boot als 8 Byte in den
 /// User-Puffer — der erste Syscall, der copy-OUT benutzt (die Rückrichtung).
-const SYS_ZEIT_MS: u64 = 2;
+pub const SYS_ZEIT_MS: u64 = 2;
+/// schlafen(ms): Prozess auf `Zustand::Wartend` legen; der Timer weckt ihn
+/// (Serie 6, Teil 3 — der erste BLOCKIERENDE Syscall).
+pub const SYS_SCHLAFEN: u64 = 3;
+/// yield(): Zeitscheibe freiwillig abgeben. Auch der KERNEL-Prozess benutzt
+/// ihn (Executor::sleep_if_idle) — siehe scheduler::abgeben.
+pub const SYS_YIELD: u64 = 4;
+/// getpid(): eigene Prozess-Nummer.
+pub const SYS_GETPID: u64 = 5;
+/// NUR FÜR TESTS: kopiert den eingehenden Trap-Rahmen weg, damit ein Test
+/// prüfen kann, dass die Kontext-SICHERUNG jedes Register korrekt erfasst.
+pub const SYS_KONTEXT_TEST: u64 = 6;
 
 // ---------------------------------------------------------------------------
 // DAUERREGEL (I): der geprüfte copy-in-Helfer
@@ -267,37 +285,18 @@ pub fn copy_out_prozess(
 //     IDT-Umweg) ist ein sinnvoller späterer Optimierungsschritt.
 //
 // Der Handler ist ein NACKTER (naked) Einstieg in Assembler: Er sichert ALLE
-// General-Register (baut damit einen `TrapFrame` auf dem Kernel-Trap-Stack,
-// RSP0), ruft den Rust-Dispatcher mit einem Zeiger darauf, stellt die Register
-// wieder her und kehrt per `iretq` nach Ring 3 zurück.
-
-/// Das vollständige, gesicherte User-Register-Bild auf dem Trap-Stack.
-/// Reihenfolge = umgekehrte Push-Reihenfolge des Einstiegs; danach folgt der
-/// von der CPU gepushte Interrupt-Rahmen (rip/cs/rflags/rsp/ss).
-#[repr(C)]
-struct TrapFrame {
-    r15: u64,
-    r14: u64,
-    r13: u64,
-    r12: u64,
-    r11: u64,
-    r10: u64,
-    r9: u64,
-    r8: u64,
-    rbp: u64,
-    rdi: u64,
-    rsi: u64,
-    rdx: u64,
-    rcx: u64,
-    rbx: u64,
-    rax: u64,
-    // ab hier: von der CPU beim Trap gepusht
-    rip: u64,
-    cs: u64,
-    rflags: u64,
-    rsp: u64,
-    ss: u64,
-}
+// General-Register (baut damit einen `prozess::TrapFrame` auf dem Kernel-Trap-
+// Stack, RSP0) und ruft den Rust-Dispatcher mit einem Zeiger darauf.
+//
+// SEIT DEM SCHEDULER (Serie 6, Teil 3): Der Dispatcher LIEFERT einen Rahmen
+// ZURÜCK — normalerweise denselben, bei `yield`/`exit`/`schlafen` aber den
+// eines ANDEREN Prozesses. Wiederhergestellt wird er von
+// `schalte_auf_rahmen` (scheduler.rs), dem einzigen Kontext-Lade-Punkt des
+// Kernels. Damit ist ein Syscall ein vollwertiger Wechsel-Punkt, und
+// Präemption und freiwillige Abgabe teilen genau einen Code-Pfad.
+//
+// Der Trap-Rahmen selbst wohnt jetzt in prozess.rs (er ist nicht mehr nur
+// „Syscall-Kram", sondern DER gesicherte Prozess-Kontext).
 
 // Der nackte Assembler-Einstiegspunkt für INT 0x80. global_asm ist robuster
 // als eine naked fn (versionsunabhängig) und zeigt den Ablauf glasklar.
@@ -310,13 +309,10 @@ core::arch::global_asm!(
     "push r8",  "push r9",  "push r10", "push r11",
     "push r12", "push r13", "push r14", "push r15",
     "mov rdi, rsp",              // Argument 1 = Zeiger auf den TrapFrame
-    "call syscall_dispatch",     // Rust-Dispatcher (liest/schreibt den Frame)
-    // Register wiederherstellen (rax trägt jetzt den Rückgabewert).
-    "pop r15", "pop r14", "pop r13", "pop r12",
-    "pop r11", "pop r10", "pop r9",  "pop r8",
-    "pop rbp", "pop rdi", "pop rsi",
-    "pop rdx", "pop rcx", "pop rbx", "pop rax",
-    "iretq",
+    "call syscall_dispatch",     // Rust-Dispatcher; rax = Rahmen, mit dem es
+                                 // weitergeht (evtl. ein ANDERER Prozess!)
+    "mov rdi, rax",
+    "jmp schalte_auf_rahmen",    // gemeinsamer Ausstieg (scheduler.rs)
 );
 
 extern "C" {
@@ -328,23 +324,55 @@ pub fn syscall_handler_adresse() -> u64 {
     syscall_entry as *const () as u64
 }
 
-/// Der Rust-Dispatcher: bekommt einen Zeiger auf den gesicherten User-Kontext,
-/// liest die Syscall-Nummer (rax) + Argumente und schreibt den Rückgabewert
-/// nach rax zurück. Bei `exit` biegt er den Interrupt-Rahmen auf den Kernel-
-/// Recovery-Punkt um (zurück in den Kernel statt nach Ring 3).
+/// Der Rust-Dispatcher: bekommt einen Zeiger auf den gesicherten Kontext,
+/// liest die Syscall-Nummer (rax) + Argumente, schreibt den Rückgabewert nach
+/// rax — und LIEFERT den Rahmen, mit dem es weitergeht.
+///
+/// Meist ist das derselbe Rahmen (der Prozess läuft weiter). Bei
+/// `yield`/`schlafen`/`exit` ist es der Rahmen eines ANDEREN Prozesses: dann
+/// ist dieser Syscall ein Kontext-Wechsel. Für den alten Einzelschuss-Pfad
+/// (`ring3test`, kein eingeplanter Prozess) biegt `exit` wie bisher auf den
+/// setjmp-Landeplatz im Kernel um.
+///
+/// WICHTIGE RANDBEDINGUNG (docs/scheduler-design.md §8): Ein Syscall läuft im
+/// Kontext eines präemptiv geplanten Prozesses. Er darf deshalb NUR Locks
+/// anfassen, die der Kernel ausschliesslich mit ausgeschalteten Interrupts
+/// hält (SERIAL, Blatt-Locks, die Prozess-Tabelle) — sonst könnte er auf einen
+/// Lock warten, den der verdrängte Kernel-Prozess hält: Deadlock. Alles
+/// darunter (VFS, Sockets) braucht erst das Warte-Modell.
 #[no_mangle]
-extern "C" fn syscall_dispatch(frame: *mut TrapFrame) {
+extern "C" fn syscall_dispatch(frame: *mut TrapFrame) -> *mut TrapFrame {
     // unsafe: `frame` zeigt auf unseren eben gesicherten Register-Block auf
-    // dem RSP0-Stack — gültig für die Dauer des Handlers.
+    // dem Kernel-Stack des aufrufenden Prozesses — gültig für die Dauer des
+    // Handlers.
     let f = unsafe { &mut *frame };
+    scheduler::syscall_zaehlen();
     match f.rax {
         SYS_DEBUG_PRINT => {
             // debug_print(ptr = rdi, len = rsi) — copy-in, dann seriell.
             match copy_in(f.rdi, f.rsi as usize) {
                 Ok(bytes) => {
-                    for &b in &bytes {
-                        serial_print!("{}", b as char);
+                    // In EINEM Stück ausgeben (ein Lock-Zyklus statt einem pro
+                    // Byte) — der Zähler-Prozess druckt oft.
+                    match core::str::from_utf8(&bytes) {
+                        Ok(text) => serial_print!("{}", text),
+                        Err(_) => {
+                            for &b in &bytes {
+                                serial_print!("{}", b as char);
+                            }
+                        }
                     }
+                    // Für den Präemptions-BEWEIS: Wer hat wann gedruckt? Der
+                    // lock-freie Spur-Ring hält die Reihenfolge fest (das
+                    // letzte druckbare Zeichen ist bei unseren Zähler-
+                    // Prozessen gerade die Zählerziffer).
+                    let zeichen = bytes
+                        .iter()
+                        .rev()
+                        .copied()
+                        .find(|b| b.is_ascii_graphic())
+                        .unwrap_or(b'?');
+                    scheduler::spur_melden(scheduler::laufende_user_pid(), zeichen);
                     f.rax = bytes.len() as u64; // Rückgabe: gedruckte Bytes
                 }
                 Err(fehler) => {
@@ -352,6 +380,29 @@ extern "C" fn syscall_dispatch(frame: *mut TrapFrame) {
                     f.rax = u64::MAX; // Fehler-Kennung
                 }
             }
+        }
+        SYS_YIELD => {
+            // Freiwillige Abgabe: der einzige Syscall, der NICHTS tut, ausser
+            // die Zeitscheibe zurückzugeben.
+            f.rax = 0;
+            return scheduler::syscall_abgeben(frame);
+        }
+        SYS_SCHLAFEN => {
+            // schlafen(ms = rdi): Zustand::Wartend, der Timer weckt wieder.
+            f.rax = 0;
+            if let Some(neuer) = scheduler::syscall_schlafen(frame, f.rdi) {
+                return neuer;
+            }
+        }
+        SYS_GETPID => {
+            f.rax = scheduler::laufende_user_pid() as u64;
+        }
+        SYS_KONTEXT_TEST => {
+            // Nur Tests: den EINGEHENDEN Rahmen wegkopieren. Damit prüft
+            // tests/scheduler.rs, dass die Kontext-Sicherung wirklich jedes
+            // einzelne Register erfasst (synthetische Magic-Werte).
+            kontext_test_sichern(*f);
+            f.rax = KONTEXT_TEST_ANTWORT;
         }
         SYS_ZEIT_MS => {
             // zeit_ms(ptr = rdi): 8 Byte in den User-Puffer schreiben.
@@ -368,10 +419,16 @@ extern "C" fn syscall_dispatch(frame: *mut TrapFrame) {
             }
         }
         SYS_EXIT => {
-            // Zurück in den Kernel: den CPU-Interrupt-Rahmen auf den
-            // LANDEPLATZ umbiegen (Ring 0). Der iretq am Ende des Handlers
-            // springt dann dorthin statt nach Ring 3; der Landeplatz stellt
-            // den gesicherten Kernel-Kontext wieder her.
+            // (a) EINGEPLANTER Prozess: beenden und auf den nächsten
+            //     lauffähigen Prozess umschalten (der Scheduler-Weg).
+            if let Some(neuer) = scheduler::syscall_beenden(frame) {
+                return neuer;
+            }
+            // (b) EINZELSCHUSS-PFAD (ring3test, kein Prozess): Zurück in den
+            //     Kernel, indem der CPU-Interrupt-Rahmen auf den LANDEPLATZ
+            //     umgebogen wird (Ring 0). Der iretq springt dann dorthin
+            //     statt nach Ring 3; der Landeplatz stellt den gesicherten
+            //     Kernel-Kontext wieder her.
             f.rip = recovery_rip();
             f.rsp = recovery_rsp();
             f.cs = gdt::kernel_code_selektor();
@@ -382,6 +439,137 @@ extern "C" fn syscall_dispatch(frame: *mut TrapFrame) {
             serial_println!("[syscall] unbekannte Nummer {}", andere);
             f.rax = u64::MAX;
         }
+    }
+    // Normalfall: derselbe Prozess läuft weiter.
+    frame
+}
+
+// ---------------------------------------------------------------------------
+// Der Kontext-Sicherungs-TEST (synthetische Register-Sätze)
+// ---------------------------------------------------------------------------
+//
+// Die Kontext-Sicherung ist die Stelle, an der ein Fehler NICHT als Absturz
+// erscheint, sondern als „irgendein Register hatte plötzlich einen falschen
+// Wert" — praktisch nicht diagnostizierbar. Deshalb prüfen wir sie direkt:
+// Ein Assembler-Stub lädt ALLE General-Register mit unverwechselbaren
+// Magic-Werten, löst `int 0x80` aus und schreibt danach seine Register in
+// einen zweiten Block. Der Test vergleicht beides.
+//   * Block 1 (GESICHERT) beweist den SAVE-Pfad: kam alles im TrapFrame an?
+//   * Block 2 (NACHHER)   beweist den RESTORE-Pfad: kam alles zurück?
+
+/// Rückgabewert von SYS_KONTEXT_TEST (unverwechselbar, damit der Test auch
+/// den rax-Rückweg prüfen kann).
+pub const KONTEXT_TEST_ANTWORT: u64 = 0x5EED_0000_C0DE_0042;
+
+/// Der gesicherte Rahmen des letzten SYS_KONTEXT_TEST.
+static KONTEXT_GESICHERT: spin::Mutex<Option<TrapFrame>> = spin::Mutex::new(None);
+
+fn kontext_test_sichern(rahmen: TrapFrame) {
+    // Blatt-Lock, im Syscall-Kontext erlaubt (niemand hält ihn lange).
+    *KONTEXT_GESICHERT.lock() = Some(rahmen);
+}
+
+/// Der beim letzten `kontext_test_ausfuehren()` gesicherte Rahmen.
+pub fn kontext_gesichert() -> Option<TrapFrame> {
+    *KONTEXT_GESICHERT.lock()
+}
+
+// Der Stub. Er darf die callee-saved Register (rbx, rbp, r12-r15) nicht
+// dauerhaft zerstören — deshalb erst sichern, am Ende zurückholen.
+// Nach `int 0x80` werden ALLE Register in TrapFrame-Reihenfolge gepusht und
+// als Zeiger an Rust gegeben (`kontext_test_nachher`); die fünf
+// CPU-Rahmen-Felder werden mit 0 aufgefüllt, damit dieselbe Struktur passt.
+core::arch::global_asm!(
+    ".global kontext_test_stub",
+    "kontext_test_stub:",
+    // Die callee-saved Register des Aufrufers retten (C-ABI-Pflicht).
+    "push rbx", "push rbp", "push r12", "push r13", "push r14", "push r15",
+    // AUSRICHTUNG: Beim Betreten ist RSP ≡ 8 (mod 16) — die Rücksprung-
+    // Adresse liegt drauf. 6 Pushes ändern daran nichts (48 ≡ 0), also
+    // schaffen wir hier die fehlenden 8 Byte, damit RSP am `call` unten
+    // 16-ausgerichtet ist.
+    "sub rsp, 8",
+    // Alle Register mit unverwechselbaren Magic-Werten laden.
+    "movabs rbx, 0x1111111111111111",
+    "movabs rcx, 0x2222222222222222",
+    "movabs rdx, 0x3333333333333333",
+    "movabs rsi, 0x4444444444444444",
+    "movabs rdi, 0x5555555555555555",
+    "movabs rbp, 0x6666666666666666",
+    "movabs r8,  0x7777777777777777",
+    "movabs r9,  0x0808080808080808",
+    "movabs r10, 0x0A0A0A0A0A0A0A0A",
+    "movabs r11, 0x0B0B0B0B0B0B0B0B",
+    "movabs r12, 0x0C0C0C0C0C0C0C0C",
+    "movabs r13, 0x0D0D0D0D0D0D0D0D",
+    "movabs r14, 0x0E0E0E0E0E0E0E0E",
+    "movabs r15, 0x7F7F7F7F7F7F7F7F",
+    "mov rax, 6",                 // SYS_KONTEXT_TEST
+    "int 0x80",
+    // Jetzt der Zustand NACH der Rückkehr — in TrapFrame-Reihenfolge pushen
+    // (erst die fünf CPU-Felder als 0, dann rax..r15).
+    "push 0", "push 0", "push 0", "push 0", "push 0",   // ss/rsp/rflags/cs/rip
+    "push rax", "push rbx", "push rcx", "push rdx",
+    "push rsi", "push rdi", "push rbp",
+    "push r8",  "push r9",  "push r10", "push r11",
+    "push r12", "push r13", "push r14", "push r15",
+    "mov rdi, rsp",
+    "call kontext_test_nachher",
+    "add rsp, 168",               // 20 Qwords + die 8 Ausrichtungs-Bytes
+    "pop r15", "pop r14", "pop r13", "pop r12", "pop rbp", "pop rbx",
+    "ret",
+);
+
+extern "C" {
+    fn kontext_test_stub();
+}
+
+/// Der Register-Zustand NACH der Syscall-Rückkehr.
+static KONTEXT_NACHHER: spin::Mutex<Option<TrapFrame>> = spin::Mutex::new(None);
+
+/// Wird vom Stub gerufen (mit einem Zeiger auf den gepushten Block).
+#[no_mangle]
+extern "C" fn kontext_test_nachher(rahmen: *const TrapFrame) {
+    // unsafe: Der Stub hat 20 Qwords in TrapFrame-Reihenfolge gepusht und
+    // zeigt genau darauf.
+    let kopie = unsafe { *rahmen };
+    *KONTEXT_NACHHER.lock() = Some(kopie);
+}
+
+/// Der Register-Zustand nach dem letzten `kontext_test_ausfuehren()`.
+pub fn kontext_nachher() -> Option<TrapFrame> {
+    *KONTEXT_NACHHER.lock()
+}
+
+/// Führt den Kontext-Sicherungs-Test aus (Ring 0 genügt: gesichert und
+/// wiederhergestellt wird auf beiden Privilegstufen mit demselben Code).
+pub fn kontext_test_ausfuehren() {
+    *KONTEXT_GESICHERT.lock() = None;
+    *KONTEXT_NACHHER.lock() = None;
+    // unsafe: Ein reiner Assembler-Aufruf, der nur Register setzt, `int 0x80`
+    // auslöst und alle callee-saved Register wiederherstellt.
+    unsafe { kontext_test_stub() };
+}
+
+/// Die erwarteten Magic-Werte (Reihenfolge wie im Stub) für den Test.
+pub fn kontext_test_erwartung() -> TrapFrame {
+    TrapFrame {
+        rbx: 0x1111_1111_1111_1111,
+        rcx: 0x2222_2222_2222_2222,
+        rdx: 0x3333_3333_3333_3333,
+        rsi: 0x4444_4444_4444_4444,
+        rdi: 0x5555_5555_5555_5555,
+        rbp: 0x6666_6666_6666_6666,
+        r8: 0x7777_7777_7777_7777,
+        r9: 0x0808_0808_0808_0808,
+        r10: 0x0A0A_0A0A_0A0A_0A0A,
+        r11: 0x0B0B_0B0B_0B0B_0B0B,
+        r12: 0x0C0C_0C0C_0C0C_0C0C,
+        r13: 0x0D0D_0D0D_0D0D_0D0D,
+        r14: 0x0E0E_0E0E_0E0E_0E0E,
+        r15: 0x7F7F_7F7F_7F7F_7F7F,
+        rax: SYS_KONTEXT_TEST,
+        ..TrapFrame::default()
     }
 }
 
@@ -512,6 +700,14 @@ fn nach_ring3(raum: &mut AdressRaum, user_entry: u64, user_stack: u64) {
     let ucs = gdt::user_code_selektor();
     let uds = gdt::user_data_selektor();
 
+    // SCHEDULER-SPERRE (Serie 6, Teil 3): Dieser Pfad führt Ring-3-Code IM
+    // KONTEXT DES KERNEL-PROZESSES aus, mit fremdem CR3 und ohne PCB. Käme
+    // hier ein Kontext-Wechsel dazwischen, würde PID 0 später mit
+    // Kernel-CR3 mitten im User-Code fortgesetzt — Absturz. Der Einzelschuss-
+    // Pfad bricht die Invariante des Schedulers bewusst, also sperrt er die
+    // Planung, solange er läuft. Es ist die EINZIGE Stelle mit dieser Sperre.
+    scheduler::sperre_erhoehen();
+
     // Adressraum-Wechsel: ab hier ist der Prozess-Adressraum aktiv.
     raum.aktivieren();
     RING3_AKTIV.store(true, Ordering::SeqCst);
@@ -531,6 +727,8 @@ fn nach_ring3(raum: &mut AdressRaum, user_entry: u64, user_stack: u64) {
     // Zurück in den Kernel-Adressraum — egal ob der Prozess sauber beendet
     // hat oder abgestürzt ist. Diese Zeile MUSS auf beiden Wegen laufen.
     adressraum::kernel_aktivieren();
+    // Und ebenso die Sperre lösen (beide Rückwege kommen hier vorbei).
+    scheduler::sperre_senken();
 }
 
 // ---------------------------------------------------------------------------
