@@ -717,6 +717,63 @@ pub fn laufende_user_pid() -> Pid {
     }
 }
 
+/// Führt eine Operation auf der HANDLE-TABELLE des laufenden Prozesses aus
+/// (Serie 6, Teil 4). Das ist der einzige Weg, wie ein Syscall an Handles
+/// kommt — und dadurch kann er per Konstruktion nur die des AUFRUFENDEN
+/// Prozesses sehen.
+///
+/// `Err(Fehler::UngueltigerHandle)`, wenn gar kein User-Prozess läuft: Ein
+/// Syscall aus dem Kernel-Prozess (z. B. der Executor über `yield`) hat keine
+/// Handle-Tabelle — und soll auch keine bekommen.
+pub fn mit_handles<T>(
+    f: impl FnOnce(&mut crate::syscall::handle::HandleTabelle) -> T,
+) -> Result<T, crate::syscall::Fehler> {
+    let aktuell = AKTUELL.load(Ordering::Relaxed);
+    if aktuell == KERNEL_SLOT {
+        return Err(crate::syscall::Fehler::UngueltigerHandle);
+    }
+    // try_lock statt lock: Im Syscall sind Interrupts aus, also hält die
+    // Tabelle gerade niemand — aber warten würden wir hier nie (siehe die
+    // Lock-Disziplin in syscall/mod.rs).
+    let mut tabelle = TABELLE.try_lock().ok_or(crate::syscall::Fehler::Belegt)?;
+    let prozess = tabelle[aktuell]
+        .as_mut()
+        .ok_or(crate::syscall::Fehler::UngueltigerHandle)?;
+    Ok(f(&mut prozess.handles))
+}
+
+/// Zugriff auf den ADRESSRAUM eines Prozesses (Diagnose und Tests: So legt der
+/// Kernel Daten in einen Prozess, ohne dessen Adressraum zu aktivieren —
+/// dasselbe Muster wie beim künftigen ELF-Loader).
+pub fn mit_prozess_raum<T>(
+    pid: Pid,
+    f: impl FnOnce(&mut adressraum::AdressRaum) -> T,
+) -> Option<T> {
+    mit_tabelle(|tabelle| {
+        for prozess in tabelle.iter_mut().flatten() {
+            if prozess.pid == pid {
+                return prozess.raum.as_mut().map(f);
+            }
+        }
+        None
+    })
+}
+
+/// Wie viele Handles hält ein Prozess offen? (Leak-Test)
+pub fn handle_anzahl(pid: Pid) -> Option<(usize, usize)> {
+    mit_tabelle(|tabelle| {
+        for prozess in tabelle.iter_mut().flatten() {
+            if prozess.pid == pid {
+                return Some((
+                    prozess.handles.anzahl_offen(),
+                    prozess.handles.anzahl_sockets(),
+                ));
+            }
+        }
+        None
+    })
+}
+
 /// Nimmt einen fertig gebauten Prozess in die Tabelle auf ("einplanen", NICHT
 /// "starten"): Die CPU bekommt er erst beim nächsten Timer-Tick. Genau deshalb
 /// gibt es keinen Pfad, auf dem der Kernel-Prozess ohne gesicherten Kontext
@@ -853,7 +910,7 @@ pub fn abgeben() {
     // den Prozess und kehrt hierher zurück, sobald wir wieder dran sind;
     // alle Register werden aus dem Trap-Rahmen wiederhergestellt.
     unsafe {
-        core::arch::asm!("int 0x80", inout("rax") crate::ring3::SYS_YIELD => _);
+        core::arch::asm!("int 0x80", inout("rax") crate::syscall::SYS_YIELD => _);
     }
 }
 

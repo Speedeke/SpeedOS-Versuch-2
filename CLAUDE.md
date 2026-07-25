@@ -420,8 +420,8 @@
   kooperativ). SYSCALL-RANDBEDINGUNG (Entwurf §8): Ein Syscall darf nur Locks
   anfassen, die im Kernel AUSSCHLIESSLICH mit ausgeschalteten Interrupts
   gehalten werden (KONSOLE/FRAMEBUFFER/MANAGER/SERIAL/Blatt-Locks erfüllen
-  das) — `fs::mit_fs` NICHT, deshalb braucht ein VFS-Syscall erst das
-  Warte-Modell. BEWEISE (`tests/scheduler.rs`, `tests/scheduler_executor.rs`):
+  das) — `fs::mit_fs` NICHT; in Teil 4 gelöst über `syscall::mit_vfs`
+  (try_lock + Wartefenster), siehe den ABI-Eintrag unten. BEWEISE (`tests/scheduler.rs`, `tests/scheduler_executor.rs`):
   2 Zähler-Prozesse ohne jede Abgabe → je 26 Präemptionen aus Ring 3, 0
   Abgaben, verschränkte Ausgabe, CPU-Zeit auf 1 % gleich; Kontext-Sicherung
   gegen synthetische Registersätze (SAVE- UND RESTORE-Pfad) + TrapFrame-Layout
@@ -434,6 +434,57 @@
   Einzelschuss-Pfad (`ring3test`) und der `adressraum`-Befehl juggeln CR3 im
   Kontext von PID 0 und SPERREN deshalb die Planung
   (`scheduler::sperre_erhoehen/senken`) — die einzigen zwei Stellen.
+- **DIE SYSCALL-ABI (Serie 6, Teil 4, Juli 2026, `src/syscall/`) — der Kernel
+  wird GEBETEN:** DIE Tabelle mit jeder Nummer, jedem Argument, jeder Rückgabe
+  und jedem Fehler steht in **docs/syscalls.md**. AB JETZT GILT: Eine Änderung
+  daran ist eine bewusste ABI-ÄNDERUNG; `syscall::tests::test_abi_nummern_stabil`
+  und `datei::tests::test_abi_strukturen_stabil` nageln Nummern und
+  Struktur-Layouts fest. KONVENTION: Nummer in rax, Argumente in
+  rdi/rsi/rdx/r10, **Fehlercode in rax (0 = Ok), Ergebnis in rdx** (zwei
+  Register statt negativer errno, weil ein Ergebnis jeden u64-Wert annehmen
+  darf); rax und rdx sind AUSGABE-Register und werden NICHT erhalten, alle
+  übrigen GP-Register und XMM schon. Puffer/Pfade IMMER als (Zeiger, Länge),
+  NIE nullterminiert — der Kernel sucht nie ein Terminator-Byte in fremdem
+  Speicher. `Fehler` (25 Codes) ist die EINZIGE Außensicht: FsFehler/IoFehler/
+  SocketFehler/DnsFehler/CopyFehler werden darauf ABGEBILDET (`Fehler::von_fs`
+  usw.) — ein Prozess erfährt nie, welches Dateisystem unter ihm liegt
+  (KeinSpeedFs/KeinFat32 → beide NichtKonfiguriert), und Zeiger-Fehler werden
+  absichtlich GROB abgebildet (ob eine Adresse gemappt ist, ist Kernel-Zustand).
+  PANICKT NIE — jede unbekannte Nummer und jedes kaputte Argument ist ein Code.
+  PER-PROZESS-HANDLE-TABELLE (`syscall/handle.rs`): Ein Handle ist ein INDEX in
+  die EIGENE Tabelle (max 32), das globale Socket-Handle verlässt den Kernel
+  nie; 0/1/2 sind reserviert (Eingabe / AUSGABE = Bildschirm+seriell /
+  DIAGNOSE = nur seriell — der getrennte Kanal verhindert, dass ein
+  protokollierender Prozess den Compositor überschwemmt) und nicht schliessbar.
+  Die Tabelle steckt IM `Prozess`, also schliesst ihr `Drop` beim Prozess-Ende
+  ALLES automatisch (auch nach einem Absturz) — kein Pfad kann es vergessen.
+  DIE NEUE LOCK-DISZIPLIN (docs/syscalls.md §8, die eigentliche Denkarbeit):
+  Ein Syscall läuft mit ausgeschalteten Interrupts, deshalb (a) sind Locks, die
+  der Kernel nur mit `without_interrupts` hält, gefahrlos benutzbar (wenn der
+  Syscall läuft, hält sie niemand), aber (b) auf einen Lock WARTEN ist ein
+  Hänger — `fs::mit_fs` ist genau so ein Lock. Lösung: `warte_fenster()`
+  (Interrupts an, hlt, aus — NUR hier darf gewechselt werden, und nur OHNE
+  Lock in der Hand; `hlt` mit Interrupts aus wäre Stillstand für immer) und
+  `mit_vfs()` (`fs::vfs_versuchen` = try_lock + Wartefenster, 50 Versuche,
+  dann `Belegt`). DIE NÄHTE HABEN GEHALTEN: Socket-API und VFS wurden 1:1
+  durchgereicht (kein Zeichen Änderung in socket.rs); nachgeschärft werden
+  musste NUR die SEMANTIK von `verbinde` — es blockiert jetzt mit 8-s-Frist und
+  pumpt selbst, weil ein Ring-3-Programm `netz::pumpen()` nicht aufrufen kann.
+  `empfange` bleibt bewusst nicht-blockierend (0 = noch nichts). TEST-VEHIKEL:
+  `prozess::pruefstand_programm` — ein 75-Byte-Ring-3-Programm als
+  FERNBEDIENUNG (liest Nummer+Argumente aus seinem Speicher, `int 0x80`, legt
+  rax/rdx zurück, schläft dazwischen). Dadurch ist jeder Testfall gewöhnlicher
+  Rust-Code, während der Aufruf ECHT unprivilegiert ist. BEWEISE
+  (`tests/syscalls.rs`): alle drei Gruppen im Erfolgsfall inkl. copy-OUT
+  (lese_at/stat schreiben in den Prozess, der Test liest es zurück); jede
+  Angriffsvariante (Kernel-Zeiger, ungemappt, Seitengrenze, u64::MAX-Längen,
+  relative/nicht-UTF-8-Pfade, fremde/geschlossene/reservierte Handles,
+  falscher Typ); HANDLE-ISOLATION aus Ring 3 (zwei Prozesse, beide Handle 3,
+  B probiert alle 32 Zahlen durch); LECK-TEST über exit UND Absturz
+  (5 Sockets, kein `schliesse` → alle automatisch zu, Frame-Bilanz null).
+  MESSFALLE (selbst hineingelaufen): `socket::schliessen` MARKIERT nur;
+  `socket::anzahl()` sinkt erst nach dem nächsten `aufraeumen` (steckt in
+  `oeffnen`/`bedienen`) — vor einer Leck-Messung also `netz::pumpen()`.
 - **FAT32-Treiber (Juli 2026, `src/fs/fat32.rs`) — NUR LESEN:**
   SpeedOS liest fremde FAT32-Medien ("der USB-Stick"), schreibt sie
   aber NIE (jeder Schreib-Weg -> `IoFehler::NurLesen`). Kein/kaputtes

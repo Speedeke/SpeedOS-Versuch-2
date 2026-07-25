@@ -243,6 +243,12 @@ pub struct Prozess {
     pub syscalls: u64,
     /// Weck-Zeitpunkt in ms seit Boot (nur bei `Zustand::Wartend`; 0 = keiner).
     pub wach_ab_ms: u64,
+    /// Die PER-PROZESS-HANDLE-TABELLE (Serie 6, Teil 4): kleine Zahlen, die
+    /// NUR in diesem Prozess gelten. Sie steckt bewusst IM Prozess-
+    /// Kontrollblock — dadurch schließt ihr `Drop` beim Prozess-Ende
+    /// automatisch alle offenen Sockets, ohne dass irgendein Pfad das
+    /// vergessen könnte (siehe `syscall::handle::HandleTabelle`).
+    pub handles: crate::syscall::handle::HandleTabelle,
 }
 
 impl Prozess {
@@ -266,6 +272,7 @@ impl Prozess {
             abgaben: 0,
             syscalls: 0,
             wach_ab_ms: 0,
+            handles: crate::syscall::handle::HandleTabelle::neu(),
         }
     }
 
@@ -323,6 +330,7 @@ impl Prozess {
             abgaben: 0,
             syscalls: 0,
             wach_ab_ms: 0,
+            handles: crate::syscall::handle::HandleTabelle::neu(),
         })
     }
 
@@ -416,16 +424,22 @@ const BREMSE: u32 = 5_000_000;
 /// keine_buchstabe:
 ///   movabs rdx, ziffer_va      ; ... in die Nachricht schreiben
 ///   mov  [rdx], al
-///   mov  rax, 0                ; SYS_DEBUG_PRINT
-///   movabs rdi, text_va
-///   mov  esi, laenge
+///   mov  rax, 3                ; SYS_SCHREIBE
+///   mov  edi, 2                ;   Handle 2 = DIAGNOSE (nur seriell!)
+///   movabs rsi, text_va
+///   mov  edx, laenge
 ///   int  0x80                  ; DER EINZIGE Kernel-Kontakt — und er gibt
 ///   jmp  schleife              ;   die CPU NICHT ab!
 /// ```
 ///
 /// Beachte, was hier NICHT steht: kein `yield`, kein `exit`, kein Warten.
 /// Dieses Programm gibt die CPU unter keinen Umständen freiwillig her.
+///
+/// Und beachte das HANDLE: Ausgegeben wird auf 2 (Diagnose = nur seriell),
+/// nicht auf 1 (Bildschirm). Tausende Zeilen ins Terminal-Fenster würden den
+/// Compositor überschwemmen — dafür gibt es den getrennten Kanal.
 pub fn zaehler_programm(text_va: u64, laenge: usize) -> Vec<u8> {
+    use crate::syscall::{HANDLE_DIAGNOSE, SYS_SCHREIBE};
     let ziffer_va = text_va + ZIFFER_INDEX as u64;
     let mut p = Vec::new();
     p.extend_from_slice(&[0x31, 0xDB]); // xor ebx, ebx
@@ -444,14 +458,18 @@ pub fn zaehler_programm(text_va: u64, laenge: usize) -> Vec<u8> {
     p.extend_from_slice(&[0x48, 0xBA]); // movabs rdx, ziffer_va
     p.extend_from_slice(&ziffer_va.to_le_bytes());
     p.extend_from_slice(&[0x88, 0x02]); // mov [rdx], al
-    p.extend_from_slice(&[0x48, 0xC7, 0xC0, 0x00, 0x00, 0x00, 0x00]); // mov rax, 0
-    p.extend_from_slice(&[0x48, 0xBF]); // movabs rdi, text_va
+    p.extend_from_slice(&[0x48, 0xC7, 0xC0]); // mov rax, SYS_SCHREIBE
+    p.extend_from_slice(&(SYS_SCHREIBE as u32).to_le_bytes());
+    p.push(0xBF); // mov edi, HANDLE_DIAGNOSE
+    p.extend_from_slice(&(HANDLE_DIAGNOSE as u32).to_le_bytes());
+    p.extend_from_slice(&[0x48, 0xBE]); // movabs rsi, text_va
     p.extend_from_slice(&text_va.to_le_bytes());
-    p.push(0xBE); // mov esi, imm32
+    p.push(0xBA); // mov edx, laenge
     p.extend_from_slice(&(laenge as u32).to_le_bytes());
     p.extend_from_slice(&[0xCD, 0x80]); // int 0x80
                                         // jmp schleife (rel8, rückwärts — der Rumpf ist < 128 Byte)
     let rel = schleife as i64 - (p.len() as i64 + 2);
+    assert!(rel >= -128, "Zaehler-Programm zu lang fuer einen rel8-Sprung");
     p.push(0xEB);
     p.push(rel as i8 as u8);
     p
@@ -463,14 +481,15 @@ pub fn zaehler_programm(text_va: u64, laenge: usize) -> Vec<u8> {
 ///
 /// ```text
 /// schleife:
-///   mov  rax, 3          ; SYS_SCHLAFEN
+///   mov  rax, 4          ; SYS_SCHLAFE
 ///   mov  edi, ms
 ///   int  0x80
 ///   jmp  schleife
 /// ```
 pub fn schlaefer_programm(ms: u32) -> Vec<u8> {
     let mut p = Vec::new();
-    p.extend_from_slice(&[0x48, 0xC7, 0xC0, 0x03, 0x00, 0x00, 0x00]); // mov rax, 3
+    p.extend_from_slice(&[0x48, 0xC7, 0xC0]); // mov rax, SYS_SCHLAFE
+    p.extend_from_slice(&(crate::syscall::SYS_SCHLAFE as u32).to_le_bytes());
     p.push(0xBF); // mov edi, imm32
     p.extend_from_slice(&ms.to_le_bytes());
     p.extend_from_slice(&[0xCD, 0x80]); // int 0x80
@@ -478,6 +497,119 @@ pub fn schlaefer_programm(ms: u32) -> Vec<u8> {
     p.push(0xEB);
     p.push(rel as i8 as u8);
     p
+}
+
+// ---------------------------------------------------------------------------
+// DER SYSCALL-PRÜFSTAND: ein Ring-3-Programm als Fernbedienung
+// ---------------------------------------------------------------------------
+//
+// PROBLEM: Jeden einzelnen Syscall mit gültigen UND böswilligen Argumenten aus
+// Ring 3 zu testen, würde ohne ELF-Loader bedeuten, für jeden Testfall ein
+// eigenes Programm von Hand zu assemblieren. Das wäre unlesbar und fehleranfäl-
+// lig — und der Test würde eher das Assemblieren prüfen als den Kernel.
+//
+// LÖSUNG: EIN winziges Programm, das als FERNBEDIENUNG dient. Es liest
+// Syscall-Nummer und Argumente aus einer Struktur in seinem eigenen Speicher,
+// löst `int 0x80` aus und legt Fehlercode und Ergebnis wieder dort ab. Der
+// Kernel (bzw. der Test) schreibt Aufträge hinein und liest Antworten heraus —
+// über `AdressRaum::schreiben/lesen`, also ohne den Adressraum zu aktivieren.
+//
+// Damit läuft JEDER Testfall als gewöhnlicher Rust-Code, während der Aufruf
+// ECHT aus Ring 3 kommt: eigener Adressraum, eigene Handle-Tabelle, echte
+// Zeigerprüfung. Genau die Kombination, die wir zum Testen der ABI brauchen.
+//
+// Zwischen zwei Aufträgen SCHLÄFT das Programm (`schlafe(1)`) statt zu pollen —
+// dadurch bekommt der Kernel-Prozess die CPU sofort zurück, und die Tests
+// laufen schnell.
+
+/// Offset der Auftrags-Struktur in der Code-Seite des Prüfstands.
+pub const PRUEFSTAND_AUFTRAG_OFFSET: u64 = 0x200;
+/// Offset des Schreib-/Lese-Puffers, den Tests für Pfade und Daten benutzen.
+pub const PRUEFSTAND_PUFFER_OFFSET: u64 = 0x400;
+/// Nutzbare Größe dieses Puffers (bis zum Seitenende).
+pub const PRUEFSTAND_PUFFER_GROESSE: u64 = 4096 - PRUEFSTAND_PUFFER_OFFSET;
+
+// Feldoffsets in der Auftrags-Struktur (alles u64):
+/// 1 = Auftrag liegt an, 0 = Ergebnis liegt an.
+pub const PRUEFSTAND_FLAGGE: u64 = 0x00;
+pub const PRUEFSTAND_NUMMER: u64 = 0x08;
+pub const PRUEFSTAND_ARG0: u64 = 0x10;
+pub const PRUEFSTAND_ARG1: u64 = 0x18;
+pub const PRUEFSTAND_ARG2: u64 = 0x20;
+pub const PRUEFSTAND_ARG3: u64 = 0x28;
+pub const PRUEFSTAND_FEHLER: u64 = 0x30;
+pub const PRUEFSTAND_ERGEBNIS: u64 = 0x38;
+
+/// Baut das Prüfstand-Programm.
+///
+/// ```text
+///   movabs r15, auftrag_va       ; Basis der Auftrags-Struktur (bleibt stehen:
+/// warten:                        ;  unser Syscall-Rückweg stellt alle Register
+///   mov  rax, [r15+0x00]         ;  wieder her, r15 überlebt also)
+///   test rax, rax
+///   jnz  los
+///   mov  rax, 4                  ; SYS_SCHLAFE
+///   mov  edi, 1                  ;   1 ms — CPU zurück an den Kernel
+///   int  0x80
+///   jmp  warten
+/// los:
+///   mov  rax, [r15+0x08]         ; Nummer
+///   mov  rdi, [r15+0x10]         ; Argumente 0..3
+///   mov  rsi, [r15+0x18]
+///   mov  rdx, [r15+0x20]
+///   mov  r10, [r15+0x28]
+///   int  0x80
+///   mov  [r15+0x30], rax         ; Fehlercode
+///   mov  [r15+0x38], rdx         ; Ergebnis
+///   mov  qword [r15+0x00], 0     ; „erledigt" — ZULETZT, damit der Test nie
+///   jmp  warten                  ;   eine halb gefüllte Antwort sieht
+/// ```
+pub fn pruefstand_programm(auftrag_va: u64) -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(&[0x49, 0xBF]); // movabs r15, auftrag_va
+    p.extend_from_slice(&auftrag_va.to_le_bytes());
+    let warten = p.len();
+    p.extend_from_slice(&[0x49, 0x8B, 0x47, PRUEFSTAND_FLAGGE as u8]); // mov rax,[r15+0]
+    p.extend_from_slice(&[0x48, 0x85, 0xC0]); // test rax, rax
+    let jnz_stelle = p.len();
+    p.extend_from_slice(&[0x75, 0x00]); // jnz los (Ziel gleich einsetzen)
+    p.extend_from_slice(&[0x48, 0xC7, 0xC0]); // mov rax, SYS_SCHLAFE
+    p.extend_from_slice(&(crate::syscall::SYS_SCHLAFE as u32).to_le_bytes());
+    p.extend_from_slice(&[0xBF, 0x01, 0x00, 0x00, 0x00]); // mov edi, 1
+    p.extend_from_slice(&[0xCD, 0x80]); // int 0x80
+    let rel_warten = warten as i64 - (p.len() as i64 + 2);
+    p.push(0xEB);
+    p.push(rel_warten as i8 as u8); // jmp warten
+    let los = p.len();
+    // Das jnz-Ziel nachtragen (rel8 ab dem Byte NACH dem Sprung).
+    p[jnz_stelle + 1] = (los as i64 - (jnz_stelle as i64 + 2)) as i8 as u8;
+
+    p.extend_from_slice(&[0x49, 0x8B, 0x47, PRUEFSTAND_NUMMER as u8]); // rax = Nummer
+    p.extend_from_slice(&[0x49, 0x8B, 0x7F, PRUEFSTAND_ARG0 as u8]); // rdi
+    p.extend_from_slice(&[0x49, 0x8B, 0x77, PRUEFSTAND_ARG1 as u8]); // rsi
+    p.extend_from_slice(&[0x49, 0x8B, 0x57, PRUEFSTAND_ARG2 as u8]); // rdx
+    p.extend_from_slice(&[0x4D, 0x8B, 0x57, PRUEFSTAND_ARG3 as u8]); // r10
+    p.extend_from_slice(&[0xCD, 0x80]); // int 0x80
+    p.extend_from_slice(&[0x49, 0x89, 0x47, PRUEFSTAND_FEHLER as u8]); // [..]=rax
+    p.extend_from_slice(&[0x49, 0x89, 0x57, PRUEFSTAND_ERGEBNIS as u8]); // [..]=rdx
+    p.extend_from_slice(&[0x49, 0xC7, 0x47, PRUEFSTAND_FLAGGE as u8, 0, 0, 0, 0]); // =0
+    let rel_zurueck = warten as i64 - (p.len() as i64 + 2);
+    assert!(rel_zurueck >= -128, "Pruefstand zu lang fuer rel8");
+    p.push(0xEB);
+    p.push(rel_zurueck as i8 as u8);
+    assert!(
+        (p.len() as u64) < PRUEFSTAND_AUFTRAG_OFFSET,
+        "Pruefstand-Code laeuft in die Auftrags-Struktur"
+    );
+    p
+}
+
+/// Baut einen Prüfstand-Prozess: Adressraum, Programm, Stack.
+pub fn pruefstand_prozess() -> Option<Prozess> {
+    let auftrag_va = ZAEHLER_CODE_VA + PRUEFSTAND_AUFTRAG_OFFSET;
+    let code = pruefstand_programm(auftrag_va);
+    let (raum, einsprung, stack) = programm_aufsetzen(&code, None)?;
+    Prozess::neu_ring3("Syscall-Pruefstand", raum, einsprung, stack)
 }
 
 /// Baut ein Programm, das VERBOTEN auf eine Kernel-Adresse zugreift und damit
@@ -708,13 +840,32 @@ mod tests {
         // Genau EIN int 0x80 im ganzen Programm ...
         let syscalls = code.windows(2).filter(|f| f[0] == 0xCD && f[1] == 0x80).count();
         assert_eq!(syscalls, 1, "Der Zaehler darf nur EINEN Syscall machen");
-        // ... und zwar mit rax = 0 (SYS_DEBUG_PRINT). Ein `mov rax, 1/3/4`
-        // (exit/schlafen/yield) darf nicht vorkommen.
-        for nummer in [1u8, 3, 4] {
-            let muster = [0x48, 0xC7, 0xC0, nummer, 0x00, 0x00, 0x00];
+        // ... und zwar SYS_SCHREIBE. Kein einziger ABGABE-Syscall (exit,
+        // yield, schlafe) darf vorkommen — sonst wäre der Präemptions-Beweis
+        // wertlos. Die Nummern stammen aus der ABI (docs/syscalls.md), damit
+        // dieser Test bei einer ABI-Änderung mitwandert.
+        let schreibe_muster = [
+            0x48,
+            0xC7,
+            0xC0,
+            crate::syscall::SYS_SCHREIBE as u8,
+            0x00,
+            0x00,
+            0x00,
+        ];
+        assert!(
+            code.windows(schreibe_muster.len()).any(|f| f == &schreibe_muster[..]),
+            "Der Zaehler muss SYS_SCHREIBE benutzen"
+        );
+        for nummer in [
+            crate::syscall::SYS_EXIT,
+            crate::syscall::SYS_YIELD,
+            crate::syscall::SYS_SCHLAFE,
+        ] {
+            let muster = [0x48, 0xC7, 0xC0, nummer as u8, 0x00, 0x00, 0x00];
             assert!(
                 !code.windows(muster.len()).any(|f| f == &muster[..]),
-                "Der Zaehler enthaelt einen Abgabe-Syscall ({})",
+                "Der Zaehler enthaelt einen Abgabe-Syscall (Nummer {})",
                 nummer
             );
         }

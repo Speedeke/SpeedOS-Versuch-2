@@ -164,14 +164,14 @@ lazy_static! {
         idt[(PIC_2_OFFSET + 2) as usize].set_handler_fn(virtio_pci_irq10);
         idt[(PIC_2_OFFSET + 3) as usize].set_handler_fn(virtio_pci_irq11);
         // SYSCALL-GATE (Serie 6): INT 0x80 aus Ring 3. Der Einstieg ist ein
-        // nackter Assembler-Handler (ring3.rs), der den vollen User-Kontext
+        // nackter Assembler-Handler (syscall/mod.rs), der den vollen User-Kontext
         // sichert. DPL 3, damit Ring-3-Code diesen Trap AUSLÖSEN darf (die
         // anderen Gates haben DPL 0 — User-Mode könnte sie nicht auslösen).
         // unsafe: set_handler_addr traut uns zu, eine GÜLTIGE Handler-Adresse
         // zu liefern — sie stammt aus unserem global_asm-Symbol (ring3.rs).
         unsafe {
             idt[0x80]
-                .set_handler_addr(VirtAddr::new(crate::ring3::syscall_handler_adresse()))
+                .set_handler_addr(VirtAddr::new(crate::syscall::handler_adresse()))
                 .set_privilege_level(PrivilegeLevel::Ring3);
         }
         idt

@@ -33,7 +33,7 @@
 
 use crate::adressraum::{self, AdressRaum};
 use crate::prozess::TrapFrame;
-use crate::{gdt, scheduler, serial_print, serial_println};
+use crate::{gdt, scheduler, serial_println};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 use x86_64::structures::paging::PageTableFlags;
@@ -44,8 +44,8 @@ use x86_64::VirtAddr;
 // im Kernel-Adressraum ist an diesen Adressen NICHTS gemappt.
 //
 //   USER_BASIS      +0x0000  Code-Seite  (Programm)
-//                   +0x0100  Nachricht (Daten für debug_print)
-//                   +0x0200  Puffer für copy-OUT (der Kernel schreibt hier hin)
+//                   +0x0100  Nachricht (Daten für `schreibe`)
+//                   +0x0200  Ergebnis-Puffer (der Prozess legt dort rdx ab)
 //   ... Lücke (ungemappt) ...
 //   STACK_GUARD             GUARD-PAGE — bewusst NICHT gemappt
 //   STACK_UNTEN .. STACK_TOP  4 Seiten User-Stack (wächst nach unten)
@@ -54,7 +54,8 @@ use x86_64::VirtAddr;
 const USER_BASIS: u64 = adressraum::USER_START;
 /// Offset der Nachricht in der Code-Page (der Code selbst ist << 0x100 Byte).
 const NACHRICHT_OFFSET: u64 = 0x100;
-/// Offset des copy-out-Puffers in der Code-Page.
+/// Offset des Ergebnis-Puffers in der Code-Page (der Prozess legt dort das
+/// Ergebnis von `zeit_jetzt` selbst ab).
 const ZEIT_OFFSET: u64 = 0x200;
 /// Anzahl Seiten des User-Stacks.
 const STACK_SEITEN: usize = 4;
@@ -68,28 +69,18 @@ const USER_STACK_UNTEN: u64 = USER_STACK_TOP - (STACK_SEITEN as u64) * 4096;
 const NACHRICHT: &[u8] = b"Hallo aus Ring 3 - mit eigenem Adressraum!\n";
 
 // ---------------------------------------------------------------------------
-// Syscall-Nummern (in rax). Argumente in rdi/rsi, Rückgabe in rax
-// (Linux-x86_64-Konvention als erprobte Vorlage).
+// Die Syscall-Nummern wohnen jetzt in `syscall/mod.rs`
 // ---------------------------------------------------------------------------
-
-/// debug_print(ptr, len): Bytes des Prozesses seriell ausgeben (copy-IN).
-pub const SYS_DEBUG_PRINT: u64 = 0;
-/// exit(): Prozess beenden.
-pub const SYS_EXIT: u64 = 1;
-/// zeit_ms(ptr): schreibt die Millisekunden seit dem Boot als 8 Byte in den
-/// User-Puffer — der erste Syscall, der copy-OUT benutzt (die Rückrichtung).
-pub const SYS_ZEIT_MS: u64 = 2;
-/// schlafen(ms): Prozess auf `Zustand::Wartend` legen; der Timer weckt ihn
-/// (Serie 6, Teil 3 — der erste BLOCKIERENDE Syscall).
-pub const SYS_SCHLAFEN: u64 = 3;
-/// yield(): Zeitscheibe freiwillig abgeben. Auch der KERNEL-Prozess benutzt
-/// ihn (Executor::sleep_if_idle) — siehe scheduler::abgeben.
-pub const SYS_YIELD: u64 = 4;
-/// getpid(): eigene Prozess-Nummer.
-pub const SYS_GETPID: u64 = 5;
-/// NUR FÜR TESTS: kopiert den eingehenden Trap-Rahmen weg, damit ein Test
-/// prüfen kann, dass die Kontext-SICHERUNG jedes Register korrekt erfasst.
-pub const SYS_KONTEXT_TEST: u64 = 6;
+//
+// Seit Serie 6, Teil 4 gibt es eine echte SYSCALL-TABELLE mit einer
+// dokumentierten ABI (docs/syscalls.md). Nummern, Argumente, Fehler-Enum und
+// der Dispatcher leben deshalb in `src/syscall/`; dieses Modul behält genau
+// das, was seine eigentliche Aufgabe ist:
+//
+//   * copy_in / copy_out — DIE Sicherheitsgrenze (Dauerregel I),
+//   * der EINZELSCHUSS-Pfad (`ring3test`): Ring-3-Code synchron im Kontext
+//     des Kernel-Prozesses, ohne Scheduler und ohne PCB,
+//   * der Kontext-Sicherungs-Test.
 
 // ---------------------------------------------------------------------------
 // DAUERREGEL (I): der geprüfte copy-in-Helfer
@@ -272,177 +263,27 @@ pub fn copy_out_prozess(
 }
 
 // ---------------------------------------------------------------------------
-// Der Syscall-Weg: INT 0x80 mit vollständiger Kontext-Sicherung
+// Der Rückweg des Einzelschuss-Pfades
 // ---------------------------------------------------------------------------
-//
-// WARUM INT 0x80 (Trap-Gate) und nicht SYSCALL/SYSRET?
-//   * INT 0x80 nutzt die IDT-Infrastruktur, die wir schon haben — ein
-//     Eintrag mit DPL 3 (damit Ring 3 ihn auslösen darf), fertig. SYSCALL
-//     braucht MSR-Setup (STAR/LSTAR/SFMASK), eine bestimmte GDT-Reihenfolge
-//     und ein eigenes Stack-Switching von Hand.
-//   * Für den ERSTEN Beweis ist INT 0x80 einfacher UND lehrreicher (man sieht
-//     den ganzen Trap-/Return-Weg explizit). SYSCALL/SYSRET (schneller, kein
-//     IDT-Umweg) ist ein sinnvoller späterer Optimierungsschritt.
-//
-// Der Handler ist ein NACKTER (naked) Einstieg in Assembler: Er sichert ALLE
-// General-Register (baut damit einen `prozess::TrapFrame` auf dem Kernel-Trap-
-// Stack, RSP0) und ruft den Rust-Dispatcher mit einem Zeiger darauf.
-//
-// SEIT DEM SCHEDULER (Serie 6, Teil 3): Der Dispatcher LIEFERT einen Rahmen
-// ZURÜCK — normalerweise denselben, bei `yield`/`exit`/`schlafen` aber den
-// eines ANDEREN Prozesses. Wiederhergestellt wird er von
-// `schalte_auf_rahmen` (scheduler.rs), dem einzigen Kontext-Lade-Punkt des
-// Kernels. Damit ist ein Syscall ein vollwertiger Wechsel-Punkt, und
-// Präemption und freiwillige Abgabe teilen genau einen Code-Pfad.
-//
-// Der Trap-Rahmen selbst wohnt jetzt in prozess.rs (er ist nicht mehr nur
-// „Syscall-Kram", sondern DER gesicherte Prozess-Kontext).
 
-// Der nackte Assembler-Einstiegspunkt für INT 0x80. global_asm ist robuster
-// als eine naked fn (versionsunabhängig) und zeigt den Ablauf glasklar.
-core::arch::global_asm!(
-    ".global syscall_entry",
-    "syscall_entry:",
-    // Alle General-Register sichern (baut den TrapFrame auf dem RSP0-Stack).
-    "push rax", "push rbx", "push rcx", "push rdx",
-    "push rsi", "push rdi", "push rbp",
-    "push r8",  "push r9",  "push r10", "push r11",
-    "push r12", "push r13", "push r14", "push r15",
-    "mov rdi, rsp",              // Argument 1 = Zeiger auf den TrapFrame
-    "call syscall_dispatch",     // Rust-Dispatcher; rax = Rahmen, mit dem es
-                                 // weitergeht (evtl. ein ANDERER Prozess!)
-    "mov rdi, rax",
-    "jmp schalte_auf_rahmen",    // gemeinsamer Ausstieg (scheduler.rs)
-);
-
-extern "C" {
-    fn syscall_entry();
-}
-
-/// Adresse des Syscall-Einstiegs (für die IDT-Registrierung in interrupts.rs).
-pub fn syscall_handler_adresse() -> u64 {
-    syscall_entry as *const () as u64
-}
-
-/// Der Rust-Dispatcher: bekommt einen Zeiger auf den gesicherten Kontext,
-/// liest die Syscall-Nummer (rax) + Argumente, schreibt den Rückgabewert nach
-/// rax — und LIEFERT den Rahmen, mit dem es weitergeht.
+/// Biegt einen Trap-Rahmen auf den setjmp-LANDEPLATZ im Kernel um.
 ///
-/// Meist ist das derselbe Rahmen (der Prozess läuft weiter). Bei
-/// `yield`/`schlafen`/`exit` ist es der Rahmen eines ANDEREN Prozesses: dann
-/// ist dieser Syscall ein Kontext-Wechsel. Für den alten Einzelschuss-Pfad
-/// (`ring3test`, kein eingeplanter Prozess) biegt `exit` wie bisher auf den
-/// setjmp-Landeplatz im Kernel um.
+/// Das ist der Rückweg des Einzelschuss-Pfades (`ring3test`): Dort läuft
+/// Ring-3-Code im Kontext des Kernel-Prozesses, es gibt also keinen anderen
+/// Prozess, auf den man umschalten könnte. Statt eines Kontext-Wechsels
+/// springt der `iretq` des Handlers auf den Landeplatz, der den gesicherten
+/// Kernel-Kontext wiederherstellt.
 ///
-/// WICHTIGE RANDBEDINGUNG (docs/scheduler-design.md §8): Ein Syscall läuft im
-/// Kontext eines präemptiv geplanten Prozesses. Er darf deshalb NUR Locks
-/// anfassen, die der Kernel ausschliesslich mit ausgeschalteten Interrupts
-/// hält (SERIAL, Blatt-Locks, die Prozess-Tabelle) — sonst könnte er auf einen
-/// Lock warten, den der verdrängte Kernel-Prozess hält: Deadlock. Alles
-/// darunter (VFS, Sockets) braucht erst das Warte-Modell.
-#[no_mangle]
-extern "C" fn syscall_dispatch(frame: *mut TrapFrame) -> *mut TrapFrame {
-    // unsafe: `frame` zeigt auf unseren eben gesicherten Register-Block auf
-    // dem Kernel-Stack des aufrufenden Prozesses — gültig für die Dauer des
-    // Handlers.
-    let f = unsafe { &mut *frame };
-    scheduler::syscall_zaehlen();
-    match f.rax {
-        SYS_DEBUG_PRINT => {
-            // debug_print(ptr = rdi, len = rsi) — copy-in, dann seriell.
-            match copy_in(f.rdi, f.rsi as usize) {
-                Ok(bytes) => {
-                    // In EINEM Stück ausgeben (ein Lock-Zyklus statt einem pro
-                    // Byte) — der Zähler-Prozess druckt oft.
-                    match core::str::from_utf8(&bytes) {
-                        Ok(text) => serial_print!("{}", text),
-                        Err(_) => {
-                            for &b in &bytes {
-                                serial_print!("{}", b as char);
-                            }
-                        }
-                    }
-                    // Für den Präemptions-BEWEIS: Wer hat wann gedruckt? Der
-                    // lock-freie Spur-Ring hält die Reihenfolge fest (das
-                    // letzte druckbare Zeichen ist bei unseren Zähler-
-                    // Prozessen gerade die Zählerziffer).
-                    let zeichen = bytes
-                        .iter()
-                        .rev()
-                        .copied()
-                        .find(|b| b.is_ascii_graphic())
-                        .unwrap_or(b'?');
-                    scheduler::spur_melden(scheduler::laufende_user_pid(), zeichen);
-                    f.rax = bytes.len() as u64; // Rückgabe: gedruckte Bytes
-                }
-                Err(fehler) => {
-                    serial_println!("[syscall] debug_print: ungueltiger Puffer ({:?})", fehler);
-                    f.rax = u64::MAX; // Fehler-Kennung
-                }
-            }
-        }
-        SYS_YIELD => {
-            // Freiwillige Abgabe: der einzige Syscall, der NICHTS tut, ausser
-            // die Zeitscheibe zurückzugeben.
-            f.rax = 0;
-            return scheduler::syscall_abgeben(frame);
-        }
-        SYS_SCHLAFEN => {
-            // schlafen(ms = rdi): Zustand::Wartend, der Timer weckt wieder.
-            f.rax = 0;
-            if let Some(neuer) = scheduler::syscall_schlafen(frame, f.rdi) {
-                return neuer;
-            }
-        }
-        SYS_GETPID => {
-            f.rax = scheduler::laufende_user_pid() as u64;
-        }
-        SYS_KONTEXT_TEST => {
-            // Nur Tests: den EINGEHENDEN Rahmen wegkopieren. Damit prüft
-            // tests/scheduler.rs, dass die Kontext-Sicherung wirklich jedes
-            // einzelne Register erfasst (synthetische Magic-Werte).
-            kontext_test_sichern(*f);
-            f.rax = KONTEXT_TEST_ANTWORT;
-        }
-        SYS_ZEIT_MS => {
-            // zeit_ms(ptr = rdi): 8 Byte in den User-Puffer schreiben.
-            // Die Rückrichtung ist NICHT harmloser als copy-in — im Gegenteil:
-            // Hier schreibt Ring-0-Code an eine Adresse, die sich Ring 3
-            // ausgedacht hat. `copy_out` prüft deshalb zusätzlich WRITABLE.
-            let ms = crate::zeit::ms_seit_boot();
-            match copy_out(f.rdi, &ms.to_le_bytes()) {
-                Ok(()) => f.rax = 0,
-                Err(fehler) => {
-                    serial_println!("[syscall] zeit_ms: ungueltiger Puffer ({:?})", fehler);
-                    f.rax = u64::MAX;
-                }
-            }
-        }
-        SYS_EXIT => {
-            // (a) EINGEPLANTER Prozess: beenden und auf den nächsten
-            //     lauffähigen Prozess umschalten (der Scheduler-Weg).
-            if let Some(neuer) = scheduler::syscall_beenden(frame) {
-                return neuer;
-            }
-            // (b) EINZELSCHUSS-PFAD (ring3test, kein Prozess): Zurück in den
-            //     Kernel, indem der CPU-Interrupt-Rahmen auf den LANDEPLATZ
-            //     umgebogen wird (Ring 0). Der iretq springt dann dorthin
-            //     statt nach Ring 3; der Landeplatz stellt den gesicherten
-            //     Kernel-Kontext wieder her.
-            f.rip = recovery_rip();
-            f.rsp = recovery_rsp();
-            f.cs = gdt::kernel_code_selektor();
-            f.ss = gdt::kernel_data_selektor();
-            f.rflags = 0x202; // IF gesetzt
-        }
-        andere => {
-            serial_println!("[syscall] unbekannte Nummer {}", andere);
-            f.rax = u64::MAX;
-        }
-    }
-    // Normalfall: derselbe Prozess läuft weiter.
-    frame
+/// Benutzt von `syscall_dispatch` (bei `exit` ohne eingeplanten Prozess) und
+/// von `interrupts::user_recovery` (bei einem Fault).
+pub fn einzelschuss_ruecksprung(rahmen: &mut TrapFrame) {
+    rahmen.rip = recovery_rip();
+    rahmen.rsp = recovery_rsp();
+    rahmen.cs = gdt::kernel_code_selektor();
+    rahmen.ss = gdt::kernel_data_selektor();
+    rahmen.rflags = 0x202; // IF gesetzt
 }
+
 
 // ---------------------------------------------------------------------------
 // Der Kontext-Sicherungs-TEST (synthetische Register-Sätze)
@@ -464,7 +305,7 @@ pub const KONTEXT_TEST_ANTWORT: u64 = 0x5EED_0000_C0DE_0042;
 /// Der gesicherte Rahmen des letzten SYS_KONTEXT_TEST.
 static KONTEXT_GESICHERT: spin::Mutex<Option<TrapFrame>> = spin::Mutex::new(None);
 
-fn kontext_test_sichern(rahmen: TrapFrame) {
+pub fn kontext_test_sichern(rahmen: TrapFrame) {
     // Blatt-Lock, im Syscall-Kontext erlaubt (niemand hält ihn lange).
     *KONTEXT_GESICHERT.lock() = Some(rahmen);
 }
@@ -504,7 +345,7 @@ core::arch::global_asm!(
     "movabs r13, 0x0D0D0D0D0D0D0D0D",
     "movabs r14, 0x0E0E0E0E0E0E0E0E",
     "movabs r15, 0x7F7F7F7F7F7F7F7F",
-    "mov rax, 6",                 // SYS_KONTEXT_TEST
+    "mov rax, 240",               // SYS_KONTEXT_TEST (ABI-Nummer)
     "int 0x80",
     // Jetzt der Zustand NACH der Rückkehr — in TrapFrame-Reihenfolge pushen
     // (erst die fünf CPU-Felder als 0, dann rax..r15).
@@ -568,7 +409,7 @@ pub fn kontext_test_erwartung() -> TrapFrame {
         r13: 0x0D0D_0D0D_0D0D_0D0D,
         r14: 0x0E0E_0E0E_0E0E_0E0E,
         r15: 0x7F7F_7F7F_7F7F_7F7F,
-        rax: SYS_KONTEXT_TEST,
+        rax: crate::syscall::SYS_KONTEXT_TEST,
         ..TrapFrame::default()
     }
 }
@@ -735,26 +576,45 @@ fn nach_ring3(raum: &mut AdressRaum, user_entry: u64, user_stack: u64) {
 // Die Testprogramme (hand-assemblierter Ring-3-Maschinencode)
 // ---------------------------------------------------------------------------
 
-/// Baut das ERFOLGS-Programm:
-///   1. zeit_ms(puffer)   -> beweist copy-OUT (Kernel schreibt zu Ring 3)
-///   2. debug_print(text) -> beweist copy-IN  (Kernel liest von Ring 3)
-///   3. exit
+/// Baut das ERFOLGS-Programm — jetzt gegen die ECHTE ABI (docs/syscalls.md):
+///   1. `zeit_jetzt()`             -> das Ergebnis kommt in rdx zurück; der
+///      Prozess legt es SELBST in seinem Speicher ab. Damit ist bewiesen,
+///      dass der Rückgabeweg (rdx) wirklich in Ring 3 ankommt.
+///   2. `schreibe(2, text, len)`   -> beweist copy-IN (Kernel liest von Ring 3)
+///   3. `exit(0)`
+///
+/// (Vorher benutzte dieses Programm `zeit_ms(ptr)` und bewies damit copy-OUT.
+/// Die neue ABI gibt Zeitwerte in einem Register zurück — copy-OUT beweisen
+/// jetzt `stat` und `lese_at` in tests/syscalls.rs, plus die copy_out-
+/// Unit-Tests weiter unten. Nichts wird hier stillschweigend „mit-behauptet".)
 ///
 /// Position-unabhängig muss es nicht sein — wir kennen die Ziel-Adressen.
 fn programm_erfolg(nachricht_va: u64, laenge: usize, zeit_va: u64) -> Vec<u8> {
+    use crate::syscall::{HANDLE_DIAGNOSE, SYS_EXIT, SYS_SCHREIBE, SYS_ZEIT_JETZT};
     let mut p = Vec::new();
-    p.extend_from_slice(&[0x48, 0xC7, 0xC0, 0x02, 0x00, 0x00, 0x00]); // mov rax, 2 (zeit_ms)
-    p.extend_from_slice(&[0x48, 0xBF]); // movabs rdi, zeit_va
+    // mov rax, SYS_ZEIT_JETZT ; int 0x80
+    p.extend_from_slice(&[0x48, 0xC7, 0xC0]);
+    p.extend_from_slice(&(SYS_ZEIT_JETZT as u32).to_le_bytes());
+    p.extend_from_slice(&[0xCD, 0x80]);
+    // movabs rcx, zeit_va ; mov [rcx], rdx   (das Ergebnis selbst ablegen)
+    p.extend_from_slice(&[0x48, 0xB9]);
     p.extend_from_slice(&zeit_va.to_le_bytes());
-    p.extend_from_slice(&[0xCD, 0x80]); // int 0x80
-    p.extend_from_slice(&[0x48, 0xC7, 0xC0, 0x00, 0x00, 0x00, 0x00]); // mov rax, 0 (debug_print)
-    p.extend_from_slice(&[0x48, 0xBF]); // movabs rdi, nachricht_va
+    p.extend_from_slice(&[0x48, 0x89, 0x11]);
+    // schreibe(HANDLE_DIAGNOSE, nachricht_va, laenge)
+    p.extend_from_slice(&[0x48, 0xC7, 0xC0]);
+    p.extend_from_slice(&(SYS_SCHREIBE as u32).to_le_bytes());
+    p.push(0xBF); // mov edi, HANDLE_DIAGNOSE
+    p.extend_from_slice(&(HANDLE_DIAGNOSE as u32).to_le_bytes());
+    p.extend_from_slice(&[0x48, 0xBE]); // movabs rsi, nachricht_va
     p.extend_from_slice(&nachricht_va.to_le_bytes());
-    p.extend_from_slice(&[0x48, 0xC7, 0xC6]); // mov rsi, laenge (imm32)
+    p.push(0xBA); // mov edx, laenge
     p.extend_from_slice(&(laenge as u32).to_le_bytes());
-    p.extend_from_slice(&[0xCD, 0x80]); // int 0x80
-    p.extend_from_slice(&[0x48, 0xC7, 0xC0, 0x01, 0x00, 0x00, 0x00]); // mov rax, 1 (exit)
-    p.extend_from_slice(&[0xCD, 0x80]); // int 0x80
+    p.extend_from_slice(&[0xCD, 0x80]);
+    // exit(0)
+    p.extend_from_slice(&[0x48, 0xC7, 0xC0]);
+    p.extend_from_slice(&(SYS_EXIT as u32).to_le_bytes());
+    p.extend_from_slice(&[0x31, 0xFF]); // xor edi, edi
+    p.extend_from_slice(&[0xCD, 0x80]);
     p.extend_from_slice(&[0xEB, 0xFE]); // jmp $ (Sicherheitsschleife)
     p
 }
@@ -809,7 +669,8 @@ fn prozess_aufsetzen(code: &[u8], nachricht: Option<&[u8]>) -> AdressRaum {
 }
 
 /// TEST 1 (Erfolg): Ring-3-Code läuft im EIGENEN Adressraum, holt sich per
-/// copy-out die Uptime, druckt per copy-in seine Nachricht und beendet sich.
+/// per Syscall die Uptime holt, sie selbst ablegt, per copy-in seine Nachricht
+/// druckt und sich beendet.
 pub fn ring3_erfolg() {
     let code = programm_erfolg(
         USER_BASIS + NACHRICHT_OFFSET,
@@ -827,8 +688,9 @@ pub fn ring3_erfolg() {
     nach_ring3(&mut raum, USER_BASIS, USER_STACK_TOP);
     serial_println!("[ring3] Sauber zurueck im Kernel (Ring 0) — System laeuft weiter.");
 
-    // BEWEIS für copy-out: Der Kernel hat in den User-Puffer geschrieben.
-    // Wir lesen ihn jetzt aus dem (inaktiven!) Adressraum zurück.
+    // BEWEIS für den RÜCKGABEWEG: Der Prozess hat das Syscall-Ergebnis aus rdx
+    // in seinem eigenen Speicher abgelegt — wir lesen es aus dem (inaktiven!)
+    // Adressraum zurück.
     let mut puffer = [0u8; 8];
     if raum
         .lesen(VirtAddr::new(USER_BASIS + ZEIT_OFFSET), &mut puffer)
@@ -836,7 +698,7 @@ pub fn ring3_erfolg() {
     {
         let ms = u64::from_le_bytes(puffer);
         serial_println!(
-            "[ring3] copy-out belegt: Der Prozess hat {} ms Uptime erhalten.",
+            "[ring3] Rueckgabeweg belegt: Der Prozess hat {} ms Uptime erhalten.",
             ms
         );
     }

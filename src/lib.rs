@@ -55,6 +55,7 @@ pub mod scheduler;
 pub mod serial;
 pub mod shell;
 pub mod speedtext;
+pub mod syscall;
 pub mod task;
 pub mod taskmanager;
 pub mod theme;

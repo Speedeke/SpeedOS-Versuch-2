@@ -135,10 +135,14 @@ fn test_a_kontext_sicherung_synthetisch() {
     let nachher = ring3::kontext_nachher().expect("Kein Register-Bild danach");
 
     // (a) SAVE — jedes einzelne Register, mit sprechender Meldung im Fehlerfall.
-    let felder: [(&str, u64, u64, u64); 14] = [
+    //
+    // ACHTUNG, ABI: `rax` (Fehlercode) und `rdx` (Ergebnis) sind seit Serie 6
+    // Teil 4 AUSGABE-Register (docs/syscalls.md §1) und werden deshalb NICHT
+    // erhalten — sie werden weiter unten getrennt geprüft. Alle ÜBRIGEN
+    // Register müssen den Syscall unverändert überleben.
+    let felder: [(&str, u64, u64, u64); 13] = [
         ("rbx", erwartet.rbx, gesichert.rbx, nachher.rbx),
         ("rcx", erwartet.rcx, gesichert.rcx, nachher.rcx),
-        ("rdx", erwartet.rdx, gesichert.rdx, nachher.rdx),
         ("rsi", erwartet.rsi, gesichert.rsi, nachher.rsi),
         ("rdi", erwartet.rdi, gesichert.rdi, nachher.rdi),
         ("rbp", erwartet.rbp, gesichert.rbp, nachher.rbp),
@@ -163,12 +167,24 @@ fn test_a_kontext_sicherung_synthetisch() {
             name
         );
     }
-    // rax trägt hin die Syscall-Nummer und zurück den Rückgabewert.
+    // Die beiden AUSGABE-Register getrennt:
+    // rax trägt HIN die Syscall-Nummer und ZURÜCK den Fehlercode/Antwortwert.
     assert_eq!(gesichert.rax, erwartet.rax, "Syscall-Nummer nicht gesichert");
     assert_eq!(
         nachher.rax,
         ring3::KONTEXT_TEST_ANTWORT,
         "Rueckgabewert kam nicht in rax zurueck"
+    );
+    // rdx trägt HIN das dritte Argument (hier ein Magic-Wert, der im
+    // gesicherten Rahmen ankommen MUSS — sonst wären Argumente nicht
+    // übertragbar) und ZURÜCK das Ergebnis (beim Kontext-Test 0).
+    assert_eq!(
+        gesichert.rdx, erwartet.rdx,
+        "SAVE-Pfad: das Argument in rdx wurde falsch gesichert"
+    );
+    assert_eq!(
+        nachher.rdx, 0,
+        "rdx ist das ERGEBNIS-Register: der Kontext-Test liefert dort 0"
     );
     // Und der CPU-Teil des Rahmens muss plausibel sein: Der Trap kam aus
     // Ring 0 (dieser Test läuft im Kernel), mit gesetztem IF und einem

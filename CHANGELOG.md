@@ -5,6 +5,120 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### Serie 6, Teil 4: DIE SYSCALL-ABI — jetzt zahlen die Nähte
+- **Der Sprung:** Aus „der Kernel tut alles selbst" wird „der Kernel wird
+  **gebeten**". Hinter INT 0x80 steht jetzt eine echte **Syscall-Tabelle** mit
+  22 Nummern in drei Gruppen, einem einheitlichen Fehler-Enum und einer
+  dokumentierten ABI: **`docs/syscalls.md`**. Ab jetzt gilt: Eine Änderung an
+  dieser Tabelle ist eine bewusste **ABI-Änderung** — zwei Tests nageln
+  Nummern und Struktur-Layouts fest, wer eine Zahl verschiebt, bricht sie.
+- **DIE NÄHTE HABEN GEHALTEN.** Die ehrliche Bilanz dessen, was seit Serie 4
+  bewusst gelegt wurde:
+  - **Socket-API (Serie 5): 1:1 durchgereicht.** `oeffnen`, `senden`,
+    `empfangen`, `schliessen`, `zustand`, `aufloesen` — **kein Zeichen**
+    Änderung in `src/netz/socket.rs`. Aus „Slice, den die Kernel-Shell stellt"
+    wurde „Slice, den der Kernel aus User-Speicher kopiert", genau wie in der
+    Bestandsaufnahme vorhergesagt.
+  - **VFS (Serie 3/4): 1:1 durchgereicht.** `read_at`/`write_at` lieferten
+    schon Byte-Zahlen statt Panics, `stat` schon reine Daten, `FsFehler` war
+    schon vollständig. Es kam nur die Grenze DAVOR.
+  - **NACHGESCHÄRFT WERDEN MUSSTE GENAU EINES:** die **Semantik** von
+    `verbinde`. `socket::verbinden` ist nicht-blockierend — es startet den
+    Handshake, und wer wissen will, ob er klappt, muss den Stack „pumpen". Ein
+    Ring-3-Programm **kann** das nicht (Pumpen ist Kernel-Innenleben und wird
+    nie ein Syscall). Also pumpt der **Syscall** selbst, mit 8-s-Frist. Keine
+    Änderung *an* der API, sondern eine Entscheidung *darüber* — dokumentiert,
+    damit klar ist, dass dieser eine Syscall Sekunden dauern kann.
+- **Aufruf-Konvention:** Nummer in `rax`, Argumente in `rdi/rsi/rdx/r10`,
+  **Fehlercode in `rax`, Ergebnis in `rdx`**. Zwei Rückgabe-Register statt
+  Linux' „negativer errno", weil ein Ergebnis jeden u64-Wert annehmen darf
+  (Uhrzeit, IP, Dateigröße) — kein Bit muss für „ist das ein Fehler?"
+  reserviert werden.
+- **Zeiger IMMER als (Zeiger, Länge), NIE nullterminiert.** Der Kernel sucht
+  nie ein Terminator-Byte im User-Speicher — das wäre ein Lesevorgang
+  unbekannter Länge in fremdem Speicher. Die Fehlerklasse „Pfad ohne
+  Nullterminierung" existiert in dieser ABI deshalb gar nicht.
+- **`Fehler`-Enum (25 Codes) als einzige Außensicht.** `FsFehler`, `IoFehler`,
+  `SocketFehler`, `DnsFehler` und `CopyFehler` werden darauf ABGEBILDET — ein
+  Prozess erfährt nie, ob unter ihm SpeedFS, FAT32 oder ein RamFs liegt
+  (`KeinSpeedFs`/`KeinFat32` → beide `NichtKonfiguriert`). Zeiger-Fehler
+  werden absichtlich GROB abgebildet: Ob eine Adresse gemappt ist, ist eine
+  Information über den Kernel-Zustand.
+- **PER-PROZESS-HANDLE-TABELLE** (`src/syscall/handle.rs`) — die letzte offene
+  Lücke aus der Bestandsaufnahme (b). Ein Handle ist ein INDEX in die eigene
+  kleine Tabelle: Dieselbe Zahl bedeutet in jedem Prozess etwas anderes, und
+  das GLOBALE Socket-Handle verlässt den Kernel nie. Handle 0/1/2 sind
+  reserviert (Eingabe / **Ausgabe: Bildschirm+seriell** / **Diagnose: nur
+  seriell**) und gehören dem Kernel. Der getrennte Diagnose-Kanal ist kein
+  Luxus: Ein Prozess, der tausende Zeilen protokolliert, würde über Handle 1
+  den Compositor überschwemmen.
+- **AUTOMATISCHES AUFRÄUMEN.** Die Tabelle steckt IM Prozess-Kontrollblock,
+  also schließt ihr `Drop` beim Prozess-Ende alles Offene — inklusive
+  geordnetem TCP-Abbau. Kein Pfad kann es vergessen. Bewiesen für den
+  regulären `exit` UND für den ABSTURZ.
+- **Gruppe 0 (Prozess/Ausgabe):** `exit`, `yield`, `getpid`, `schreibe`,
+  `schlafe`, `zeit_jetzt` (monoton), `zeit_epoche` (Wanduhr).
+- **Gruppe 1 (Dateien):** `oeffne`, `lese_at`, `schreibe_at`, `schliesse`,
+  `stat`, `liste`, `loesche`, `umbenenne`, `mkdir`. Zwei ehrliche Folgen des
+  pfadbasierten VFS stehen in der Doku statt in einer Ausrede: Ein Handle
+  merkt sich den **Pfad** (nach `umbenenne` liefert es `NichtGefunden` — der
+  Test prüft genau das), und es gibt **keine Dateiposition** (deshalb hängt
+  `schreibe` auf ein Datei-Handle an).
+- **Gruppe 2 (Netz):** `socket`, `verbinde`, `sende`, `empfange`, `aufloesen`,
+  `socket_zustand`. `empfange` bleibt bewusst NICHT-blockierend (0 = noch
+  nichts) — blockierend bräuchte das Warte-Modell, und Pollen ist ehrlicher
+  als ein verstecktes Timeout.
+- **DIE NEUE LOCK-DISZIPLIN** (docs/syscalls.md §8) — das war die eigentliche
+  Denkarbeit. Ein Syscall läuft mit ausgeschalteten Interrupts, also (a) sind
+  Locks, die der Kernel nur mit `without_interrupts` hält, gefahrlos
+  benutzbar, aber (b) auf einen Lock WARTEN ist ein Hänger. `fs::mit_fs` ist
+  genau so ein Lock. Zwei Bausteine lösen das: **`warte_fenster()`**
+  (Interrupts an, `hlt`, aus — nur hier darf gewechselt werden, und nur ohne
+  Lock in der Hand) und **`mit_vfs()`** (try_lock + Wartefenster, bis 50
+  Versuche, dann `Belegt`). Nebenbei: `hlt` mit ausgeschalteten Interrupts
+  wäre ein Stillstand für immer.
+- **DER PRÜFSTAND** (`prozess::pruefstand_programm`) — ein 75-Byte-Ring-3-
+  Programm als **Fernbedienung**: Es liest Syscall-Nummer und Argumente aus
+  seinem eigenen Speicher, löst `int 0x80` aus und legt Fehlercode und
+  Ergebnis dort ab; zwischen zwei Aufträgen schläft es per `schlafe(1)`.
+  Damit läuft jeder Testfall als gewöhnlicher Rust-Code, während der Aufruf
+  ECHT unprivilegiert ist — eigener Adressraum, eigene Handle-Tabelle, echte
+  dreistufige Zeigerprüfung. Ein Angriff im Test ist ein echter Angriff.
+- **BEWEISE** (`tests/syscalls.rs`, 8 Tests, echt in QEMU):
+  - Gruppe 0/1/2 im Erfolgsfall, inklusive **copy-OUT**: Der Kernel schreibt
+    `lese_at`- und `stat`-Ergebnisse in den Prozess, der Test liest sie aus
+    dessen (inaktivem) Adressraum zurück und vergleicht byteweise.
+  - **Angriffe:** unbekannte Nummern (auch `u64::MAX`), Kernel-Zeiger,
+    Nullzeiger, ungemappte Adressen, Zeiger über die Seitengrenze, Längen von
+    0 bis `u64::MAX`, relative Pfade, kaputtes UTF-8, Pfade über dem Deckel,
+    Offsets über 1 GiB, fremde/geschlossene/nie vergebene/„negative" Handles,
+    reservierte Handles, falscher Handle-Typ in beide Richtungen,
+    Nur-Lesen/Nur-Schreiben-Verstöße. **Jeder** liefert einen Fehlercode,
+    keiner eine Panik.
+  - **HANDLE-ISOLATION aus Ring 3:** Zwei Prozesse bekommen beide Handle 3 —
+    einer eine Datei, einer einen Socket. Prozess B probiert alle 32
+    Handle-Zahlen durch und erreicht A's Datei mit keiner.
+  - **LECK-TEST:** 5 Sockets öffnen, `exit` ohne ein einziges `schliesse` →
+    alle automatisch zu; danach dasselbe mit einem ABGESTÜRZTEN Prozess. Der
+    Nachbarprozess macht danach weiter Syscalls. Frame-Bilanz byte-exakt null.
+- **Ein eigener Fehler, ehrlich notiert:** Die erste Fassung des Leck-Tests
+  hat ein Leck GEMELDET, wo keins war — `socket::schliessen` markiert nur, aus
+  der Tabelle fliegen die Einträge erst beim nächsten `aufraeumen` (das in
+  `oeffnen`/`bedienen` steckt). Die Messdisziplin steht jetzt als Kommentar im
+  Test, damit der nächste Leser nicht dieselbe Falle findet.
+- **Zwei ABI-Folgen, die eigene Tests aufgedeckt haben** (statt sie zu
+  übersehen): (1) `rax` und `rdx` sind AUSGABE-Register und werden **nicht**
+  erhalten — der Kontext-Sicherungs-Test prüft sie jetzt getrennt, und die
+  Doku sagt es ausdrücklich. (2) Der Zähler-Demo-Prozess benutzt jetzt
+  `SYS_SCHREIBE` (Nummer 3); der „gibt nie ab"-Test prüft die Abgabe-Nummern
+  über die ABI-Konstanten, damit er bei künftigen Änderungen mitwandert.
+- **Bewusst NICHT dabei** (docs/syscalls.md §9): `fork`/`exec` (ohne
+  ELF-Loader gäbe es nichts zu exec-en), blockierendes `lese`/`empfange` und
+  `select` (brauchen das Warte-Modell), Arbeitsverzeichnis, **Fenster-
+  Syscalls** (ein Zeichenbefehl aus Ring 3 darf den MANAGER-Lock nicht lange
+  synchron halten — das braucht eine Kommando-Warteschlange pro Fenster),
+  Rechte/Benutzer, `dup`/Handle-Vererbung.
+
 ### Serie 6, Teil 3: DER PRÄEMPTIVE SCHEDULER — der PIT wird zum Herz
 - **Der Sprung:** Multitasking war in SpeedOS immer KOOPERATIV — ein Task
   lief, bis er `await`-te. Ab jetzt kann der Kernel einem Programm die CPU

@@ -600,6 +600,37 @@ pub fn mit_fs<T>(f: impl FnOnce(&mut dyn FileSystem) -> FsErgebnis<T>) -> FsErge
     }
 }
 
+/// Eine gehaltene VFS-Sperre (Rückgabe von `vfs_versuchen`).
+pub struct VfsWache {
+    wache: spin::MutexGuard<'static, Option<MountTabelle>>,
+}
+
+impl VfsWache {
+    /// Das gemountete Dateisystem — oder `NichtInitialisiert`.
+    pub fn fs(&mut self) -> FsErgebnis<&mut dyn FileSystem> {
+        match self.wache.as_mut() {
+            Some(tabelle) => Ok(tabelle),
+            None => Err(FsFehler::NichtInitialisiert),
+        }
+    }
+}
+
+/// Versucht, das VFS zu sperren — OHNE zu warten (`None` = gerade belegt).
+///
+/// WARUM DAS FÜR SYSCALLS EXISTIERT (Serie 6, Teil 4): `mit_fs` nimmt den
+/// VFS-Lock, OHNE Interrupts auszuschalten — ein Kernel-Task kann also mitten
+/// im Dateizugriff verdrängt werden. Würde ein Syscall dann blockierend auf
+/// denselben Lock warten, wäre das ein HÄNGER: Im Syscall sind Interrupts aus
+/// (Interrupt-Gate), der Timer kann nicht feuern, der Kernel-Prozess kommt nie
+/// wieder dran und gibt den Lock nie frei.
+///
+/// Deshalb: Der Syscall-Pfad VERSUCHT es, lässt bei Misserfolg in einem
+/// Wartefenster (Interrupts an, kein Lock in der Hand) den Kernel-Prozess
+/// weiterlaufen und probiert es erneut — siehe `syscall::mit_vfs`.
+pub fn vfs_versuchen() -> Option<VfsWache> {
+    VFS.try_lock().map(|wache| VfsWache { wache })
+}
+
 /// Kopiert eine Datei. Ist das Ziel ein existierendes Verzeichnis,
 /// landet die Kopie DARIN (unter gleichem Namen) — wie bei cmd/copy.
 pub fn kopieren(quelle: &str, ziel: &str) -> FsErgebnis<()> {
