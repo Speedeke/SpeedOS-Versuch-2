@@ -91,6 +91,13 @@ da es dort keine serielle Debug-Ausgabe gibt.*
   → `Box`, `Vec`, `String`, `BTreeMap` funktionieren im Kernel
 - **Multitasking:** kooperativ mit async/await — eigener Executor mit
   Waker-Support, lock-freien Task-Queues und `hlt`-Schlaf im Leerlauf
+- **Echte User-Space-Programme (Serie 6):** Ring 3, ein eigener Adressraum
+  je Prozess, präemptiver Scheduler, eine dokumentierte
+  [Syscall-ABI](docs/syscalls.md) und ein **ELF64-Loader** — SpeedOS lädt
+  statisch gelinkte Programme von der Platte, mappt ihre Segmente mit **W^X**
+  (NX-Bit) und führt sie unprivilegiert aus. Die Programme in `userland/`
+  (`hallo`, `kopiere`, `netzhole`) haben **keine** Kernel-Abhängigkeit und
+  erreichen das System nur über `int 0x80`
 - **SpeedShell:** interaktive Kommandozeile mit Befehls-Registry,
   Verlauf (Pfeiltasten), Tab-Vervollständigung und 19 Befehlen —
   läuft im Desktop als Terminal-FENSTER (Ausgabe-Umleitung in ein
@@ -225,11 +232,49 @@ src/
 ├── rtc.rs           CMOS-Echtzeituhr (einmaliges Lesen beim Boot)
 ├── task/            Async-Multitasking: Task, Executor, Tastatur-Stream
 ├── shell/           SpeedShell: Sitzungen, ZeilenEditor, Befehls-Registry
-└── fs/              VFS-Trait + RamFs
+├── fs/              VFS-Trait + RamFs + SpeedFS + FAT32
+├── netz/            Ethernet/ARP/IPv4/ICMP/UDP/DHCP/DNS/TCP/Sockets/HTTP
+├── adressraum.rs    Pro-Prozess-Adressräume (eigene P4, Kernel gespiegelt)
+├── prozess.rs       Prozess-Kontrollblock, Kernel-Stacks, Programm-Start
+├── scheduler.rs     Präemptiver Round-Robin (der Executor ist PID 0)
+├── syscall/         Die ABI: Dispatcher, Handle-Tabelle, Datei-/Netz-Gruppe
+├── elf.rs           ELF64-Loader: prüft streng, mappt mit W^X
+└── programme.rs     Die eingebetteten User-Programme (Installation)
+userland/            DIE ANDERE SEITE DER GRENZE — eigener Workspace ohne
+│                    jede Kernel-Abhängigkeit:
+├── src/lib.rs       libspeed: Syscall-Wrapper, print!, Panic, _start
+├── src/bin/         hallo, kopiere, netzhole
+└── speedos.ld       Linker-Skript (ET_EXEC ab 0x80_0000_0000, 4-KiB-Segmente)
 boot/                Host-Runner: baut das UEFI-Disk-Image, startet QEMU
+build.rs             baut userland/ mit und bettet die Programme ein
 tests/               Integrationstests (booten einzeln in QEMU)
-docs/                Migrationsplan bootloader 0.9 -> 0.11, Screenshots
+docs/                Syscall-ABI, SpeedFS-Format, Scheduler-Entwurf, ...
 ```
+
+## Eigene Programme
+
+Die drei mitgelieferten Programme liegen nach dem ersten Boot auf
+`/platte/programme` — als ganz gewöhnliche Dateien. Sie sind **kein
+Kernel-Code**: eigenes Crate, eigener Linker, eigener Adressraum, Ring 3.
+
+```
+starte hallo                       # Text + argv + PID, Exit-Code 0
+starte hallo --code=7              # beweist, dass Exit-Codes durchkommen
+starte kopiere /platte/heim/a.txt /platte/heim/b.txt
+starte netzhole http://example.com          # der Meilenstein
+starte netzhole http://example.com /platte/heim/seite.html
+programme                          # was mitgeliefert ist
+elfinfo netzhole                   # Segmente, Rechte, .bss
+prozesse                           # laufende Prozesse
+```
+
+Im Explorer startet ein **Doppelklick** auf eine ausführbare Datei sie
+direkt — erkannt wird das an den ersten Bytes (ELF-Magie), nicht an einer
+Dateiendung; die kennt unser VFS gar nicht.
+
+Ein eigenes Programm schreibt man in `userland/src/bin/`, trägt es in
+`userland/Cargo.toml` und in `src/programme.rs` ein — `cargo run` baut und
+installiert es dann automatisch mit.
 
 ## Netzwerk in Aktion
 
@@ -357,17 +402,26 @@ könnte — die unteren Schichten und die Socket-API blieben dabei unsere.
       sie auf die Platte. LAN- und Internet-Messung je 10/10 sauber.
       Umfang/Reißleine: [docs/tcp-scope.md](docs/tcp-scope.md),
       Bestandsaufnahme: [docs/serie5-netzwerk.md](docs/serie5-netzwerk.md)
-- [ ] **User Space (Serie 6, läuft):** **Ring 3 steht** — SpeedOS führt
-      unprivilegierten Code aus (`ring3test`), der per Syscall (INT 0x80,
-      geprüfter copy-in/copy-out) druckt und sauber zurückkehrt; ein Absturz
-      im User-Mode wird aufgefangen, **der Kernel läuft weiter**. **Und jeder
-      Prozess hat jetzt seinen eigenen Adressraum** (`adressraum`): eigene
-      Level-4-Tabelle, Kernel hineingespiegelt, untere Hälfte privat —
-      dieselbe virtuelle Adresse zeigt in zwei Prozessen auf verschiedene
-      Daten, der User-Stack hat eine Guard-Page, und das Abreißen gibt jeden
-      Frame zurück (Bilanz byte-exakt null). Als Nächstes: präemptiver
-      Scheduler, ELF-Loader — Fahrplan in
-      [docs/serie6-bestandsaufnahme.md](docs/serie6-bestandsaufnahme.md)
+- [x] **User Space (Serie 6): SpeedOS FÜHRT FREMDE PROGRAMME AUS.** Die
+      ganze Kette steht: **Ring 3** (unprivilegierter Code, Absturz wird
+      aufgefangen, der Kernel läuft weiter) → **eigener Adressraum je
+      Prozess** (dieselbe virtuelle Adresse zeigt in zwei Prozessen auf
+      verschiedene Daten; Abriss byte-exakt frame-neutral) → **präemptiver
+      Scheduler** (der PIT nimmt die CPU weg; der kooperative Executor ist
+      selbst PID 0) → **dokumentierte Syscall-ABI**
+      ([docs/syscalls.md](docs/syscalls.md), 23 Nummern, per-Prozess-Handles)
+      → **ELF-Loader** (`src/elf.rs`: statisch gelinkte `ET_EXEC`, W^X per
+      NX-Bit, streng geprüft gegen kaputte und bösartige Dateien) →
+      **eigene Programme** (`userland/`: libspeed + `hallo`, `kopiere`,
+      `netzhole`).
+      **Der Meilenstein:** `starte /platte/programme/netzhole
+      http://example.com` — ein eigenständiges Programm, von der eigenen
+      Platte geladen, im eigenen Adressraum, holt über den eigenen
+      Netzwerk-Stack eine Webseite aus dem Internet.
+      *Noch offen:* `fork`/`exec` (ein Prozess kann keinen anderen starten),
+      blockierendes `empfange`/`select`, Fenster-Syscalls (ein Ring-3-Programm
+      kann noch nicht zeichnen) — siehe
+      [docs/syscalls.md §10](docs/syscalls.md)
 - [ ] Ferner: HTML-Text-Browser (Kernel-App), TLS/HTTPS (geprüfte Krypto),
       Sound
 

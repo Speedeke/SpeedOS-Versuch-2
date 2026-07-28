@@ -38,7 +38,7 @@
 
 use crate::adressraum;
 use crate::prozess::{
-    Pid, Prozess, ProzessMoment, TrapFrame, Zustand, KERNEL_PID, MAX_PROZESSE,
+    Pid, Prozess, ProzessEnde, ProzessMoment, TrapFrame, Zustand, KERNEL_PID, MAX_PROZESSE,
 };
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -547,10 +547,10 @@ pub fn syscall_abgeben(rahmen: *mut TrapFrame) -> *mut TrapFrame {
     freiwillig_wechseln(rahmen)
 }
 
-/// Syscall `exit`: den aufrufenden Prozess beenden und weiterschalten.
-/// Liefert `false`, wenn gar kein eingeplanter User-Prozess läuft (dann ist
+/// Syscall `exit(code)`: den aufrufenden Prozess beenden und weiterschalten.
+/// Liefert `None`, wenn gar kein eingeplanter User-Prozess läuft (dann ist
 /// der alte Einzelschuss-Pfad in ring3.rs zuständig).
-pub fn syscall_beenden(rahmen: *mut TrapFrame) -> Option<*mut TrapFrame> {
+pub fn syscall_beenden(rahmen: *mut TrapFrame, code: u64) -> Option<*mut TrapFrame> {
     let aktuell = AKTUELL.load(Ordering::Relaxed);
     if !PLANUNG_AN.load(Ordering::Relaxed) || aktuell == KERNEL_SLOT {
         return None;
@@ -559,6 +559,9 @@ pub fn syscall_beenden(rahmen: *mut TrapFrame) -> Option<*mut TrapFrame> {
         let mut tabelle = TABELLE.try_lock()?;
         let prozess = tabelle[aktuell].as_mut()?;
         prozess.zustand = Zustand::Beendet;
+        // Den Exit-Code festhalten, BEVOR der Prozess die CPU verliert — der
+        // Aufrufer (Shell) holt ihn später über `warten_auf` ab.
+        prozess.ende = Some(ProzessEnde::Beendet(code));
     }
     // Der Aktuelle ist jetzt nicht mehr lauffähig -> Regel 1 erzwingt den
     // Wechsel, ganz ohne Sonderbehandlung.
@@ -618,6 +621,7 @@ pub fn user_prozess_toeten(rahmen: &mut TrapFrame) -> bool {
             _ => return false,
         };
         prozess.zustand = Zustand::Beendet;
+        prozess.ende = Some(ProzessEnde::Abgestuerzt);
         prozess.kern_stack_oben().as_u64()
     };
     rahmen.rip = sterbe_stub_adresse();
@@ -809,6 +813,7 @@ pub fn beenden(pid: Pid) -> bool {
         for prozess in tabelle.iter_mut().flatten() {
             if prozess.pid == pid && prozess.zustand != Zustand::Beendet {
                 prozess.zustand = Zustand::Beendet;
+                prozess.ende = Some(ProzessEnde::Gestoppt);
                 return true;
             }
         }
@@ -833,6 +838,56 @@ pub fn warten_setzen(pid: Pid, wartet: bool) -> bool {
         }
         false
     })
+}
+
+/// Wartet aus KERNEL-KONTEXT darauf, dass ein Prozess endet — und liefert,
+/// WIE er geendet hat. `None` = Frist abgelaufen (der Prozess läuft weiter)
+/// oder es gibt ihn nicht (mehr).
+///
+/// WARUM `hlt` UND NICHT `await`: Der Shell-Befehl, der hier wartet, ist eine
+/// gewöhnliche synchrone Funktion — der kooperative Executor bekommt in
+/// dieser Zeit keine Gelegenheit zu laufen, also auch der Aufräum-Task nicht.
+/// Deshalb erntet diese Funktion den Prozess SELBST (`aufraeumen()`), sobald
+/// er beendet ist. Das ist erlaubt: Wir sind in Kernel-Kontext, dürfen also
+/// Locks nehmen und Speicher freigeben.
+///
+/// Der PREIS steht ehrlich hier: Solange gewartet wird, laufen die anderen
+/// KERNEL-Tasks (Compositor, Maus) nicht — der Bildschirm steht. Die
+/// PROZESSE laufen sehr wohl weiter, denn die verdrängt der Timer. Genau
+/// dasselbe tut schon `praemptionstest`. Eine wirklich nebenläufige Variante
+/// bräuchte ein `async` Befehl-Trait; das ist eine eigene Aufgabe.
+///
+/// `frist_ms == 0` heisst „ohne Frist".
+pub fn warten_auf(pid: Pid, frist_ms: u64) -> Option<ProzessEnde> {
+    let frist = crate::zeit::ms_seit_boot() + frist_ms;
+    loop {
+        let stand = mit_tabelle(|tabelle| {
+            tabelle
+                .iter()
+                .flatten()
+                .find(|prozess| prozess.pid == pid)
+                .map(|prozess| (prozess.zustand, prozess.ende))
+        });
+        match stand {
+            // Weg — entweder nie da gewesen oder schon abgeräumt.
+            None => return None,
+            Some((Zustand::Beendet, ende)) => {
+                // Selbst ernten, damit Adressraum und Kernel-Stack sofort
+                // zurückfliessen (der Aufräum-Task kommt hier nicht dran).
+                aufraeumen();
+                // `ende` ist an allen drei Beendigungs-Stellen gesetzt; der
+                // Ersatzwert ist reine Vorsicht.
+                return Some(ende.unwrap_or(ProzessEnde::Gestoppt));
+            }
+            Some(_) => {}
+        }
+        if frist_ms != 0 && crate::zeit::ms_seit_boot() >= frist {
+            return None;
+        }
+        // Bis zum nächsten Interrupt schlafen — in dieser Zeit bekommt der
+        // gewartete Prozess seine Zeitscheiben.
+        crate::zeit::warte_auf_interrupt();
+    }
 }
 
 /// Räumt beendete Prozesse ab: Adressraum-Frames und Kernel-Stack gehen
@@ -865,9 +920,12 @@ pub fn aufraeumen() -> usize {
     let anzahl = geerntet.len();
     for prozess in geerntet {
         crate::serial_println!(
-            "[SCHED] PID {} '{}' abgeraeumt ({} us CPU, {} Praemptionen, {} Syscalls).",
+            "[SCHED] PID {} '{}' abgeraeumt: {} (Code {}), {} us CPU, \
+             {} Praemptionen, {} Syscalls.",
             prozess.pid,
             prozess.name,
+            prozess.ende.map(|e| e.text()).unwrap_or("Ende unbekannt"),
+            prozess.ende.map(|e| e.code()).unwrap_or(0),
             prozess.cpu_us,
             prozess.praemptionen,
             prozess.syscalls

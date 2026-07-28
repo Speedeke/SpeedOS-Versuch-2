@@ -570,7 +570,7 @@ extern "C" fn syscall_dispatch(rahmen: *mut TrapFrame) -> *mut TrapFrame {
         SYS_EXIT => {
             f.rax = Fehler::Ok.code();
             f.rdx = 0;
-            if let Some(neuer) = scheduler::syscall_beenden(rahmen) {
+            if let Some(neuer) = scheduler::syscall_beenden(rahmen, a0) {
                 return neuer;
             }
             // Kein eingeplanter Prozess: der alte Einzelschuss-Pfad

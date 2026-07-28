@@ -337,10 +337,91 @@ ein Warte-Modell Pflicht — nicht der direkte Aufruf.
 
 ---
 
-## 9. Bewusst NICHT in dieser ABI
+## 9. Der Prozess-Start: Einsprung und Argumente
 
-- **Kein `fork`/`exec`** — Prozesse entstehen (noch) nur kernelseitig. Ohne
-  ELF-Loader gäbe es auch nichts zu `exec`-en.
+*(Serie 6, Teil 5 — ab hier lädt SpeedOS echte Programme, siehe `src/elf.rs`.)*
+
+Ein Programm ist eine **statisch gelinkte ELF64-Datei vom Typ `ET_EXEC`** für
+x86-64. Kein dynamisches Linken, kein PIE, kein Interpreter — `elf::pruefen`
+lehnt das ausdrücklich ab (mit einem eigenen Fehler, damit ein versehentlicher
+PIE-Build sofort erkennbar ist).
+
+### Speicher-Layout
+
+| Von | Bis | Inhalt |
+|-----|-----|--------|
+| `0x80_0000_0000` | `+16 MiB` | Programm-Image (die `PT_LOAD`-Segmente) |
+| `+16 MiB` | `+32 MiB − 68 KiB` | **ungemappt** (trennt Programm und Stack) |
+| `+32 MiB − 68 KiB` | `+32 MiB − 64 KiB` | Guard-Page (ungemappt) |
+| `+32 MiB − 64 KiB` | `+32 MiB` | User-Stack (16 Seiten, **nicht ausführbar**) |
+
+`0x80_0000_0000` ist `adressraum::USER_START`, der einzige P4-Slot, der jedem
+Prozess privat gehört. Jedes Programm liegt an derselben Adresse — in seinem
+eigenen Adressraum.
+
+### Segment-Rechte: W^X
+
+Jedes Segment wird mit **genau** seinen `p_flags` gemappt. Ein Segment, das
+zugleich `PF_W` und `PF_X` trägt, wird **abgelehnt** — eine Seite ist entweder
+beschreibbar oder ausführbar, nie beides. Durchgesetzt wird das per NX-Bit
+(EFER.NXE, siehe `memory::nx_aktivieren`); der Stack ist ebenfalls NX.
+
+Weil zwei Segmente mit verschiedenen Rechten sich keine Seite teilen dürfen
+(sonst wäre W^X aushebelbar), lehnt der Loader auch **überlappende Segmente**
+auf Seiten-Ebene ab. Das Linker-Skript `userland/speedos.ld` richtet deshalb
+jede Sektion auf 4 KiB aus.
+
+### `.bss`
+
+`p_memsz > p_filesz` ist erlaubt; die Differenz ist `.bss` und **ist garantiert
+genullt**. Der Kernel muss dafür nichts tun: Jeder frisch gemappte Frame wird
+ohnehin genullt, damit kein Byte des Vorbesitzers nach Ring 3 leckt.
+
+### Register beim ersten Befehl
+
+| Register | Inhalt |
+|----------|--------|
+| `rip` | `e_entry` aus dem ELF-Header |
+| `rsp` | Stack-Spitze, unterhalb der argv-Daten, 16-ausgerichtet |
+| `rdi` | **argc** — Anzahl der Argumente (inkl. Programmname) |
+| `rsi` | **argv** — Zeiger auf ein Feld von `ArgEintrag` |
+| alle übrigen | 0 |
+
+```c
+struct ArgEintrag {   // 16 Byte, repr(C)
+    uint64_t zeiger;  // auf die Bytes des Arguments
+    uint64_t laenge;  // in Bytes
+};
+```
+
+**Argumente sind (Zeiger, Länge), NIE nullterminiert** — dieselbe Regel wie
+für jeden Puffer dieser ABI. Der Kernel sucht nirgends ein Terminator-Byte in
+fremdem Speicher, und ein Argument darf deshalb jedes Byte enthalten.
+
+`argv[0]` ist per Konvention der Programmname. Grenzen: höchstens 16 Argumente,
+je 255 Byte, zusammen 2 KiB.
+
+Die Register-Übergabe ist eine bewusste Abweichung von System V (das legt
+argc/argv auf den Stack): Wir schreiben unsere Start-Runtime selbst, und
+`rdi`/`rsi` sind genau die Register, die `extern "C" fn(u64, *const ArgEintrag)`
+erwartet. `libspeed::hauptprogramm!` erzeugt dazu ein `_start`, das den Stack
+16-ausrichtet und per `call` in Rust springt.
+
+### Rückgabe
+
+Der Rückgabewert von `haupt` wird zu `exit(code)`. Der Aufrufer (`starte`,
+`scheduler::warten_auf`) erfährt über `ProzessEnde`, ob der Prozess sich
+beendet hat (`Beendet(code)`), abgestürzt ist (`Abgestuerzt`, Code 139) oder
+von aussen gestoppt wurde (`Gestoppt`, Code 143).
+
+---
+
+## 10. Bewusst NICHT in dieser ABI
+
+- **Kein `fork`/`exec`** — ein Prozess kann keinen anderen starten. Programme
+  werden vom Kernel geladen (Shell `starte`, Explorer-Doppelklick). Ein
+  `spawn`-Syscall wäre additiv: Er müsste nur `syscall::mit_vfs` statt
+  `fs::mit_fs` benutzen (Lock-Disziplin, §8).
 - **Kein blockierendes `empfange`/`lese`** und kein `select`/`poll` — beides
   braucht das Warte-Modell (Prozess wird `Wartend` auf ein Ereignis, ein
   Kernel-Task weckt ihn). Der nächste Schritt.

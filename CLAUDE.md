@@ -485,6 +485,82 @@
   MESSFALLE (selbst hineingelaufen): `socket::schliessen` MARKIERT nur;
   `socket::anzahl()` sinkt erst nach dem nächsten `aufraeumen` (steckt in
   `oeffnen`/`bedienen`) — vor einer Leck-Messung also `netz::pumpen()`.
+- **ECHTE PROGRAMME (Serie 6, Teil 5, Juli 2026, `src/elf.rs` + `userland/`)
+  — SpeedOS fuehrt fremden Code aus:** Der ELF64-Lader nimmt NUR statisch
+  gelinkte `ET_EXEC` fuer x86-64; dynamisches Linken ist BEWUSST draussen
+  (ET_DYN/PT_INTERP -> eigene Fehler, damit ein versehentlicher PIE-Build
+  sofort erkennbar ist). HALTUNG: JEDE ZAHL IN DER DATEI IST EINE BEHAUPTUNG
+  EINES FREMDEN — Dateigrenzen mit checked_add, jedes Segment VOLLSTAENDIG im
+  Programm-Bereich (`elf::IMAGE_START..IMAGE_ENDE` = USER_START .. +16 MiB;
+  Kernel-Adressen/Nullseite/obere Haelfte fallen raus, BEVOR die erste Seite
+  gemappt wird), Groessen gedeckelt, Ausrichtung, KEINE ueberlappenden
+  Segmente auf SEITEN-Ebene (zwei Segmente in einer Seite muessten sich die
+  Rechte teilen -> W^X waere aushebelbar), Einsprung muss in ausfuehrbarem,
+  aus der DATEI geladenem Code liegen. `elf::pruefen` ist eine REINE Funktion
+  auf `&[u8]`: kein Adressraum, kein Lock, KEIN unsafe, panickt NIE. `laden`
+  mappt erst NACH der vollstaendigen Pruefung — und zwar mit den ENDGUELTIGEN
+  Rechten, weil der Inhalt ueber `AdressRaum::schreiben` (Physik-Mapping)
+  hineinkommt; es gibt also kein Zeitfenster, in dem Code-Seiten schreibbar
+  waeren. `.bss` (memsz > filesz) wird NICHT eigens genullt: frisch gemappte
+  Frames sind ohnehin genullt (Datenleck-Schutz) — die Garantie faellt ab.
+  W^X IN HARDWARE: `memory::nx_aktivieren()` (EFER.NXE, in `lib::init` VOR
+  jedem User-Mapping) + `adressraum::Rechte` mit GETRENNTEN Flag-Saetzen fuer
+  Blatt und Zwischentabellen (NX auf einer Zwischentabelle wuerde ALLES
+  darunter unausfuehrbar machen; die Zwischenebenen bleiben permissiv, das
+  Blatt kann nur wegnehmen). ACHTUNG: Ohne NXE ist Bit 63 RESERVIERT und
+  wuerde JEDEN Zugriff zum Page Fault machen — deshalb setzt
+  `Rechte::seiten_flags` NO_EXECUTE nur, wenn `memory::nx_aktiv()`. Der
+  User-Stack ist jetzt ebenfalls NX. PROZESS-LAYOUT (docs/syscalls.md §9):
+  Image ab USER_START (max 16 MiB), 16 MiB ungemappte LUECKE, dann Guard-Page
+  + 16 Seiten Stack bis `prozess::ELF_STACK_OBEN`. ARGUMENTE: argc in rdi,
+  argv in rsi als Feld von `ArgEintrag{zeiger,laenge}` — NIE nullterminiert
+  (dieselbe Regel wie die ganze ABI); max 16 Argumente à 255 B, zusammen 2 KiB.
+  `ProzessEnde` (Beendet(code)/Abgestuerzt=139/Gestoppt=143) wird an ALLEN
+  DREI Beendigungs-Stellen gesetzt; `scheduler::warten_auf(pid, frist)` wartet
+  aus Kernel-Kontext und ERNTET den Prozess selbst (der Aufraeum-Task kommt
+  waehrend eines synchronen Shell-Befehls nicht dran — dafuer steht waehrend
+  `starte` auch der Compositor, wie bei `praemptionstest`).
+  **userland/ ist die ANDERE SEITE der Grenze:** eigener Workspace, libspeed
+  (Syscall-Wrapper, print!, Datei/Socket, Panic-Handler, `_start` via
+  `hauptprogramm!`-Makro) + hallo/kopiere/netzhole. KEINE Kernel-Abhaengigkeit
+  — die ABI-Konstanten stehen dort NOCH EINMAL, und das ist Absicht: Eine ABI
+  ist ein VERTRAG, kein geteilter Header. Dasselbe Target
+  x86_64-unknown-none (-sse/+soft-float!) wie der Kernel, weil der
+  Kontext-Wechsel nur GP-Register sichert — ein Programm mit XMM bekaeme
+  stillschweigend falsche Zahlen. BAU-LEKTIONEN (in userland/.cargo/config.toml
+  und build.rs dokumentiert): (1) `relocation-model=static` erzeugt absolute
+  32-Bit-Adressen -> bei Ladeort 512 GiB hunderte `R_X86_64_32S out of range`;
+  die Voreinstellung `pic` (RIP-relativ) laeuft an jeder Adresse. (2) Ohne
+  `--no-pie` entsteht ET_DYN UND der PIE-Link zieht .dynsym/.rela.dyn/.dynamic
+  als WAISEN-Sektionen hinter .text — sie zerlegen die ausgerichtete
+  Segment-Folge, und zwei PT_LOADs landen in einer Seite. (3) `speedos.ld`
+  richtet JEDE Sektion (auch .bss) auf 4096 aus, sonst teilen sich Segmente
+  eine Seite. BUILD-INTEGRATION: Das kernel-`build.rs` baut userland/ mit
+  (EIGENER Ziel-Baum — sonst wartet der innere cargo auf die Dateisperre des
+  aeusseren; geerbte RUSTFLAGS/CARGO_*-Variablen werden weggeraeumt), die ELFs
+  wandern per `include_bytes!` ins Kernel-Image, und `programme::installieren()`
+  schreibt sie beim Boot nach /platte/programme (byteweiser Vergleich, nur bei
+  echter Aenderung). WARUM eingebettet statt ins Disk-Image: Ein Host-seitiger
+  SpeedFS-Writer waere eine dauerhafte Doppelpflege des eigenen Formats; so
+  reisen die Programme mit `cargo run`, `cargo test` UND `cargo image` mit.
+  Notausgang `SPEEDOS_OHNE_USERLAND=1`. Shell: `starte <programm> [args]`
+  (Exit-Code-Anzeige, Kurzname ohne Pfad), `programme`, `elfinfo`; Explorer-
+  Doppelklick entscheidet an den ERSTEN BYTES (`prozess::ist_programm`), nicht
+  an einer Endung — unser VFS kennt keine. MEILENSTEIN (`tests/programme.rs`):
+  `starte /platte/programme/netzhole http://example.com` -> 571 Byte von
+  example.com, geholt von einem Ring-3-Programm von der eigenen Platte ueber
+  den eigenen Netz-Stack.
+- **DIE hlt-FALLE IM SYSCALL (Serie 6, Teil 5) — `zeit::warte_auf_interrupt()`:**
+  `int 0x80` geht durch ein INTERRUPT-Gate, im Syscall sind Interrupts also
+  AUS. Ein blankes `hlt` haelt die CPU dann FUER IMMER an (nichts kann sie
+  wecken) — ohne Meldung, ohne Panik. Genau daran haengte sich der Meilenstein
+  auf: `dns::aufloesen` (und dhcp/http) hatten `hlt()` in ihren synchronen
+  Warteschleifen, korrekt fuer Kernel-Kontext, toedlich aus Ring 3.
+  `zeit::warte_auf_interrupt()` prueft `are_enabled()` und oeffnet bei aus-
+  geschalteten Interrupts ein Wartefenster (`enable_and_hlt` + `disable`).
+  REGEL: Jede synchrone Warteschleife, die AUCH aus einem Syscall laufen kann,
+  benutzt diese Funktion — und haelt dabei KEINEN Lock (im Wartefenster darf
+  der Scheduler verdraengen).
 - **FAT32-Treiber (Juli 2026, `src/fs/fat32.rs`) — NUR LESEN:**
   SpeedOS liest fremde FAT32-Medien ("der USB-Stick"), schreibt sie
   aber NIE (jeder Schreib-Weg -> `IoFehler::NurLesen`). Kein/kaputtes

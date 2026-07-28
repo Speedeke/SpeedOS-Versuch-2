@@ -1,0 +1,52 @@
+# userland/Cargo.toml — Die USER-SPACE-Welt von SpeedOS (Serie 6, Teil 5)
+#
+# Das hier ist die andere Seite der Syscall-Grenze. Kein Kernel-Code, keine
+# Kernel-Typen, kein `speed_os`-Crate als Abhängigkeit — diese Programme
+# kennen SpeedOS ausschliesslich durch die 23 Zahlen aus docs/syscalls.md.
+# Genau das ist der Beweis, dass die ABI trägt: Wäre hier auch nur EIN
+# `use speed_os::...`, wäre es kein User-Space, sondern Kernel-Code in einer
+# anderen Datei.
+#
+# EIGENER WORKSPACE (wie boot/): Der Kernel-Workspace darf diese Crates nicht
+# mitbauen — sie brauchen ein eigenes Linker-Skript und werden vom
+# build.rs des Kernels gezielt gebaut und eingebettet.
+
+[package]
+name = "libspeed"
+version = "0.1.0"
+edition = "2021"
+description = "Die Standard-Bibliothek der SpeedOS-Programme (no_std)"
+
+# Nicht Teil des Kernel-Workspaces (der excludet uns zusätzlich).
+[workspace]
+
+[lib]
+name = "libspeed"
+path = "src/lib.rs"
+
+# Die ersten drei echten SpeedOS-Programme.
+[[bin]]
+name = "hallo"
+path = "src/bin/hallo.rs"
+
+[[bin]]
+name = "kopiere"
+path = "src/bin/kopiere.rs"
+
+[[bin]]
+name = "netzhole"
+path = "src/bin/netzhole.rs"
+
+# panic = "abort" ist Pflicht: Abwickeln (unwinding) bräuchte eine
+# Personality-Funktion und Landing Pads — beides gibt es ohne std nicht.
+# Ein panickendes SpeedOS-Programm beendet sich per exit(101).
+[profile.dev]
+panic = "abort"
+opt-level = 1
+
+[profile.release]
+panic = "abort"
+opt-level = "s"   # klein: die Programme wandern ins Kernel-Image
+lto = true
+codegen-units = 1
+strip = "debuginfo"

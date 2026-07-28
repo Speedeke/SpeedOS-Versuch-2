@@ -250,7 +250,7 @@ fn warte_auf(xid: u32, typ: u8, deadline_ms: u64) -> Option<DhcpNachricht> {
         if crate::zeit::ms_seit_boot() >= deadline_ms {
             return None;
         }
-        x86_64::instructions::hlt();
+        crate::zeit::warte_auf_interrupt();
     }
 }
 

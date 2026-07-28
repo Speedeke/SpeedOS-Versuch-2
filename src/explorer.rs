@@ -57,6 +57,29 @@ const N_LISTE_OEFFNEN: u32 = 100_000; // + Eintrag-Index (Doppelklick/Enter)
 const N_BAUM: u32 = 200_000; // + Baumzeilen-Index
 const N_RECHTSKLICK: u32 = 300_000; // + Eintrag-Index (Kontextmenü)
 
+/// Startet ein per Doppelklick geöffnetes Programm — AUSSERHALB des
+/// MANAGER-Locks (aus `AppReaktion::danach`), denn `prozess_starten` nimmt
+/// das VFS und die Prozess-Tabelle.
+///
+/// Der Prozess läuft NEBENHER: Anders als beim Shell-Befehl `starte` wird
+/// hier NICHT auf sein Ende gewartet — der Explorer soll bedienbar bleiben
+/// und der Compositor darf nicht stehen. Die Ausgabe des Programms landet
+/// deshalb im HAUPT-Terminal (dorthin leitet `konsole::ausgabe_ziel()`
+/// alles, was nicht zu einer gerade laufenden Shell-Sitzung gehört), und
+/// der Aufräum-Task holt den Prozess ab, wenn er fertig ist.
+fn programm_starten_aus_explorer(pfad: &str) {
+    // argv[0] ist der Programmname — dieselbe Konvention wie bei `starte`.
+    let name = pfad.rsplit('/').next().unwrap_or(pfad);
+    match crate::prozess::prozess_starten(pfad, &[name]) {
+        Ok(pid) => crate::println!("[Explorer] '{}' gestartet (PID {}).", pfad, pid),
+        Err(fehler) => crate::println!(
+            "[Explorer] '{}' konnte nicht gestartet werden: {}",
+            pfad,
+            fehler.meldung()
+        ),
+    }
+}
+
 /// Der Papierkorb-Ordner im VFS.
 /// Der Papierkorb wohnt auf der DATEN-PLATTE, wenn sie gemountet
 /// ist, sonst im RAM — dieselbe zentrale Wahl wie bei den
@@ -552,13 +575,31 @@ impl ExplorerApp {
                 AppReaktion::neu_aufbauen()
             }
             NodeTyp::Datei => {
-                // SpeedText öffnen — NACH dem Lock (danach trägt den
-                // Pfad per move in die Box, siehe AppReaktion-Doku).
-                // Der frühere Nur-Lese-Betrachter ist Geschichte:
-                // Doppelklick auf eine Datei heißt jetzt BEARBEITEN.
-                AppReaktion::danach(move || {
-                    crate::speedtext::starten_mit(&pfad);
-                })
+                // AUSFÜHRBAR ODER TEXT? (Serie 6, Teil 5)
+                //
+                // Seit es echte Programme gibt, hat ein Doppelklick auf eine
+                // Datei zwei mögliche Bedeutungen. Entschieden wird an den
+                // ERSTEN BYTES der Datei, nicht an ihrem Namen: SpeedOS kennt
+                // keine Dateiendungen, und eine Endung wäre auch nur eine
+                // Behauptung. `ist_programm` liest 20 Byte und prüft die
+                // ELF-Magie samt Architektur (das `fs` darf hier unter dem
+                // MANAGER-Lock benutzt werden — siehe Lock-Regel in ui/app.rs).
+                //
+                // Die vollständige Prüfung macht dann der Loader; scheitert
+                // sie, meldet `prozess_starten` es sauber.
+                if crate::prozess::ist_programm(&pfad) {
+                    AppReaktion::danach(move || {
+                        programm_starten_aus_explorer(&pfad);
+                    })
+                } else {
+                    // SpeedText öffnen — NACH dem Lock (danach trägt den
+                    // Pfad per move in die Box, siehe AppReaktion-Doku).
+                    // Der frühere Nur-Lese-Betrachter ist Geschichte:
+                    // Doppelklick auf eine Datei heißt jetzt BEARBEITEN.
+                    AppReaktion::danach(move || {
+                        crate::speedtext::starten_mit(&pfad);
+                    })
+                }
             }
         }
     }

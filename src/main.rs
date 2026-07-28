@@ -125,7 +125,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     //    Modell und Größe seriell). Braucht die TSC-Zeit aus 1b für
     //    seine Polling-Timeouts. Die Boot-Platte ist per Konstruktion
     //    schreibgeschützt; beschreibbar ist nur die Daten-Platte.
-    speed_os::diagnose::schritt(format_args!("[1/4] ATA-Laufwerke erkennen ..."));
+    speed_os::diagnose::schritt(format_args!("[1/5] ATA-Laufwerke erkennen ..."));
     speed_os::ata::init();
 
     //    Der Heap wächst später in desktop_starten auf Bildschirm-
@@ -139,7 +139,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     //    PCI enumerieren und den virtio-blk-Treiber aufsetzen (falls
     //    QEMU die Daten-Platte per virtio statt IDE anbietet). Danach
     //    entscheidet fs::daten_geraet(), welches Backend /platte trägt.
-    speed_os::diagnose::schritt(format_args!("[2/4] PCI-Bus + virtio-blk + virtio-net ..."));
+    speed_os::diagnose::schritt(format_args!("[2/5] PCI-Bus + virtio-blk + virtio-net ..."));
     speed_os::pci::init();
     speed_os::virtio::blk::init();
     // virtio-net (Serie 5): NIC finden, RX+TX aufsetzen und als
@@ -156,15 +156,24 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     //    unformatiert -> nur Hinweis, NIE Auto-Format) und ERST
     //    DANACH die Einstellungen laden — sie wohnen jetzt auf der
     //    Platte und überleben so den Neustart (Theme, Skala, Uhr).
-    speed_os::diagnose::schritt(format_args!("[3/4] Dateisystem + Auto-Mounts ..."));
+    speed_os::diagnose::schritt(format_args!("[3/5] Dateisystem + Auto-Mounts ..."));
     speed_os::fs::init();
     speed_os::fs::platte_automounten();
     // Das FAT-Laufwerk ("der USB-Stick") NUR LESEND unter /fat
     // mounten, wenn eines angeschlossen ist — nach der Daten-Platte,
     // damit die Boot-Meldungen in der richtigen Reihenfolge stehen.
     speed_os::fs::fat_automounten();
-    speed_os::diagnose::schritt(format_args!("[4/4] Einstellungen laden ..."));
+    speed_os::diagnose::schritt(format_args!("[4/5] Einstellungen laden ..."));
     speed_os::einstellungen::laden();
+
+    //    Die mitgelieferten USER-PROGRAMME auf die Platte legen (Serie 6,
+    //    Teil 5): Der Kernel traegt sie als Bytes in sich (build.rs bettet
+    //    userland/ ein) und schreibt sie nach /platte/programme, wenn sie
+    //    dort fehlen oder veraltet sind. Danach sind es ganz gewoehnliche
+    //    Dateien — `starte`, der Explorer und `lies` sehen keinen
+    //    Unterschied zu selbst abgelegten Programmen.
+    speed_os::diagnose::schritt(format_args!("[5/5] User-Programme installieren ..."));
+    speed_os::programme::installieren();
 
     serial_println!("[BOOT] GDT/IDT/PIC, Speicher, Heap, Grafik und RamFs initialisiert.");
 

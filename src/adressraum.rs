@@ -93,6 +93,69 @@ pub enum AdressRaumFehler {
     Ueberlauf,
 }
 
+// ---------------------------------------------------------------------------
+// DIE RECHTE EINER USER-SEITE (Serie 6, Teil 5)
+// ---------------------------------------------------------------------------
+
+/// Was darf Ring 3 mit einer Seite tun? LESEN kann er immer (eine
+/// User-Seite ohne Leserecht gibt es auf x86-64 gar nicht — das R-Bit
+/// existiert nicht), also bleiben zwei Fragen: schreiben und ausführen.
+///
+/// W^X ("write xor execute") ist die Regel, die der ELF-Loader daraus macht:
+/// Eine Seite ist entweder beschreibbar ODER ausführbar, nie beides. Ein
+/// überlaufender Puffer kann dann keinen eingeschleusten Code ausführen, und
+/// Programmcode kann sich nicht selbst umschreiben. `Rechte` erlaubt beides
+/// zugleich trotzdem (`SCHREIBEN_AUSFUEHREN`) — für die hand-assemblierten
+/// Demo-Programme aus Teil 3, die in EINER Seite Code und Daten mischen.
+/// Für ELF-Programme ist die Kombination verboten, und `elf::pruefen` lehnt
+/// sie ab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rechte {
+    pub schreiben: bool,
+    pub ausfuehren: bool,
+}
+
+impl Rechte {
+    /// Nur lesen (Konstanten, `.rodata`).
+    pub const NUR_LESEN: Rechte = Rechte {
+        schreiben: false,
+        ausfuehren: false,
+    };
+    /// Lesen und schreiben, NICHT ausführbar (Daten, BSS, Stack).
+    pub const SCHREIBEN: Rechte = Rechte {
+        schreiben: true,
+        ausfuehren: false,
+    };
+    /// Lesen und ausführen, NICHT schreibbar (Programmcode).
+    pub const AUSFUEHREN: Rechte = Rechte {
+        schreiben: false,
+        ausfuehren: true,
+    };
+    /// Alles — die alte Voreinstellung, die die hand-assemblierten
+    /// Demo-Programme (Zähler, Prüfstand) brauchen.
+    pub const SCHREIBEN_AUSFUEHREN: Rechte = Rechte {
+        schreiben: true,
+        ausfuehren: true,
+    };
+
+    /// Die Page-Table-Flags einer BLATT-Seite mit diesen Rechten.
+    ///
+    /// NO_EXECUTE wird nur gesetzt, wenn EFER.NXE eingeschaltet ist — sonst
+    /// gilt Bit 63 als reserviert und JEDER Zugriff auf die Seite gäbe einen
+    /// Page Fault (siehe `memory::nx_aktivieren`). Ohne NXE verlieren wir die
+    /// Ausführ-Sperre, aber nichts stürzt ab.
+    pub fn seiten_flags(self) -> PageTableFlags {
+        let mut flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
+        if self.schreiben {
+            flags |= PageTableFlags::WRITABLE;
+        }
+        if !self.ausfuehren && crate::memory::nx_aktiv() {
+            flags |= PageTableFlags::NO_EXECUTE;
+        }
+        flags
+    }
+}
+
 /// Liegt [addr, addr+laenge) VOLLSTÄNDIG im User-Bereich? Reine Funktion —
 /// die erste der drei Prüfungen jedes copy-in/copy-out (Dauerregel I).
 pub fn im_user_bereich(addr: u64, laenge: usize) -> bool {
@@ -357,6 +420,31 @@ impl AdressRaum {
     /// Ring 3 aus. (Nachträgliches Freischalten wie im Kernel-Adressraum
     /// brauchen wir hier NIE: Der ganze User-Slot ist frisch und gehört uns.)
     pub fn map_benutzer(&mut self, page: Page) -> Result<(), AdressRaumFehler> {
+        self.map_benutzer_mit_rechten(page, Rechte::SCHREIBEN_AUSFUEHREN)
+    }
+
+    /// Mappt EINE Page mit AUSDRÜCKLICHEN Rechten — die Grundlage des
+    /// ELF-Loaders (Serie 6, Teil 5).
+    ///
+    /// ZWEI EBENEN, ZWEI FLAG-SÄTZE, und das ist der springende Punkt:
+    ///
+    ///  * Die BLATT-Seite bekommt genau die Rechte des Segments: WRITABLE
+    ///    nur, wenn es beschreibbar sein soll, NO_EXECUTE, wenn nicht daraus
+    ///    ausgeführt werden darf.
+    ///  * Die ZWISCHENTABELLEN bleiben permissiv (PRESENT | WRITABLE |
+    ///    USER_ACCESSIBLE, NIE mit NX). Denn die CPU verknüpft die Rechte
+    ///    über alle vier Ebenen: NX auf einer Zwischentabelle würde ALLES
+    ///    darunter unausführbar machen — auch das Code-Segment, das sich
+    ///    dieselbe Tabelle teilt. Die feine Steuerung gehört ins Blatt; die
+    ///    Zwischenebenen dürfen nur nicht im Weg stehen.
+    ///
+    /// Dass ein permissiver Zwischen-Eintrag nichts aufweicht, liegt an
+    /// derselben UND-Verknüpfung: Das Blatt kann nur wegnehmen, nie geben.
+    pub fn map_benutzer_mit_rechten(
+        &mut self,
+        page: Page,
+        rechte: Rechte,
+    ) -> Result<(), AdressRaumFehler> {
         let addr = page.start_address().as_u64();
         if !im_user_bereich(addr, 4096) {
             return Err(AdressRaumFehler::AusserhalbUserBereich);
@@ -369,13 +457,14 @@ impl AdressRaum {
                 .allocate_frame()
                 .ok_or(AdressRaumFehler::KeinFrame)?;
             frame_nullen(frame);
-            let flags = PageTableFlags::PRESENT
+            let blatt = rechte.seiten_flags();
+            let tabellen = PageTableFlags::PRESENT
                 | PageTableFlags::WRITABLE
                 | PageTableFlags::USER_ACCESSIBLE;
             // unsafe: frischer, exklusiver Frame; die Page ist geprüft frei.
             let flush = unsafe {
                 mapper
-                    .map_to_with_table_flags(page, frame, flags, flags, zuteiler)
+                    .map_to_with_table_flags(page, frame, blatt, tabellen, zuteiler)
                     .map_err(|_| AdressRaumFehler::KeinFrame)?
             };
             // Kein flush nötig, solange dieser Adressraum nicht aktiv ist —
@@ -399,6 +488,16 @@ impl AdressRaum {
         start: VirtAddr,
         laenge: usize,
     ) -> Result<(), AdressRaumFehler> {
+        self.bereich_mappen_mit_rechten(start, laenge, Rechte::SCHREIBEN_AUSFUEHREN)
+    }
+
+    /// Wie `bereich_mappen`, mit ausdrücklichen Rechten für alle Seiten.
+    pub fn bereich_mappen_mit_rechten(
+        &mut self,
+        start: VirtAddr,
+        laenge: usize,
+        rechte: Rechte,
+    ) -> Result<(), AdressRaumFehler> {
         if laenge == 0 {
             return Ok(());
         }
@@ -410,7 +509,10 @@ impl AdressRaum {
         let letzte = (ende - 1) & !0xfff;
         let mut va = erste;
         loop {
-            self.map_benutzer(Page::containing_address(VirtAddr::new(va)))?;
+            self.map_benutzer_mit_rechten(
+                Page::containing_address(VirtAddr::new(va)),
+                rechte,
+            )?;
             if va == letzte {
                 return Ok(());
             }
@@ -451,7 +553,16 @@ impl AdressRaum {
         if guard < USER_START {
             return Err(AdressRaumFehler::AusserhalbUserBereich);
         }
-        self.bereich_mappen(VirtAddr::new(unterkante), seiten * 4096)?;
+        // NICHT AUSFÜHRBAR (Serie 6, Teil 5): Ein Stack ist Daten. Wer dort
+        // Code hinschreiben und anspringen kann, hat aus einem Puffer-Überlauf
+        // eine Code-Ausführung gemacht — der klassische Angriff. Das NX-Bit
+        // macht genau das unmöglich; kein Programm von SpeedOS führt jemals
+        // Code vom Stack aus.
+        self.bereich_mappen_mit_rechten(
+            VirtAddr::new(unterkante),
+            seiten * 4096,
+            Rechte::SCHREIBEN,
+        )?;
         // Die Guard-Page wird NICHT gemappt — das IST der Schutz.
         Ok(top)
     }

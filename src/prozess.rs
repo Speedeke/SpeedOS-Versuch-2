@@ -214,6 +214,45 @@ impl Zustand {
     }
 }
 
+/// WIE ein Prozess geendet hat (Serie 6, Teil 5).
+///
+/// Der Unterschied ist für den Aufrufer wesentlich: `exit(0)` heisst „hat
+/// seine Arbeit getan", `exit(3)` heisst „hat einen Fehler gemeldet", und
+/// `Abgestuerzt` heisst „hat gegen die Regeln verstossen und wurde vom Kernel
+/// abgeräumt". Ein Exit-Code kann das nicht ausdrücken — deshalb ein Enum
+/// und keine Zahl mit Sonderwerten.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProzessEnde {
+    /// Sauber per `exit(code)` beendet.
+    Beendet(u64),
+    /// Durch einen Fault (Page Fault, #GP) vom Kernel getötet — Dauerregel II.
+    Abgestuerzt,
+    /// Von aussen beendet (Shell `prozess-stop`, Task-Manager).
+    Gestoppt,
+}
+
+impl ProzessEnde {
+    /// Kurzer Anzeigetext.
+    pub fn text(self) -> &'static str {
+        match self {
+            ProzessEnde::Beendet(0) => "erfolgreich beendet",
+            ProzessEnde::Beendet(_) => "mit Fehlercode beendet",
+            ProzessEnde::Abgestuerzt => "abgestuerzt (vom Kernel beendet)",
+            ProzessEnde::Gestoppt => "von aussen gestoppt",
+        }
+    }
+
+    /// Der Exit-Code, wie ihn eine Shell weitergeben würde (Absturz und
+    /// Stopp bekommen die üblichen Ersatzwerte).
+    pub fn code(self) -> u64 {
+        match self {
+            ProzessEnde::Beendet(code) => code,
+            ProzessEnde::Abgestuerzt => 139, // wie POSIX bei SIGSEGV
+            ProzessEnde::Gestoppt => 143,    // wie POSIX bei SIGTERM
+        }
+    }
+}
+
 /// Der Prozess-Kontrollblock.
 pub struct Prozess {
     pub pid: Pid,
@@ -243,6 +282,10 @@ pub struct Prozess {
     pub syscalls: u64,
     /// Weck-Zeitpunkt in ms seit Boot (nur bei `Zustand::Wartend`; 0 = keiner).
     pub wach_ab_ms: u64,
+    /// WIE der Prozess geendet hat (`None`, solange er lebt). Wird gesetzt,
+    /// wenn `zustand` auf `Beendet` wechselt — an ALLEN drei Stellen: `exit`,
+    /// Absturz und Beenden von aussen.
+    pub ende: Option<ProzessEnde>,
     /// Die PER-PROZESS-HANDLE-TABELLE (Serie 6, Teil 4): kleine Zahlen, die
     /// NUR in diesem Prozess gelten. Sie steckt bewusst IM Prozess-
     /// Kontrollblock — dadurch schließt ihr `Drop` beim Prozess-Ende
@@ -272,6 +315,7 @@ impl Prozess {
             abgaben: 0,
             syscalls: 0,
             wach_ab_ms: 0,
+            ende: None,
             handles: crate::syscall::handle::HandleTabelle::neu(),
         }
     }
@@ -289,6 +333,33 @@ impl Prozess {
         einsprung: VirtAddr,
         user_stack_oben: VirtAddr,
     ) -> Option<Prozess> {
+        Prozess::neu_ring3_mit_start(name, raum, einsprung, user_stack_oben, 0, 0)
+    }
+
+    /// Wie `neu_ring3`, aber mit START-ARGUMENTEN in rdi und rsi.
+    ///
+    /// DAS IST DIE ARGUMENT-ÜBERGABE VON SPEEDOS (docs/syscalls.md §9): Ein
+    /// frischer Prozess bekommt `argc` in **rdi** und einen Zeiger auf ein
+    /// Feld von `(Zeiger, Länge)`-Paaren in **rsi** — also genau die
+    /// Aufrufkonvention, die auch `extern "C" fn(u64, *const ArgEintrag)`
+    /// erwartet. Zwei Entscheidungen stecken darin:
+    ///
+    ///  * ARGUMENTE STEHEN IN REGISTERN, nicht (nur) auf dem Stack. Der
+    ///    System-V-Weg legt argc/argv auf den Stack und verlangt vom
+    ///    Startcode, sie von dort zu klauben. Register sind schlicht
+    ///    einfacher, und wir schreiben unser Start-Runtime selbst.
+    ///  * ARGUMENTE SIND (ZEIGER, LÄNGE), NIE NULLTERMINIERT. Das ist
+    ///    dieselbe Regel wie in der Syscall-ABI: Nirgendwo im System sucht
+    ///    jemand ein Terminator-Byte in fremdem Speicher. Ein Argument darf
+    ///    deshalb jedes Byte enthalten, auch die Null.
+    pub fn neu_ring3_mit_start(
+        name: impl Into<String>,
+        raum: AdressRaum,
+        einsprung: VirtAddr,
+        user_stack_oben: VirtAddr,
+        rdi: u64,
+        rsi: u64,
+    ) -> Option<Prozess> {
         let kern_stack = KernStack::neu(KERN_STACK_SEITEN)?;
         let jetzt = crate::zeit::us_seit_boot();
 
@@ -303,8 +374,11 @@ impl Prozess {
             rflags: 0x202,
             rsp: user_stack_oben.as_u64(),
             ss: crate::gdt::user_data_selektor(),
-            // Alle General-Register auf 0: ein frischer Prozess darf keine
-            // Reste eines anderen sehen.
+            // Die Start-Argumente (siehe Doku oben) ...
+            rdi,
+            rsi,
+            // ... und ALLE übrigen General-Register auf 0: ein frischer
+            // Prozess darf keine Reste eines anderen sehen.
             ..TrapFrame::default()
         };
         // unsafe: `rahmen_adresse` liegt in unserem eben allozierten, exklusiv
@@ -330,6 +404,7 @@ impl Prozess {
             abgaben: 0,
             syscalls: 0,
             wach_ab_ms: 0,
+            ende: None,
             handles: crate::syscall::handle::HandleTabelle::neu(),
         })
     }
@@ -690,6 +765,253 @@ pub fn absturz_prozess() -> Option<Prozess> {
     let code = absturz_programm(crate::allocator::HEAP_START as u64);
     let (raum, einsprung, stack) = programm_aufsetzen(&code, None)?;
     Prozess::neu_ring3("Absturz-Kandidat", raum, einsprung, stack)
+}
+
+// ===========================================================================
+// ECHTE PROGRAMME VON DER PLATTE (Serie 6, Teil 5, Aufgabe 2)
+//
+// Alles oberhalb dieser Linie war ÜBUNG: hand-assemblierter Maschinencode,
+// den der Kernel in seinem eigenen Image mitbringt. Ab hier lädt SpeedOS
+// Programme, die es nicht kennt — aus einer Datei, in einen eigenen
+// Adressraum, mit eigenen Argumenten.
+//
+// DAS SPEICHER-LAYOUT EINES ELF-PROZESSES (alles im privaten P4-Slot 1):
+//
+//   0x80_0000_0000  elf::IMAGE_START   .text   R-X  \
+//                                      .rodata R--   |  vom Linker-Skript
+//                                      .data   RW-   |  festgelegt
+//                                      .bss    RW-  /
+//   +16 MiB         elf::IMAGE_ENDE    ---- Obergrenze des Images ----
+//
+//                   ... 16 MiB ungemappte Lücke: ein durchgehender Fehler-
+//                   greifer, der Programm und Stack sauber trennt ...
+//
+//   +32 MiB - 68 KiB  ELF_STACK_GUARD   GUARD-PAGE (nicht gemappt)
+//   +32 MiB - 64 KiB  ELF_STACK_UNTEN   16 Seiten User-Stack, NX
+//   +32 MiB           ELF_STACK_OBEN    Stack-Spitze; hier liegen argv-Daten
+//
+// Warum die Lücke so gross ist: Sie kostet nichts (ungemappte Adressen
+// verbrauchen keinen Speicher) und macht jeden Zeiger-Ausrutscher zwischen
+// Programm und Stack zu einem sofortigen Page Fault statt zu stiller
+// Datenzerstörung.
+// ===========================================================================
+
+/// Obere Kante des User-Stacks eines ELF-Prozesses (32 MiB über dem Image-
+/// Anfang — 16 MiB Image, 16 MiB ungemappte Lücke).
+pub const ELF_STACK_OBEN: u64 = crate::elf::IMAGE_ENDE + 16 * 1024 * 1024;
+/// Seiten des User-Stacks (64 KiB). Reichlich für Programme ohne Rekursion;
+/// darunter liegt eine Guard-Page.
+pub const ELF_STACK_SEITEN: usize = 16;
+
+/// Höchstzahl von Argumenten (inklusive des Programmnamens als `argv[0]`).
+pub const MAX_ARGUMENTE: usize = 16;
+/// Höchstlänge EINES Arguments in Bytes.
+pub const MAX_ARGUMENT_BYTES: usize = 255;
+/// Höchstplatz, den alle argv-Daten zusammen auf dem Stack belegen dürfen.
+/// Weit unter einer Stack-Seite — der Stack gehört dem Programm, nicht uns.
+pub const MAX_ARGV_BYTES: usize = 2048;
+
+/// Ein Argument, so wie der Prozess es sieht: (Zeiger, Länge). Diese
+/// Struktur liegt IM USER-SPEICHER; `rsi` zeigt beim Start auf das erste
+/// Element. 16 Byte, `repr(C)` — das ist ABI (docs/syscalls.md §9).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ArgEintrag {
+    pub zeiger: u64,
+    pub laenge: u64,
+}
+
+/// Warum ein Programm nicht gestartet werden konnte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartFehler {
+    /// Die Datei liess sich nicht lesen.
+    Fs(crate::fs::FsFehler),
+    /// Die Datei ist kein ladbares Programm.
+    Elf(crate::elf::ElfFehler),
+    /// Zu viele Argumente, ein zu langes Argument, oder alle zusammen zu gross.
+    Argumente,
+    /// Adressraum, Stack oder Kernel-Stack liessen sich nicht anlegen.
+    KeinSpeicher,
+    /// Die Prozess-Tabelle ist voll (`MAX_PROZESSE`).
+    TabelleVoll,
+}
+
+impl StartFehler {
+    /// Deutsche Meldung für Shell und Explorer.
+    pub fn meldung(self) -> alloc::string::String {
+        use alloc::string::ToString;
+        match self {
+            // `FsFehler` bringt seine eigene deutsche Meldung mit — die
+            // nehmen wir, statt einen Rust-Typnamen vor einen Menschen zu
+            // stellen.
+            StartFehler::Fs(fehler) => fehler.meldung().to_string(),
+            StartFehler::Elf(fehler) => fehler.meldung().to_string(),
+            StartFehler::Argumente => {
+                alloc::format!(
+                    "zu viele/zu lange Argumente (max {} Stueck, {} Byte je Argument)",
+                    MAX_ARGUMENTE,
+                    MAX_ARGUMENT_BYTES
+                )
+            }
+            StartFehler::KeinSpeicher => "kein Speicher fuer den Prozess".to_string(),
+            StartFehler::TabelleVoll => {
+                alloc::format!("Prozess-Tabelle voll (max {})", MAX_PROZESSE - 1)
+            }
+        }
+    }
+}
+
+/// Legt die Argumente auf den User-Stack und liefert
+/// `(rsp, argc, argv_zeiger)`.
+///
+/// AUFBAU, von der Stack-Spitze nach unten (Stacks wachsen nach unten, also
+/// liegt das zuerst Angelegte am höchsten):
+///
+/// ```text
+///   ELF_STACK_OBEN  ----------------------------
+///                   "netzhole" "http://..."       die Bytes der Argumente
+///                   (Ausrichtung auf 16)
+///   argv_zeiger --> [ (ptr,len), (ptr,len), ... ] das Feld, auf das rsi zeigt
+///                   (Ausrichtung auf 16)
+///   rsp         --> ................ frei ......  hier arbeitet das Programm
+/// ```
+///
+/// Alles wird über `raum.schreiben()` hineingelegt — also über das
+/// Physik-Komplettmapping, ohne den Adressraum zu aktivieren. Der Prozess
+/// findet seine Argumente schon vor, bevor er das erste Mal läuft.
+fn argv_schreiben(
+    raum: &mut AdressRaum,
+    argumente: &[&str],
+) -> Result<(VirtAddr, u64, u64), StartFehler> {
+    if argumente.len() > MAX_ARGUMENTE {
+        return Err(StartFehler::Argumente);
+    }
+    if argumente.iter().any(|a| a.len() > MAX_ARGUMENT_BYTES) {
+        return Err(StartFehler::Argumente);
+    }
+    let string_bytes: usize = argumente.iter().map(|a| a.len()).sum();
+    let tabellen_bytes = argumente.len() * core::mem::size_of::<ArgEintrag>();
+    if string_bytes + tabellen_bytes + 32 > MAX_ARGV_BYTES {
+        return Err(StartFehler::Argumente);
+    }
+
+    // Die Zeichenketten-Fläche, 16-ausgerichtet nach unten.
+    let strings_basis = (ELF_STACK_OBEN - string_bytes as u64) & !0xF;
+    // Darunter das Zeiger-Feld, ebenfalls 16-ausgerichtet.
+    let tabellen_basis = (strings_basis - tabellen_bytes as u64) & !0xF;
+    // Und darunter beginnt der freie Stack. Die 16 Byte Abstand sind reine
+    // Vorsicht: Der erste `push` des Programms soll die Tabelle nicht
+    // streifen, egal wie der Startcode ausrichtet.
+    let rsp = (tabellen_basis - 16) & !0xF;
+
+    let mut eintraege: Vec<ArgEintrag> = Vec::with_capacity(argumente.len());
+    let mut schreibstelle = strings_basis;
+    for argument in argumente {
+        raum.schreiben(VirtAddr::new(schreibstelle), argument.as_bytes())
+            .map_err(|_| StartFehler::KeinSpeicher)?;
+        eintraege.push(ArgEintrag {
+            zeiger: schreibstelle,
+            laenge: argument.len() as u64,
+        });
+        schreibstelle += argument.len() as u64;
+    }
+
+    // Das Zeiger-Feld als rohe Bytes hinlegen. `ArgEintrag` ist `repr(C)` aus
+    // zwei u64 — es gibt keine Padding-Löcher mit undefiniertem Inhalt.
+    let mut tabellen_bytes_puffer = Vec::with_capacity(tabellen_bytes);
+    for eintrag in &eintraege {
+        tabellen_bytes_puffer.extend_from_slice(&eintrag.zeiger.to_le_bytes());
+        tabellen_bytes_puffer.extend_from_slice(&eintrag.laenge.to_le_bytes());
+    }
+    if !tabellen_bytes_puffer.is_empty() {
+        raum.schreiben(VirtAddr::new(tabellen_basis), &tabellen_bytes_puffer)
+            .map_err(|_| StartFehler::KeinSpeicher)?;
+    }
+
+    Ok((
+        VirtAddr::new(rsp),
+        argumente.len() as u64,
+        tabellen_basis,
+    ))
+}
+
+/// Baut aus ELF-Bytes einen startbereiten Prozess — OHNE Dateisystem.
+///
+/// Getrennt von `prozess_starten`, damit die Tests ein Programm laden können,
+/// ohne es erst auf eine Platte zu schreiben.
+pub fn prozess_aus_elf(
+    name: impl Into<String>,
+    bytes: &[u8],
+    argumente: &[&str],
+) -> Result<Prozess, StartFehler> {
+    let mut raum = AdressRaum::neu().map_err(|_| StartFehler::KeinSpeicher)?;
+
+    // 1. Das Programm laden (prüft ALLES, bevor es die erste Seite mappt).
+    let programm = crate::elf::laden(&mut raum, bytes).map_err(StartFehler::Elf)?;
+
+    // 2. Der Stack — mit Guard-Page darunter, nicht ausführbar.
+    raum.stack_anlegen(VirtAddr::new(ELF_STACK_OBEN), ELF_STACK_SEITEN)
+        .map_err(|_| StartFehler::KeinSpeicher)?;
+
+    // 3. Die Argumente auf den Stack.
+    let (rsp, argc, argv) = argv_schreiben(&mut raum, argumente)?;
+
+    // 4. Der Prozess-Kontrollblock mit von Hand geschriebenem Start-Rahmen.
+    Prozess::neu_ring3_mit_start(
+        name,
+        raum,
+        VirtAddr::new(programm.einsprung),
+        rsp,
+        argc,
+        argv,
+    )
+    .ok_or(StartFehler::KeinSpeicher)
+}
+
+/// Lädt ein Programm aus dem VFS und plant es ein. Liefert seine PID.
+///
+/// DER WEG EINES PROGRAMMS, in einer Funktion:
+/// Datei lesen -> ELF prüfen -> Adressraum bauen -> Segmente mappen und
+/// füllen -> Stack anlegen -> Argumente hinlegen -> PCB bauen -> einplanen.
+/// Ab dem nächsten Timer-Tick läuft es (Invariante 1 des Schedulers: ein
+/// Prozess wird eingeplant, nie „gestartet").
+///
+/// LÄUFT AUS KERNEL-KONTEXT (Shell-Task, Explorer-Nachwirkung) — hier ist
+/// `fs::mit_fs` erlaubt. Aus einem SYSCALL dürfte man das nicht so aufrufen
+/// (dort gälte die Lock-Disziplin aus syscall/mod.rs); ein `spawn`-Syscall
+/// müsste `syscall::mit_vfs` benutzen.
+pub fn prozess_starten(pfad: &str, argumente: &[&str]) -> Result<Pid, StartFehler> {
+    let bytes = crate::fs::mit_fs(|fs| fs.lesen(pfad)).map_err(StartFehler::Fs)?;
+    // Der Name im Task-Manager ist der Dateiname, nicht der ganze Pfad.
+    let name = pfad.rsplit('/').next().unwrap_or(pfad);
+
+    let prozess = prozess_aus_elf(name, &bytes, argumente)?;
+    let pid = prozess.pid;
+    let seiten = prozess
+        .raum
+        .as_ref()
+        .map(|r| r.frames_besitz())
+        .unwrap_or(0);
+    crate::scheduler::einplanen(prozess).ok_or(StartFehler::TabelleVoll)?;
+    crate::serial_println!(
+        "[elf] '{}' geladen: PID {}, {} Frames, {} Argument(e).",
+        pfad,
+        pid,
+        seiten,
+        argumente.len()
+    );
+    Ok(pid)
+}
+
+/// Ist diese Datei (nach ihren ersten Bytes) ein SpeedOS-Programm?
+/// Liest nur den Kopf — für den Explorer, der beim Doppelklick entscheiden
+/// muss, ob er SpeedText öffnet oder das Programm startet.
+pub fn ist_programm(pfad: &str) -> bool {
+    let mut kopf = [0u8; 20];
+    match crate::fs::mit_fs(|fs| fs.read_at(pfad, 0, &mut kopf)) {
+        Ok(gelesen) => crate::elf::sieht_ausfuehrbar_aus(&kopf[..gelesen]),
+        Err(_) => false,
+    }
 }
 
 // ---------------------------------------------------------------------------

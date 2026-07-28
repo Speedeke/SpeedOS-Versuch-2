@@ -20,7 +20,7 @@
 // Git-Historie (Speicherverwaltung Teil 1) bzw. README.
 
 use bootloader_api::info::{MemoryRegion, MemoryRegionKind, MemoryRegions};
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use spin::Mutex;
 use x86_64::{
     registers::control::Cr3,
@@ -88,6 +88,59 @@ pub fn init(physical_memory_offset: VirtAddr, memory_regions: &'static MemoryReg
 /// Der Offset, ab dem der komplette physische Speicher gemappt ist.
 pub fn phys_offset() -> VirtAddr {
     VirtAddr::new(PHYS_OFFSET.load(Ordering::Relaxed))
+}
+
+// ---------------------------------------------------------------------------
+// DAS NX-BIT (Serie 6, Teil 5) — "Daten sind kein Programm"
+// ---------------------------------------------------------------------------
+//
+// Bit 63 eines Page-Table-Eintrags heisst NO_EXECUTE: Die CPU weigert sich,
+// Befehle aus so markierten Seiten zu holen. Das ist der Hardware-Teil der
+// W^X-Regel, die unser ELF-Loader durchsetzt — ein Datensegment (schreibbar)
+// darf niemals ausführbar sein, sonst wäre jeder überlaufende Puffer ein
+// Einfallstor.
+//
+// ACHTUNG, DIE FALLE: Bit 63 ist nur dann das NX-Bit, wenn EFER.NXE gesetzt
+// ist. Ist NXE AUS, gilt Bit 63 als RESERVIERT — ein Eintrag mit gesetztem
+// Bit 63 löst dann bei JEDEM Zugriff einen Page Fault aus (Reserved-Bit-
+// Verletzung). Deshalb wird hier zweistufig gearbeitet: `nx_aktivieren()`
+// schaltet NXE beim Boot ein und merkt sich das Ergebnis, und alle
+// Mapping-Pfade setzen das NX-Bit NUR, wenn `nx_aktiv()` es bestätigt.
+// Ohne NXE verlieren wir die Ausführ-Sperre — aber wir bekommen keinen
+// unerklärlichen Page Fault. Sicherheit ist kein Grund für einen Absturz.
+
+/// Ist EFER.NXE eingeschaltet (und das NX-Bit damit benutzbar)?
+static NX_NUTZBAR: AtomicBool = AtomicBool::new(false);
+
+/// Schaltet EFER.NXE ein. Idempotent und gefahrlos: Solange kein einziger
+/// Page-Table-Eintrag Bit 63 gesetzt hat (und das hat vor diesem Aufruf
+/// keiner, sonst liefe die Maschine schon nicht mehr), ändert das Einschalten
+/// an der Übersetzung überhaupt nichts — es macht Bit 63 nur *benutzbar*.
+///
+/// Wird aus `speed_os::init()` gerufen, also vor allem anderen.
+pub fn nx_aktivieren() {
+    use x86_64::registers::model_specific::{Efer, EferFlags};
+    // unsafe: EFER ist ein CPU-Kontrollregister. Wir setzen AUSSCHLIESSLICH
+    // NO_EXECUTE_ENABLE und lassen jedes andere Bit (LME, SCE, ...) unberührt
+    // — die Betriebsart der CPU ändert sich dadurch nicht.
+    unsafe {
+        let vorher = Efer::read();
+        if !vorher.contains(EferFlags::NO_EXECUTE_ENABLE) {
+            Efer::write(vorher | EferFlags::NO_EXECUTE_ENABLE);
+        }
+    }
+    let an = Efer::read().contains(EferFlags::NO_EXECUTE_ENABLE);
+    NX_NUTZBAR.store(an, Ordering::SeqCst);
+    crate::serial_println!(
+        "[MEM] NX-Bit (EFER.NXE) {} — nicht ausfuehrbare Seiten sind {}.",
+        if an { "aktiv" } else { "NICHT verfuegbar" },
+        if an { "moeglich" } else { "wirkungslos" }
+    );
+}
+
+/// Darf das NO_EXECUTE-Bit in Page-Table-Einträgen gesetzt werden?
+pub fn nx_aktiv() -> bool {
+    NX_NUTZBAR.load(Ordering::Relaxed)
 }
 
 /// Die Level-4-Tabelle des KERNEL-Adressraums (beim Boot festgehalten).

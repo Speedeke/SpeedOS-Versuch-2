@@ -1,0 +1,39 @@
+# userland/.cargo/config.toml — Bau-Einstellungen der SpeedOS-Programme
+#
+# WICHTIG: Cargo sucht .cargo/config.toml vom ARBEITSVERZEICHNIS aufwaerts,
+# nicht vom Manifest aus. Diese Datei greift also, wenn man in userland/
+# steht — und der build.rs des Kernels wechselt genau dorthin, bevor er
+# `cargo build` ruft.
+
+[build]
+# Dasselbe Bare-Metal-Target wie der Kernel. Das ist kein Zufall und keine
+# Bequemlichkeit: x86_64-unknown-none hat -sse und +soft-float, also
+# erzeugt der Compiler KEINE SSE-Befehle. Das muss so sein — unser
+# Kontext-Wechsel sichert nur die 15 General-Register, keine XMM-Register
+# (siehe scheduler.rs). Ein Programm, das XMM benutzte, bekaeme bei jedem
+# Prozess-Wechsel stillschweigend falsche Zahlen. Mit diesem Target ist die
+# Frage gar nicht erst offen.
+target = "x86_64-unknown-none"
+
+# KEIN relocation-model=static, und das ist eine hart erkaempfte Lektion:
+#
+# Unsere Programme liegen bei 0x80_0000_0000 (512 GiB) — dem einzigen
+# P4-Slot, der einem Prozess privat gehoert. Mit `static` erzeugt der
+# Compiler ABSOLUTE 32-Bit-Adressen (R_X86_64_32S, "small code model"), und
+# die reichen nur bis 2 GiB. Der Linker bricht dann mit hunderten
+# "relocation R_X86_64_32S out of range: 549755817622" ab.
+#
+# Die Voreinstellung (`pic`) erzeugt stattdessen RIP-RELATIVE Adressen —
+# "so und so viele Bytes vor/hinter dem aktuellen Befehl". Die funktionieren
+# an JEDER Adresse, auch bei 512 GiB, und sie sind sogar kuerzer. Trotzdem
+# bleibt es ein ET_EXEC mit festen Adressen: `pic` beschreibt, wie der Code
+# ADRESSIERT, nicht ob er verschiebbar GELADEN wird. Die Alternative waere
+# `-C code-model=large` (movabs fuer jede Adresse) — laeuft auch, macht die
+# Programme aber unnoetig gross und langsam.
+rustflags = []
+
+# SpeedOS-Programme laufen NICHT auf dem Host. Der Runner des Kernel-Repos
+# (der QEMU startet) darf hier auf keinen Fall greifen — deshalb wird er
+# ueberschrieben. Gebaut wird ohnehin nur mit `cargo build`.
+[target.x86_64-unknown-none]
+runner = ["echo", "SpeedOS-Programme laufen in SpeedOS, nicht auf dem Host:"]

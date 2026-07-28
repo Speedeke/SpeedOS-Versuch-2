@@ -380,7 +380,7 @@ fn roh_ueber_socket(h: Handle, url: &Url, ip: Ipv4) -> Result<Vec<u8>, HttpFehle
         if crate::zeit::ms_seit_boot() >= frist {
             return Err(HttpFehler::Socket(SocketFehler::Zeitueberschreitung));
         }
-        x86_64::instructions::hlt();
+        crate::zeit::warte_auf_interrupt();
     }
 
     // 2. Anfrage senden.
@@ -420,7 +420,7 @@ fn roh_ueber_socket(h: Handle, url: &Url, ip: Ipv4) -> Result<Vec<u8>, HttpFehle
         if crate::zeit::ms_seit_boot() >= frist {
             break; // was da ist, ist da — antwort_parsen entscheidet
         }
-        x86_64::instructions::hlt();
+        crate::zeit::warte_auf_interrupt();
     }
     Ok(roh)
 }
@@ -435,7 +435,7 @@ fn roh_holen(url: &Url) -> Result<Vec<u8>, HttpFehler> {
     // Den geordneten Abbau (FIN/ACK) noch zu Ende pumpen.
     for _ in 0..60 {
         super::pumpen();
-        x86_64::instructions::hlt();
+        crate::zeit::warte_auf_interrupt();
     }
     ergebnis
 }

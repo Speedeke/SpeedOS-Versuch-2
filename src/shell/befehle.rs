@@ -99,6 +99,10 @@ pub fn alle_befehle() -> Vec<Box<dyn Befehl>> {
         Box::new(ProzessStart),
         Box::new(ProzessStop),
         Box::new(PraemptionsTest),
+        // Serie 6, Teil 5: echte Programme von der Platte.
+        Box::new(Starte),
+        Box::new(Programme),
+        Box::new(ElfInfo),
     ]
 }
 
@@ -2150,5 +2154,263 @@ impl Befehl for PraemptionsTest {
             crate::scheduler::beenden(*pid);
         }
         println!("Beide Prozesse beendet.");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Serie 6, Teil 5: echte Programme starten
+// ---------------------------------------------------------------------------
+
+/// Wie lange `starte` auf das Ende eines Programms wartet, bevor es
+/// aufgibt und den Prozess im Hintergrund weiterlaufen laesst.
+///
+/// Grosszuegig, weil `netzhole` DNS (bis 3 Versuche) plus TCP-Handshake
+/// plus Uebertragung braucht — das koennen ueber eine langsame Leitung
+/// mehrere Sekunden sein.
+const STARTE_FRIST_MS: u64 = 120_000;
+
+/// starte — DER Befehl von Serie 6, Teil 5: laedt ein Programm von der
+/// Platte, laesst es in seinem eigenen Adressraum laufen und zeigt am Ende
+/// seinen Exit-Code.
+struct Starte;
+
+impl Befehl for Starte {
+    fn name(&self) -> &'static str {
+        "starte"
+    }
+    fn beschreibung(&self) -> &'static str {
+        "Startet ein Programm (starte <pfad|name> [argumente ...])"
+    }
+    fn ausfuehren(
+        &self,
+        argumente: &str,
+        kontext: &mut ShellKontext,
+        _registry: &[Box<dyn Befehl>],
+    ) {
+        let mut teile = argumente.split_whitespace();
+        let wunsch = match teile.next() {
+            Some(wunsch) => wunsch,
+            None => {
+                println!("Benutzung: starte <pfad|name> [argumente ...]");
+                println!();
+                println!("Mitgelieferte Programme (auch ohne Pfad aufrufbar):");
+                for zeile in crate::programme::uebersicht() {
+                    println!("  {}", zeile);
+                }
+                return;
+            }
+        };
+
+        if !crate::scheduler::aktiv() {
+            println!("Der Scheduler ist nicht aktiv — ohne ihn kann kein Prozess laufen.");
+            return;
+        }
+
+        // Der Pfad: erst wie eingegeben (relativ zum Arbeitsverzeichnis),
+        // sonst als KURZNAME eines mitgelieferten Programms. Dadurch
+        // funktioniert `starte hallo` genauso wie
+        // `starte /platte/programme/hallo`.
+        let pfad = pfad_fuer_programm(kontext, wunsch);
+
+        // argv[0] ist per Konvention der Programmname — genau so, wie es
+        // jedes Unix seit 1971 macht, und `hallo` gibt es aus.
+        let argumente_liste: Vec<&str> = core::iter::once(wunsch).chain(teile).collect();
+
+        let pid = match crate::prozess::prozess_starten(&pfad, &argumente_liste) {
+            Ok(pid) => pid,
+            Err(fehler) => {
+                konsole::set_color(Color::LightRed, Color::Black);
+                println!("'{}' konnte nicht gestartet werden: {}", pfad, fehler.meldung());
+                konsole::set_color(Color::LightGray, Color::Black);
+                return;
+            }
+        };
+
+        konsole::set_color(Color::DarkGray, Color::Black);
+        println!("[PID {} gestartet: {}]", pid, pfad);
+        konsole::set_color(Color::LightGray, Color::Black);
+
+        // Warten. Der Prozess laeuft dabei WIRKLICH — der Timer verdraengt
+        // uns (den Kernel-Prozess) zu seinen Gunsten. Was in dieser Zeit
+        // NICHT laeuft, sind die kooperativen Kernel-Tasks (Compositor):
+        // Ein Shell-Befehl ist eine synchrone Funktion, er gibt dem
+        // Executor keine Gelegenheit. Dasselbe gilt fuer praemptionstest.
+        match crate::scheduler::warten_auf(pid, STARTE_FRIST_MS) {
+            Some(ende) => {
+                let code = ende.code();
+                println!();
+                if code == 0 {
+                    konsole::set_color(Color::LightGreen, Color::Black);
+                } else {
+                    konsole::set_color(Color::Yellow, Color::Black);
+                }
+                println!("[PID {} {} — Exit-Code {}]", pid, ende.text(), code);
+                konsole::set_color(Color::LightGray, Color::Black);
+            }
+            None => {
+                konsole::set_color(Color::Yellow, Color::Black);
+                println!();
+                println!(
+                    "[PID {} laeuft nach {} s noch — er bleibt im Hintergrund.]",
+                    pid,
+                    STARTE_FRIST_MS / 1000
+                );
+                println!("('prozesse' zeigt ihn, 'prozess-stop {}' beendet ihn.)", pid);
+                konsole::set_color(Color::LightGray, Color::Black);
+            }
+        }
+    }
+}
+
+/// Bestimmt den Pfad zu einem Programm: erst als (ggf. relative) Pfad-
+/// Angabe, sonst als Kurzname im Programm-Verzeichnis.
+fn pfad_fuer_programm(kontext: &ShellKontext, wunsch: &str) -> String {
+    let direkt = kontext.aufloesen(wunsch);
+    if fs::mit_fs(|dateisystem| dateisystem.node_typ(&direkt)) == Ok(NodeTyp::Datei) {
+        return direkt;
+    }
+    // Kein direkter Treffer: Kurzname im Programm-Verzeichnis probieren.
+    let im_ordner = crate::programme::pfad(wunsch);
+    if fs::mit_fs(|dateisystem| dateisystem.node_typ(&im_ordner)) == Ok(NodeTyp::Datei) {
+        return im_ordner;
+    }
+    // Nichts gefunden — den direkten Pfad zurueckgeben, damit die
+    // Fehlermeldung den nennt, den der Benutzer gemeint hat.
+    direkt
+}
+
+/// programme — zeigt die mitgelieferten User-Programme.
+struct Programme;
+
+impl Befehl for Programme {
+    fn name(&self) -> &'static str {
+        "programme"
+    }
+    fn beschreibung(&self) -> &'static str {
+        "Zeigt die mitgelieferten User-Space-Programme"
+    }
+    fn ausfuehren(
+        &self,
+        _argumente: &str,
+        _kontext: &mut ShellKontext,
+        _registry: &[Box<dyn Befehl>],
+    ) {
+        let ordner = crate::programme::verzeichnis();
+        konsole::set_color(Color::LightCyan, Color::Black);
+        println!("Mitgelieferte Programme in {}:", ordner);
+        konsole::set_color(Color::LightGray, Color::Black);
+        for zeile in crate::programme::uebersicht() {
+            println!("  {}", zeile);
+        }
+        println!();
+        println!("Diese Programme sind KEIN Kernel-Code: Sie liegen als eigene");
+        println!("ELF-Dateien auf der Platte, laufen in Ring 3 in einem eigenen");
+        println!("Adressraum und erreichen SpeedOS nur ueber int 0x80.");
+        println!();
+        println!("Starten mit:  starte hallo");
+        println!("              starte kopiere /platte/heim/a.txt /platte/heim/b.txt");
+        println!("              starte netzhole http://example.com");
+
+        // Und was liegt WIRKLICH im Ordner? (Der Benutzer darf dort eigene
+        // Programme ablegen — sie sind nichts Besonderes.)
+        if let Ok(eintraege) = fs::mit_fs(|dateisystem| dateisystem.liste(ordner)) {
+            let fremde: Vec<&crate::fs::DirEintrag> = eintraege
+                .iter()
+                .filter(|eintrag| {
+                    !crate::programme::PROGRAMME
+                        .iter()
+                        .any(|programm| programm.name == eintrag.name)
+                })
+                .collect();
+            if !fremde.is_empty() {
+                println!();
+                println!("Ausserdem im Ordner (selbst abgelegt):");
+                for eintrag in fremde {
+                    println!("  {:<10} {:>7} B", eintrag.name, eintrag.groesse);
+                }
+            }
+        }
+    }
+}
+
+/// elfinfo — zeigt, was der Lader in einer Programmdatei sieht.
+///
+/// Ein Diagnose-Werkzeug, aber auch ein LEHR-Werkzeug: Es macht sichtbar,
+/// woraus ein Programm besteht (Segmente, Rechte, Einsprung) und warum eine
+/// kaputte Datei abgelehnt wird.
+struct ElfInfo;
+
+impl Befehl for ElfInfo {
+    fn name(&self) -> &'static str {
+        "elfinfo"
+    }
+    fn beschreibung(&self) -> &'static str {
+        "Zeigt die Segmente einer Programmdatei (elfinfo <pfad|name>)"
+    }
+    fn ausfuehren(
+        &self,
+        argumente: &str,
+        kontext: &mut ShellKontext,
+        _registry: &[Box<dyn Befehl>],
+    ) {
+        let wunsch = argumente.trim();
+        if wunsch.is_empty() {
+            println!("Benutzung: elfinfo <pfad|name>");
+            return;
+        }
+        let pfad = pfad_fuer_programm(kontext, wunsch);
+        let bytes = match fs::mit_fs(|dateisystem| dateisystem.lesen(&pfad)) {
+            Ok(bytes) => bytes,
+            Err(fehler) => {
+                println!("{}:", pfad);
+                fs_fehler_ausgeben(fehler);
+                return;
+            }
+        };
+
+        println!("{} ({} Byte)", pfad, bytes.len());
+        match crate::elf::pruefen(&bytes) {
+            Ok(programm) => {
+                konsole::set_color(Color::LightGreen, Color::Black);
+                println!("Gueltiges SpeedOS-Programm (ET_EXEC, x86-64, statisch gelinkt).");
+                konsole::set_color(Color::LightGray, Color::Black);
+                println!("Einsprung: {:#x}", programm.einsprung);
+                println!();
+                konsole::set_color(Color::LightCyan, Color::Black);
+                println!(
+                    "{:<8} {:>14} {:>10} {:>10} {:>8}",
+                    "Rechte", "Adresse", "Datei", "Speicher", "Seiten"
+                );
+                konsole::set_color(Color::LightGray, Color::Black);
+                for segment in &programm.segmente {
+                    let rechte = alloc::format!(
+                        "r{}{}",
+                        if segment.rechte.schreiben { "w" } else { "-" },
+                        if segment.rechte.ausfuehren { "x" } else { "-" }
+                    );
+                    println!(
+                        "{:<8} {:>14x} {:>10} {:>10} {:>8}",
+                        rechte,
+                        segment.virt_adresse,
+                        segment.datei_bytes,
+                        segment.speicher_bytes,
+                        (segment.seite_dahinter() - segment.erste_seite()) / 4096
+                    );
+                }
+                let bss: u64 = programm.segmente.iter().map(|s| s.bss_bytes()).sum();
+                println!();
+                println!(
+                    "{} Segment(e), {} Seiten, davon {} Byte .bss (genullt, nicht in der Datei).",
+                    programm.segmente.len(),
+                    programm.seiten(),
+                    bss
+                );
+            }
+            Err(fehler) => {
+                konsole::set_color(Color::LightRed, Color::Black);
+                println!("KEIN ladbares Programm: {}", fehler.meldung());
+                konsole::set_color(Color::LightGray, Color::Black);
+            }
+        }
     }
 }

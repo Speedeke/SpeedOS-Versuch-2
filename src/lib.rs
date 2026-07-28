@@ -35,6 +35,7 @@ pub mod apps;
 pub mod ata;
 pub mod diagnose;
 pub mod einstellungen;
+pub mod elf;
 pub mod explorer;
 pub mod fenster;
 pub mod framebuffer;
@@ -47,6 +48,7 @@ pub mod maus;
 pub mod memory;
 pub mod netz;
 pub mod pci;
+pub mod programme;
 pub mod protokoll;
 pub mod prozess;
 pub mod ring3;
@@ -91,6 +93,10 @@ fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
 pub fn init() {
     gdt::init();
     interrupts::init_idt();
+    // Das NX-Bit benutzbar machen (EFER.NXE) — die Hardware-Hälfte der
+    // W^X-Regel, die der ELF-Loader durchsetzt. Muss VOR dem ersten
+    // User-Mapping laufen; siehe memory::nx_aktivieren.
+    memory::nx_aktivieren();
     // UEFI-Erbe wegräumen: LAPIC aus, sonst erreichen die PIC-
     // Interrupts die CPU nicht (siehe Kommentar an der Funktion).
     interrupts::lapic_deaktivieren();

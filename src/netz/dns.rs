@@ -285,7 +285,7 @@ pub fn aufloesen(name: &str) -> Result<Ipv4, DnsFehler> {
                 if crate::zeit::ms_seit_boot() >= versuch_frist {
                     break; // dieser Versuch ist um -> erneut senden
                 }
-                x86_64::instructions::hlt();
+                crate::zeit::warte_auf_interrupt();
             }
         }
         Err(DnsFehler::Zeitueberschreitung)

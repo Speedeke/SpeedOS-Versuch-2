@@ -5,6 +5,104 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### Serie 6, Teil 5: ECHTE PROGRAMME — SpeedOS führt fremden Code aus
+- **DER MEILENSTEIN.** `starte /platte/programme/netzhole http://example.com`
+  holt eine Webseite aus dem Internet. Das klingt banal und ist es nicht: Es
+  ist ein **eigenständiges Programm**, getrennt übersetzt und gelinkt, **von
+  der eigenen Platte geladen**, in **seinem eigenen Adressraum**, in **Ring 3**
+  — und es holt die Seite über **unseren eigenen Netzwerk-Stack**. Vom
+  `int 0x80` bis zum Ethernet-Frame ist kein Byte geliehen. Nachgemessen in
+  `tests/programme.rs`: 571 Byte von example.com.
+- **Bis hierhin lag ALLER User-Code im Kernel-Image** — hand-assemblierte
+  Byte-Folgen mit fest eingesetzten Adressen. Ab jetzt liest der Kernel eine
+  **Datei**, versteht ihr Format und macht daraus einen laufenden Prozess.
+  Damit ist SpeedOS keine geschlossene Veranstaltung mehr.
+- **`src/elf.rs` — der ELF64-Lader.** Lädt statisch gelinkte `ET_EXEC` für
+  x86-64; dynamisches Linken ist **bewusst draussen** (`ET_DYN`/`PT_INTERP`
+  bekommen eigene Fehler, damit man einen versehentlichen PIE-Build sofort
+  erkennt). Die Haltung der Datei: **jede Zahl in der Datei ist eine
+  Behauptung eines Fremden.** Geprüft werden Dateigrenzen (mit `checked_add`,
+  ein Offset nahe `u64::MAX` darf nicht „hinten wieder rauskommen"),
+  Adressen (jedes Segment muss vollständig im Programm-Bereich liegen —
+  Kernel-Adressen, Nullseite und obere Hälfte fallen raus, **bevor** die erste
+  Seite gemappt wird), Grössen, Ausrichtung, Überlappungen und der
+  Einsprungpunkt (muss in ausführbarem, aus der Datei geladenem Code liegen).
+  `pruefen()` ist eine **reine Funktion auf `&[u8]`** — kein Adressraum, kein
+  Lock, kein einziges `unsafe`, und sie **panickt nie**.
+- **W^X ist keine Behauptung, sondern steht in den Page Tables.** Jedes
+  Segment wird mit genau seinen Rechten gemappt; ein Segment mit `PF_W|PF_X`
+  wird abgelehnt. Neu dafür: das **NX-Bit** (`memory::nx_aktivieren` schaltet
+  EFER.NXE ein — mit der Falle im Kommentar, dass Bit 63 ohne NXE als
+  *reserviert* gilt und jeden Zugriff zum Page Fault machen würde) und
+  `adressraum::Rechte` mit getrennten Flags für Blatt und Zwischentabellen.
+  **Der Stack ist jetzt ebenfalls NX.** `tests/programme.rs` sieht in den
+  Page Tables nach, statt es zu glauben.
+  Folgerichtig lehnt der Loader auch **überlappende Segmente auf Seiten-Ebene**
+  ab: Zwei Segmente in einer Seite müssten sich die Rechte teilen — und ein
+  RW-Segment plus ein R-X-Segment in derselben Seite wären faktisch RWX.
+- **`.bss` fällt aus einer Sicherheitsmassnahme ab.** `p_memsz > p_filesz`
+  wird nicht eigens genullt: Jeder frisch gemappte Frame ist ohnehin genullt,
+  damit kein Byte des Vorbesitzers nach Ring 3 leckt. Der Test misst es
+  trotzdem nach (64 KiB in `netzhole`, auch weit hinten).
+- **`prozess_starten(pfad, argumente)`** — der ganze Weg in einer Funktion:
+  Datei lesen → prüfen → Adressraum → Segmente mappen und füllen → Stack mit
+  Guard-Page → **Argumente auf den User-Stack** → PCB → einplanen.
+  Argument-Übergabe: `argc` in `rdi`, `argv` in `rsi` als Feld von
+  `(Zeiger, Länge)`-Paaren — **nie nullterminiert**, dieselbe Regel wie in der
+  ganzen ABI (docs/syscalls.md §9).
+- **Exit-Codes.** `ProzessEnde` unterscheidet `Beendet(code)`, `Abgestuerzt`
+  (139) und `Gestoppt` (143) — ein Exit-Code allein könnte das nicht.
+  `scheduler::warten_auf` holt ihn ab und erntet den Prozess gleich selbst.
+- **`userland/` — die andere Seite der Grenze.** Ein eigener Workspace mit
+  **libspeed** (Syscall-Wrapper, `print!`, Datei-/Socket-Funktionen,
+  Panic-Handler, `_start`-Runtime, `no_std`) und drei Programmen: **hallo**,
+  **kopiere** (echtes Datei-Werkzeug über Syscalls) und **netzhole**.
+  libspeed hat **keine** Kernel-Abhängigkeit — die ABI-Konstanten stehen dort
+  noch einmal, und das ist der Punkt: **Eine ABI ist ein Vertrag, kein
+  geteilter Header.**
+- **Zwei hart erkämpfte Bau-Lektionen** (beide im Code dokumentiert):
+  (1) `relocation-model=static` erzeugt absolute 32-Bit-Adressen — bei einem
+  Ladeort von 512 GiB scheitert der Linker mit hunderten
+  `R_X86_64_32S out of range`. Die Voreinstellung (`pic`, RIP-relativ) läuft
+  an jeder Adresse und ist sogar kürzer. (2) Ohne `--no-pie` entsteht ein
+  `ET_DYN` — und schlimmer: Der PIE-Link zieht `.dynsym`/`.rela.dyn`/
+  `.dynamic` als **Waisen-Sektionen** direkt hinter `.text` und zerlegt damit
+  die sorgfältig ausgerichtete Segment-Folge.
+- **DIE FALLE, DIE DEN MEILENSTEIN AUFHIELT — und die einen ganzen Fehler-Typ
+  erledigt:** Jede synchrone Warteschleife des Netz-Stacks endete auf `hlt()`.
+  Völlig richtig für Kernel-Kontext. Aus einem **Syscall** heraus ist es ein
+  Totalausfall: `int 0x80` geht durch ein Interrupt-Gate, IF ist also aus, und
+  `hlt` mit ausgeschalteten Interrupts hält die CPU **für immer** an — kein
+  Timer, kein Netz, keine Meldung. Genau das passierte, als `netzhole` den
+  Syscall `aufloesen` rief. Neu: **`zeit::warte_auf_interrupt()`** sieht nach,
+  in welchem Kontext es läuft, und öffnet bei ausgeschalteten Interrupts ein
+  Wartefenster. Alle fünf Stellen in `dns`/`dhcp`/`http` benutzen es jetzt.
+- **Build-Integration ohne Host-Werkzeug für SpeedFS.** Das `build.rs` des
+  Kernels baut `userland/` mit (eigener Ziel-Baum, damit der innere
+  cargo-Aufruf nicht auf die Dateisperre des äusseren wartet; geerbte
+  `RUSTFLAGS` werden weggeräumt), die ELFs werden per `include_bytes!`
+  eingebettet, und `programme::installieren()` schreibt sie beim Boot nach
+  `/platte/programme` — byteweise verglichen, also nur bei echter Änderung.
+  Dadurch reisen die Programme mit `cargo run`, `cargo test` **und**
+  `cargo image` (USB-Stick) mit, ohne eine Zeile im Runner. Der Preis sind
+  ~70 KiB im Kernel-Image; ein Host-seitiger SpeedFS-Writer wäre eine
+  dauerhafte Doppelpflege gewesen.
+- **Shell:** `starte <programm> [args]` (mit Exit-Code-Anzeige und Kurznamen
+  ohne Pfad), `programme`, `elfinfo` (zeigt Segmente und Rechte — Diagnose-
+  und Lehrwerkzeug). **Explorer:** Doppelklick auf eine ausführbare Datei
+  startet sie; entschieden wird an den **ersten Bytes**, nicht am Namen (unser
+  VFS kennt keine Endungen, und eine Endung wäre auch nur eine Behauptung).
+- **Beweise (`tests/programme.rs`, 14 Tests, echt in QEMU):** Lebenszyklus
+  über 5 Läufe mit **byte-exakter Frame-Bilanz**; Exit-Codes 0/1/7/42/255 aus
+  Ring 3; argv kommt an; `kopiere` kopiert 10 000 Byte byte-identisch;
+  Segment-Rechte und NX in den Page Tables nachgesehen; 15 kaputte/bösartige
+  Programmdateien (abgeschnitten an sechs Stellen, falsche Magie, 32 Bit,
+  ET_DYN, Einsprung im Kernel, Segment im Kernel, `u64::MAX`-Grösse, W+X) —
+  alle abgelehnt, **ohne einen einzigen geleckten Frame**; Absturz und Stopp
+  räumen vollständig auf und der Kernel läuft weiter; zwei Programme an
+  denselben Adressen in getrennten Welten; die Shell-Befehle end-to-end.
+  Der ELF-Parser selbst wird zusätzlich in 12 Unit-Tests zerlegt.
+
 ### Serie 6, Teil 4: DIE SYSCALL-ABI — jetzt zahlen die Nähte
 - **Der Sprung:** Aus „der Kernel tut alles selbst" wird „der Kernel wird
   **gebeten**". Hinter INT 0x80 steht jetzt eine echte **Syscall-Tabelle** mit

@@ -165,6 +165,53 @@ pub fn ms_seit_boot() -> u64 {
     us_seit_boot() / 1000
 }
 
+/// Schläft bis zum nächsten Interrupt — UND ZWAR EGAL, OB INTERRUPTS GERADE
+/// AN ODER AUS SIND.
+///
+/// ==========================================================================
+/// DIE FALLE, DIE DAHINTER STECKT (teuer gelernt in Serie 6, Teil 5)
+///
+/// Jede synchrone Warteschleife des Netz-Stacks (DNS, DHCP, HTTP) sah so aus:
+///
+///     loop { pumpen(); if fertig { break } if frist_um { break } hlt(); }
+///
+/// Das ist völlig richtig — für KERNEL-Kontext, wo Interrupts an sind: `hlt`
+/// hält die CPU an, der nächste Timer- oder Netz-Interrupt weckt sie.
+///
+/// Sobald derselbe Code aber aus einem SYSCALL läuft, ist es ein TOTALAUSFALL.
+/// `int 0x80` geht durch ein INTERRUPT-Gate, und das löscht IF — im Syscall
+/// sind Interrupts also AUS. Ein `hlt` mit ausgeschalteten Interrupts hält die
+/// CPU an, und es kann sie nichts mehr wecken. Kein Timer, kein Netz, keine
+/// Tastatur. Die Maschine steht, für immer, ohne jede Meldung.
+///
+/// Genau das ist passiert, als `netzhole` (ein Ring-3-Programm) den Syscall
+/// `aufloesen` rief: `dns::aufloesen` erreichte sein `hlt`, und SpeedOS blieb
+/// mitten in der DNS-Auflösung stehen.
+///
+/// Diese Funktion ist die Antwort: Sie SIEHT NACH, in welchem Kontext sie
+/// läuft. Sind Interrupts an, ist es das gewohnte `hlt`. Sind sie aus, öffnet
+/// sie ein Wartefenster (`enable_and_hlt` + `disable`) — dieselbe Mechanik wie
+/// `syscall::warte_fenster`, inklusive derselben eisernen Bedingung:
+///
+///   **Beim Aufruf darf KEIN Lock gehalten werden.**
+///
+/// Denn im Wartefenster darf der Scheduler den Prozess verdrängen. Alle
+/// Aufrufstellen erfüllen das: Sie warten zwischen zwei Pump-Durchgängen und
+/// halten dabei nichts.
+/// ==========================================================================
+pub fn warte_auf_interrupt() {
+    use x86_64::instructions::interrupts;
+    if interrupts::are_enabled() {
+        // Kernel-Kontext: der gewohnte Weg.
+        x86_64::instructions::hlt();
+    } else {
+        // Syscall-Kontext: `enable_and_hlt` als EIN Schritt, damit zwischen
+        // "Interrupts an" und "schlafen" kein Interrupt verloren geht.
+        interrupts::enable_and_hlt();
+        interrupts::disable();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Datum und Uhrzeit — echte Zeit aus RTC-Anker + TSC
 //
