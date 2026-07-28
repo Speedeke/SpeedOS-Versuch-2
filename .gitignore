@@ -15,8 +15,11 @@
 speedos-daten.img
 speedos-daten-test.img
 
-# Devlog-Screenshots (lokal, nicht im Repository):
-screenshots/
+# Devlog-Screenshots (lokal, nicht im Repository). MIT / AM ANFANG, damit
+# nur der Ordner im Projekt-Wurzelverzeichnis gemeint ist — ohne den Schrägstrich
+# hätte die Regel auch docs/screenshots/ verschluckt, und genau die Bilder
+# gehören ins Repository (die README zeigt sie):
+/screenshots/
 speedos-fat.img
 
 # Das USB-Live-Image (Build-Artefakt von `cargo image`, jederzeit neu

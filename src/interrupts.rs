@@ -132,6 +132,44 @@ lazy_static! {
         // aus Ring 3 (ein User-Programm könnte auch ein #GP statt #PF auslösen).
         idt.general_protection_fault
             .set_handler_fn(general_protection_fault_handler);
+
+        // ==================================================================
+        // ALLE ÜBRIGEN CPU-EXCEPTIONS (Serie-6-Abschluss, Sicherheits-Pass)
+        //
+        // GEFUNDEN DURCH DEN ANGREIFER-TEST: Bis hierhin waren nur #PF und
+        // #GP mit einem Handler versehen. Ein Ring-3-Programm, das `ud2`
+        // ausführt oder durch NULL teilt, löst aber #UD bzw. #DE aus — und
+        // für einen Vektor OHNE IDT-Eintrag liefert die CPU keinen Handler,
+        // sondern eskaliert zum DOUBLE FAULT. Der hält SpeedOS an.
+        //
+        // Das heisst: Ein einziges `div rax, 0` in einem unprivilegierten
+        // Programm hätte den ganzen Kernel angehalten. Genau die Sorte
+        // Lücke, für die dieser Test da ist.
+        //
+        // Deshalb wird hier nicht ein einzelnes Loch gestopft, sondern die
+        // KLASSE geschlossen: Jede CPU-Exception, die überhaupt aus Ring 3
+        // eintreffen kann, bekommt einen Handler, und alle laufen durch
+        // dieselbe `user_recovery`-Prüfung. Aus Ring 3 stirbt der Prozess,
+        // aus Ring 0 ist es ein Kernel-Bug und wir halten an — wie bei #PF
+        // und #GP auch.
+        //
+        // (Nicht dabei: #DF hat schon einen Handler mit eigenem Stack, und
+        //  #BP ist absichtlich DPL 0 — ein `int3` aus Ring 3 wird dadurch
+        //  zum #GP und ist damit ebenfalls abgedeckt.)
+        // ==================================================================
+        idt.divide_error.set_handler_fn(divide_error_handler);
+        idt.debug.set_handler_fn(debug_handler);
+        idt.non_maskable_interrupt.set_handler_fn(nmi_handler);
+        idt.overflow.set_handler_fn(overflow_handler);
+        idt.bound_range_exceeded.set_handler_fn(bound_range_handler);
+        idt.invalid_opcode.set_handler_fn(invalid_opcode_handler);
+        idt.device_not_available.set_handler_fn(device_not_available_handler);
+        idt.invalid_tss.set_handler_fn(invalid_tss_handler);
+        idt.segment_not_present.set_handler_fn(segment_not_present_handler);
+        idt.stack_segment_fault.set_handler_fn(stack_segment_handler);
+        idt.x87_floating_point.set_handler_fn(x87_handler);
+        idt.alignment_check.set_handler_fn(alignment_check_handler);
+        idt.simd_floating_point.set_handler_fn(simd_handler);
         // `unsafe`: Wir versprechen, dass der IST-Index gültig ist und
         // nicht für mehrere Handler gleichzeitig verwendet wird.
         unsafe {
@@ -263,6 +301,69 @@ fn user_recovery(stack_frame: &mut InterruptStackFrame) -> bool {
     rahmen_zugriff.write(neu);
     true
 }
+
+// ---------------------------------------------------------------------------
+// DIE ÜBRIGEN CPU-EXCEPTIONS (Serie-6-Abschluss)
+// ---------------------------------------------------------------------------
+//
+// Alle nach demselben Muster: erst `user_recovery` fragen (kam es aus Ring 3,
+// stirbt der Prozess und der Kernel läuft weiter — Dauerregel II), sonst ist
+// es ein Kernel-Bug und wir halten mit klarer Meldung an.
+//
+// Das Makro erspart dreizehnmal denselben Rumpf — und, wichtiger: Es macht
+// unmöglich, dass einer davon die `user_recovery`-Prüfung vergisst.
+
+/// Baut einen Exception-Handler, der Ring-3-Fehler auffängt.
+macro_rules! user_exception_handler {
+    ($name:ident, $bezeichnung:expr) => {
+        extern "x86-interrupt" fn $name(mut stack_frame: InterruptStackFrame) {
+            if user_recovery(&mut stack_frame) {
+                println!(
+                    "EXCEPTION: {} — aus USER-MODE, der Prozess wird beendet.",
+                    $bezeichnung
+                );
+                return;
+            }
+            println!("EXCEPTION: {} (im KERNEL — das ist ein Bug)", $bezeichnung);
+            println!("{:#?}", stack_frame);
+            crate::hlt_loop();
+        }
+    };
+    // Variante für Exceptions MIT Fehlercode (die Segment-Fehler).
+    ($name:ident, $bezeichnung:expr, mit_code) => {
+        extern "x86-interrupt" fn $name(mut stack_frame: InterruptStackFrame, error_code: u64) {
+            if user_recovery(&mut stack_frame) {
+                println!(
+                    "EXCEPTION: {} (Fehlercode {:#x}) — aus USER-MODE, der Prozess wird beendet.",
+                    $bezeichnung, error_code
+                );
+                return;
+            }
+            println!(
+                "EXCEPTION: {} (Fehlercode {:#x}) (im KERNEL — das ist ein Bug)",
+                $bezeichnung, error_code
+            );
+            println!("{:#?}", stack_frame);
+            crate::hlt_loop();
+        }
+    };
+}
+
+// Die zwei, die ein gewöhnliches Programm am ehesten auslöst:
+user_exception_handler!(divide_error_handler, "DIVIDE ERROR (#DE, Division durch 0)");
+user_exception_handler!(invalid_opcode_handler, "INVALID OPCODE (#UD)");
+// Und der Rest, damit die Klasse geschlossen ist:
+user_exception_handler!(debug_handler, "DEBUG (#DB)");
+user_exception_handler!(nmi_handler, "NON-MASKABLE INTERRUPT (#NMI)");
+user_exception_handler!(overflow_handler, "OVERFLOW (#OF)");
+user_exception_handler!(bound_range_handler, "BOUND RANGE EXCEEDED (#BR)");
+user_exception_handler!(device_not_available_handler, "DEVICE NOT AVAILABLE (#NM)");
+user_exception_handler!(x87_handler, "x87 FLOATING POINT (#MF)");
+user_exception_handler!(simd_handler, "SIMD FLOATING POINT (#XM)");
+user_exception_handler!(invalid_tss_handler, "INVALID TSS (#TS)", mit_code);
+user_exception_handler!(segment_not_present_handler, "SEGMENT NOT PRESENT (#NP)", mit_code);
+user_exception_handler!(stack_segment_handler, "STACK SEGMENT FAULT (#SS)", mit_code);
+user_exception_handler!(alignment_check_handler, "ALIGNMENT CHECK (#AC)", mit_code);
 
 /// General Protection Fault: ungültige Segment-/Privileg-Operation. Aus Ring 3
 /// (bei laufendem Ring-3-Code) wird er aufgefangen; sonst ist es ein

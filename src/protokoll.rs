@@ -66,6 +66,17 @@ pub fn anhaengen(text: &str) {
     puffer.extend_from_slice(text.as_bytes());
 }
 
+/// Wie viel Heap belegt der Log-Puffer gerade?
+///
+/// Für die SPEICHER-BILANZEN der Abschluss-Tests: Der Puffer wächst mit jeder
+/// Ausgabe (bis `PUFFER_MAX`), und ein Test, der viel druckt, sähe das sonst
+/// als „Leck". Es ist keins — es ist beschränktes, beabsichtigtes Wachstum.
+/// Wer eine Bilanz zieht, rechnet diesen Anteil heraus und benennt ihn damit,
+/// statt ihn zu verschweigen.
+pub fn puffer_bytes() -> usize {
+    x86_64::instructions::interrupts::without_interrupts(|| PUFFER.lock().capacity())
+}
+
 /// Holt den gesamten Puffer-Inhalt ab (und leert ihn).
 fn abholen() -> Vec<u8> {
     core::mem::take(&mut *PUFFER.lock())

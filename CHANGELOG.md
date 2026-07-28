@@ -5,6 +5,83 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### Serie-6-ABSCHLUSS: der Kernel unter Angriff, Zahlen, und die Weiche zu Serie 7
+
+- **DER WERTVOLLSTE TEST DES PROJEKTS — und er hat etwas gefunden.**
+  `userland/angreifer` ist ein absichtlich **böswilliges Programm im
+  Repository**: Es versucht systematisch, aus Ring 3 auszubrechen —
+  Kernel-Speicher lesen und schreiben, fremde Handles durchprobieren (alle
+  Zahlen 3..64 plus die u64-Extreme), ungültige Syscall-Nummern,
+  Zeiger mit Integer-Überlauf, absurde Längen, Stack-Überlauf, privilegierte
+  Instruktionen, Endlosschleife ohne Abgabe.
+  **Gefunden:** Bis hierhin hatten nur **#PF und #GP** einen IDT-Handler. Ein
+  Ring-3-Programm mit `ud2` (#UD) oder einer **Division durch Null** (#DE)
+  traf auf einen Vektor **ohne Eintrag** — und das eskaliert zum Double
+  Fault, der SpeedOS anhält. **Ein einziges `div rax, 0` in einem
+  unprivilegierten Programm hätte den ganzen Kernel gestoppt.**
+  Behoben, indem nicht das Loch gestopft, sondern die **Klasse geschlossen**
+  wurde: Jede aus Ring 3 erreichbare CPU-Exception hat jetzt einen Handler,
+  alle laufen durch dieselbe `user_recovery`. Nachgewiesen im Testlauf:
+  19 × Page Fault, 5 × #UD, 5 × #GP, 5 × #DE — **alle aus User-Mode
+  aufgefangen, der Kernel lief durchgehend weiter.**
+- **Der Verfügbarkeits-Angriff, gemessen:** Ein Prozess, der endlos rechnet
+  und **nie** abgibt, wurde in 2 Sekunden **58-mal verdrängt** (bei 0
+  freiwilligen Abgaben) — und ein friedlicher Nachbarprozess kam in derselben
+  Zeit nachweislich voran. In einem kooperativen System wäre das das Ende
+  gewesen.
+- **Speicher-Pass:** 100 Zyklen starten/beenden, davon **33 mitten im Lauf
+  per `beende(pid)` abgeschossen** (der interessantere Pfad — dort hält der
+  Prozess noch alles in der Hand). Ergebnis: **Heap byte-exakt**
+  (207 904 → 207 904), **0 Pipe-Lecks**, **0 Handle-Lecks** (20 Runden mit
+  geerbten Handles). Dazu 39 Angriffe im Dauerbeschuss: ebenfalls byte-exakt.
+- **Die eine Frame-Differenz — ausgerechnet statt weggedrückt.** Nach 100
+  Zyklen fehlt **1 Frame**. Kein Prozess-Leck: `memory::allocate_pages`
+  vergibt virtuellen Raum mit einem reinen Vorwärts-Zähler, und alle 512
+  Seiten braucht `map_to` eine neue P1-Tabelle, die dem Kernel-Adressraum
+  verbleibt. Bei 5 Seiten je Prozess sind das ~1 Frame je 100 Prozesse. Der
+  Test rechnet die Schranke aus und benennt sie, statt die Bilanz
+  aufzuweichen. (Behebung wäre ein Freilisten-Allocator für virtuelle
+  Bereiche — notiert für Serie 7.)
+- **LEISTUNG — gemessen aus Ring 3, nicht schöngerechnet** (QEMU/WHPX,
+  4,2 GHz; Bestwert aus 7 Runden à 100 000 Aufrufen):
+
+  | Was | Wert | Woraus es besteht |
+  |---|---:|---|
+  | **Syscall-Roundtrip** (`getpid`) | **60–70 ns** | `int 0x80` → Privilegienwechsel → TSS-Stack → 15 Register → Dispatch → `iretq` |
+  | **Kontext-Wechsel** (yield-Roundtrip) | **~450 ns** | enthält den yield-Syscall; darin ein CR3-Wechsel, der den TLB leert |
+  | **Prozess-Start** | **6–11 µs** | Datei lesen, ELF prüfen, Adressraum, Segmente, Stack, argv |
+  | **Pipe, Ringpuffer allein** | **241 MiB/s** | reines Kopieren im Kernel |
+  | **Pipe, Prozess → Kernel** | **199 KiB/s** | ⚠ siehe unten |
+
+  **Ehrlich benannt, was langsam ist:** Der Pipe-Durchsatz zwischen Prozessen
+  ist **1200-mal** niedriger als der Ringpuffer selbst — und das liegt
+  **nicht** am Kopieren, sondern an der **Weck-Latenz**. Die Pipe fasst
+  4 KiB; ist sie voll, schläft der Schreiber und wird erst geweckt, wenn der
+  Timer die Bedingung nachprüft *und* er wieder an der Reihe ist — also etwa
+  einmal je Scheduling-Runde (20 ms). 4 KiB / 20 ms **sind** genau die
+  gemessenen 200 KiB/s. Die Hebel wären ein grösserer Puffer oder ein
+  sofortiges Wecken durch den Leser statt der Prüfung im Timer.
+  **Und der offensichtliche spätere Gewinn beim Syscall: `SYSCALL`/`SYSRET`
+  statt `int 0x80`.** Das Interrupt-Gate kostet uns den Umweg über IDT und
+  TSS; `SYSCALL` spart beides und wäre auf dieser Hardware etwa die Hälfte.
+  Es bräuchte MSR-Einrichtung (STAR/LSTAR/SFMASK) und eine bestimmte
+  GDT-Reihenfolge — eine Beschleunigung, keine andere Schnittstelle.
+- **unsafe-Audit** (`docs/unsafe-audit-serie6.md`): Serie 6 hat die riskanteste
+  `unsafe`-Fläche des Projekts gebracht, und jeder Block ist jetzt mit seiner
+  **Invariante** dokumentiert — für `copy_in`/`copy_out` einzeln aufgeschlüsselt,
+  welche der vier Anforderungen von `copy_nonoverlapping` durch welche
+  Prüfstufe hergestellt wird. **0 `unsafe fn`** in der ganzen Prozess-Schicht.
+  Bemerkenswert: Die zwei Module, die am meisten mit **fremden** Daten
+  arbeiten — der ELF-Parser und die Pipes — kommen **ohne ein einziges
+  `unsafe`** aus (`elf.rs` liest jede Zahl grenzgeprüft statt per
+  `transmute`).
+- **Bestandsaufnahme Serie 7** (`docs/serie7-bestandsaufnahme.md`): TLS-Strategie
+  mit ausdrücklicher Bewertung des Eigenbaus, RNG-Lage, Zertifikate,
+  Fenster-Naht für den Browser. Kurzfassung der Entscheidungen weiter unten.
+- **Neue Programme:** `angreifer` (der Gegner) und `messung` (Leistung aus
+  Ring 3). Neu: `protokoll::puffer_bytes()`, damit Speicher-Bilanzen den
+  wachsenden Log-Puffer **benennen** statt ihn mitzumessen.
+
 ### Serie 6, Teil 6: PROZESSE ARBEITEN ZUSAMMEN — Pipes, warte, Strg+C
 - **DER BEWEIS:** `starte zaehle 20 | filter 7` → `7`, `17`. Zwei
   eigenständige Programme, gleichzeitig in getrennten Adressräumen, verbunden

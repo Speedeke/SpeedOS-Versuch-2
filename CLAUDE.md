@@ -603,6 +603,53 @@
   PRO SITZUNG (`sitzung::abbruch_anfordern`), das die Pumpschleife abfragt.
   HANDLE-WEITERGABE: `handle::ERBE_KEINS` ist `u64::MAX` und bewusst NICHT 0
   — 0 ist ein gueltiges Handle.
+- **SERIE-6-ABSCHLUSS (Juli 2026) — der Angreifer, die Zahlen, die Weiche:**
+  DER SICHERHEITS-PASS (`userland/angreifer` + `tests/sicherheit.rs`) ist der
+  wertvollste Test des Projekts: ein ABSICHTLICH BOESWILLIGES Programm IM
+  REPOSITORY, das systematisch ausbrechen will. Es hat eine echte Luecke
+  gefunden: Bis dahin hatten nur #PF und #GP einen IDT-Handler — ein
+  Ring-3-`ud2` (#UD) oder eine Division durch Null (#DE) traf auf einen
+  Vektor OHNE Eintrag und eskalierte zum Double Fault, der den Kernel
+  anhaelt. EIN `div rax, 0` in einem unprivilegierten Programm haette also
+  SpeedOS gestoppt. Behoben, indem die KLASSE geschlossen wurde: Jede aus
+  Ring 3 erreichbare CPU-Exception hat jetzt einen Handler (Makro
+  `user_exception_handler!` in interrupts.rs), alle laufen durch dieselbe
+  `user_recovery`. REGEL AB JETZT: Wer einen neuen Trap-Vektor benutzt, gibt
+  ihm einen Handler mit user_recovery — ein Vektor ohne Eintrag ist ein
+  Kernel-Stopp, den ein User-Programm ausloesen kann.
+  MESSZAHLEN (QEMU/WHPX 4,2 GHz, Bestwert aus 7 Runden): Syscall-Roundtrip
+  aus Ring 3 **60-70 ns**, Kontext-Wechsel (yield-Roundtrip) **~450 ns**,
+  Prozess-Start **6-11 us**, Pipe-Ringpuffer allein **241 MiB/s**, Pipe
+  Prozess->Kernel nur **199 KiB/s**. DIE LETZTE ZAHL IST DIE WICHTIGE: Der
+  Unterschied ist NICHT das Kopieren, sondern die WECK-LATENZ — 4 KiB Pipe /
+  20 ms Scheduling-Runde. Hebel: groesserer Puffer oder sofortiges Wecken
+  statt der Timer-Pruefung. Beim Syscall waere SYSCALL/SYSRET statt
+  `int 0x80` der offensichtliche spaetere Gewinn (spart IDT+TSS, braucht
+  MSR-Setup).
+  MESSFALLEN, beide selbst hineingelaufen: (1) Kontext-Wechsel misst man
+  NICHT, waehrend der Messende `hlt`-t — dann misst man die Tick-Rate (war um
+  Faktor 1000 daneben); der Messende muss selbst mit-`abgeben`. (2) Der
+  Kernel-Log-Puffer (protokoll.rs) waechst mit jeder Ausgabe bis 64 KiB —
+  Speicher-Bilanzen muessen ihn ueber `protokoll::puffer_bytes()`
+  herausrechnen und BENENNEN, sonst faerbt er den Test falsch rot.
+  BEKANNTE, AUSGERECHNETE UNSCHAERFE: `memory::allocate_pages` vergibt
+  virtuellen Raum monoton; alle 512 Seiten bleibt eine P1-Tabelle im
+  Kernel-Adressraum zurueck (~1 Frame je 100 Prozesse). Kein Prozess-Leck —
+  der Speicher-Test rechnet die Schranke aus, statt die Bilanz aufzuweichen.
+  Behebung waere ein Freilisten-Allocator fuer virtuelle Bereiche.
+  DOKUMENTE: `docs/unsafe-audit-serie6.md` (jeder unsafe-Block mit seiner
+  INVARIANTE; fuer copy_in/out einzeln aufgeschluesselt, welche Pruefstufe
+  welche Anforderung von copy_nonoverlapping herstellt; 0 `unsafe fn` in der
+  Prozess-Schicht; elf.rs und pipe.rs sind unsafe-FREI),
+  `docs/serie7-bestandsaufnahme.md` (TLS/RNG/Zertifikate/Fenster-Naht).
+  SERIE-7-VORENTSCHEIDUNGEN, hier registriert: **Eigenbau-TLS wird NICHT
+  gebaut** — anders als bei TCP gibt es kein messbares Kriterium, an dem man
+  eine Reissleine ziehen koennte (ein TLS-Bug ist STILL). Stattdessen rustls
+  (no_std) mit RustCrypto-Provider, IM USER-SPACE (nicht im Kernel — ein
+  Fehler in 30k Zeilen Fremdcode soll den Kernel nicht treffen). Der Kernel
+  bekommt dafuer genau EINEN neuen Syscall: `zufall`. Voraussetzung und
+  erster Schritt ist `src/zufall.rs` (RDSEED/RDRAND + Interrupt-Entropie +
+  ChaCha20-DRBG) — es gibt heute KEINEN Zufallsgenerator im System.
 - **DIE hlt-FALLE IM SYSCALL (Serie 6, Teil 5) — `zeit::warte_auf_interrupt()`:**
   `int 0x80` geht durch ein INTERRUPT-Gate, im Syscall sind Interrupts also
   AUS. Ein blankes `hlt` haelt die CPU dann FUER IMMER an (nichts kann sie

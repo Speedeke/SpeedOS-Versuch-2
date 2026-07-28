@@ -8,6 +8,22 @@ ist alles selbst gebaut (auf Basis der bewährten Architektur aus
 > Lernprojekt: Der Code ist bewusst ausführlich auf Deutsch kommentiert —
 > jede Datei erklärt, *was* sie tut und *warum* es so funktioniert.
 
+![Pipeline im Terminal](docs/screenshots/pipeline.png)
+*Der Abschluss von Serie 6: `starte zaehle 20 | filter 7` — zwei
+eigenständige Ring-3-Programme, gleichzeitig, in getrennten Adressräumen,
+verbunden durch eine Pipe im Kernel. Beide melden am Ende ihren Exit-Code.*
+
+![Prozess-Tabelle](docs/screenshots/prozesse.png)
+*`prozesse`: PID 0 ist der Kernel-Prozess (in ihm laufen alle Kernel-Tasks
+kooperativ), darüber zwei Zähler, denen die CPU **203- bzw. 96-mal
+weggenommen** wurde — bei **0 freiwilligen Abgaben**. Der Schläfer daneben
+wartet und verbraucht dabei 10 µs.*
+
+![Task-Manager mit Prozessen](docs/screenshots/taskmanager-prozesse.png)
+*Der Task-Manager zeigt beide Ebenen getrennt — und benennt den Unterschied:
+„Task beenden" ist eine **Bitte** (der Task fällt am nächsten await-Punkt),
+„Prozess beenden" eine **Tatsache** (er wird nicht mehr eingeplant).*
+
 ![Serie-3-Desktop](docs/screenshots/desktop-serie3.png)
 *Der Serie-3-Desktop in 2560x1600: zwei unabhängige Terminal-Sitzungen, Explorer,
 Task-Manager mit Live-CPU-Graph, SpeedText und Einstellungen — sechs Fenster,
@@ -80,9 +96,11 @@ da es dort keine serielle Debug-Ausgabe gibt.*
   Umlaute!), Scrolling per memmove, blinkendem Software-Cursor und
   Obsidian-Aurora-Boot-Screen — alle Ausgaben laufen zusätzlich mit
   ANSI-Farben über die serielle Schnittstelle
-- **Absturzsicherheit:** IDT mit Handlern für Breakpoint, Page Fault
-  und Double Fault — letzterer mit eigenem Notfall-Stack (IST/TSS),
-  sodass selbst ein Kernel-Stack-Overflow sauber gemeldet wird
+- **Absturzsicherheit:** IDT mit Handlern für **jede** aus Ring 3
+  erreichbare CPU-Exception (Page Fault, #GP, #UD, #DE, …) — aus User-Mode
+  stirbt nur der Prozess, im Kernel wird sauber angehalten. Double Faults
+  laufen auf einem eigenen Notfall-Stack (IST/TSS), sodass selbst ein
+  Kernel-Stack-Overflow gemeldet wird
 - **Hardware-Interrupts:** 8259 PIC (remappt), Timer-Ticks,
   PS/2-Tastatur mit deutschem QWERTZ-Layout
 - **Speicherverwaltung:** Paging über OffsetPageTable,
@@ -99,7 +117,13 @@ da es dort keine serielle Debug-Ausgabe gibt.*
   haben **keine** Kernel-Abhängigkeit und erreichen das System nur über
   `int 0x80`. Sie **arbeiten zusammen**: Pipes mit Gegendruck und Dateiende,
   Eltern-Kind-Beziehung mit blockierendem `warte` (ohne Zombies),
-  Handle-Weitergabe — `starte zaehle 20 | filter 7` ist eine echte Pipeline
+  Handle-Weitergabe — `starte zaehle 20 | filter 7` ist eine echte Pipeline.
+  **Geprüft mit einem echten Gegner:** `userland/angreifer` ist ein
+  absichtlich böswilliges Programm im Repository, das systematisch ausbrechen
+  will (Kernel-Speicher, fremde Handles, Zeiger-Überläufe, privilegierte
+  Instruktionen, Endlosschleife). Jeder Versuch endet mit einem Fehlercode
+  oder dem Tod des Angreifers — der Kernel läuft weiter, die anderen
+  Prozesse auch (`tests/sicherheit.rs`)
 - **SpeedShell:** interaktive Kommandozeile mit Befehls-Registry,
   Verlauf (Pfeiltasten), Tab-Vervollständigung und 19 Befehlen —
   läuft im Desktop als Terminal-FENSTER (Ausgabe-Umleitung in ein

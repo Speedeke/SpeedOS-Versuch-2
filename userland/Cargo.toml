@@ -52,6 +52,18 @@ path = "src/bin/filter.rs"
 name = "elternprobe"
 path = "src/bin/elternprobe.rs"
 
+# DER GEGNER (Serie-6-Abschluss): ein absichtlich boeswilliges Programm.
+# Es gehoert ins Repository, weil jede Sicherheitszusage bis zu ihrer
+# Pruefung nur eine Behauptung ist — siehe tests/sicherheit.rs.
+[[bin]]
+name = "angreifer"
+path = "src/bin/angreifer.rs"
+
+# Leistungsmessung — bewusst aus Ring 3, damit der echte Weg gemessen wird.
+[[bin]]
+name = "messung"
+path = "src/bin/messung.rs"
+
 # panic = "abort" ist Pflicht: Abwickeln (unwinding) bräuchte eine
 # Personality-Funktion und Landing Pads — beides gibt es ohne std nicht.
 # Ein panickendes SpeedOS-Programm beendet sich per exit(101).

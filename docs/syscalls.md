@@ -1,7 +1,14 @@
 # Die Syscall-ABI von SpeedOS
 
-Stand: Juli 2026, Serie 6 Teil 4. **Dieses Dokument ist die Schnittstelle
-zwischen Kernel und User-Space.**
+Stand: Juli 2026, **Serie 6 abgeschlossen**. Dieses Dokument ist die
+Schnittstelle zwischen Kernel und User-Space.
+
+Die ABI umfasst **28 Syscalls** in drei Gruppen. Sie ist unter Feuer
+geprüft: `tests/sicherheit.rs` lässt ein absichtlich böswilliges Programm
+(`userland/angreifer`) systematisch dagegen anrennen — jeder Versuch endet
+mit einem Fehlercode oder dem Tod des Angreifers, nie mit einem Schaden am
+Kernel. Gemessene Kosten: **60–70 ns** je Syscall aus Ring 3
+(`docs/../CHANGELOG.md`).
 
 > **AB JETZT GILT:** Eine Änderung an den Tabellen in diesem Dokument ist eine
 > bewusste **ABI-Änderung**, kein Refactoring. Nummern und Fehlercodes dürfen

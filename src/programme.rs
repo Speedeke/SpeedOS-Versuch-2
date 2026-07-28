@@ -76,6 +76,16 @@ pub static PROGRAMME: &[Programm] = &[
         elf: include_bytes!(concat!(env!("OUT_DIR"), "/filter")),
     },
     Programm {
+        name: "angreifer",
+        beschreibung: "angreifer <nr> — versucht den Kernel anzugreifen (Sicherheits-Test)",
+        elf: include_bytes!(concat!(env!("OUT_DIR"), "/angreifer")),
+    },
+    Programm {
+        name: "messung",
+        beschreibung: "messung <1|2|3> — misst Syscall-Kosten und Durchsatz",
+        elf: include_bytes!(concat!(env!("OUT_DIR"), "/messung")),
+    },
+    Programm {
         name: "elternprobe",
         beschreibung: "elternprobe [ms] — startet ein Kind und wartet auf es (Ring 3)",
         elf: include_bytes!(concat!(env!("OUT_DIR"), "/elternprobe")),
@@ -210,7 +220,7 @@ mod tests {
     /// userland-Crate nicht — und zwar BEVOR jemand versucht, sie zu starten.
     #[test_case]
     fn test_eingebettete_programme_sind_gueltig() {
-        assert_eq!(PROGRAMME.len(), 6, "es sollen sechs Programme mitkommen");
+        assert_eq!(PROGRAMME.len(), 8, "es sollen acht Programme mitkommen");
         for programm in PROGRAMME {
             // Mit SPEEDOS_OHNE_USERLAND=1 gebaut? Dann gibt es nichts zu
             // pruefen — aber das ist der Notfall-Pfad, nicht der Normalfall.
