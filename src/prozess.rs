@@ -253,6 +253,37 @@ impl ProzessEnde {
     }
 }
 
+// ---------------------------------------------------------------------------
+// WORAUF EIN PROZESS WARTET (Serie 6, Teil 6)
+// ---------------------------------------------------------------------------
+
+/// Der Grund, aus dem ein Prozess im Zustand `Wartend` liegt.
+///
+/// Bis Teil 5 gab es genau EINEN Grund (`schlafe(ms)`), und der Timer prüfte
+/// ihn mit einem Zeitvergleich. Sobald Prozesse aufeinander warten, reicht
+/// das nicht mehr: Der Timer muss WISSEN, worauf jemand wartet, um
+/// entscheiden zu können, ob er wieder lauffähig ist.
+///
+/// DIE ENTSCHEIDUNG: NACHSEHEN STATT ANSTOSSEN. Ein Weckruf könnte auch von
+/// dem kommen, der die Bedingung erfüllt (der schreibende Prozess weckt den
+/// lesenden). Das wäre schneller — und es wäre eine Kette von Locks quer
+/// durch den Kernel, genommen aus einem Syscall heraus, in dem wir nicht
+/// warten dürfen. Stattdessen fragt der TIMER bei jedem Tick nach: „Ist die
+/// Bedingung jetzt erfüllt?" Er hält dabei nichts fest (überall `try_lock`),
+/// und der Preis ist eine Weck-Verzögerung von höchstens einem Tick (4 ms).
+/// Für ein System mit 20-ms-Zeitscheiben ist das nicht messbar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Warteauf {
+    /// `schlafe(ms)` — der Weckzeitpunkt steht in `wach_ab_ms`.
+    Zeit,
+    /// `warte(pid)` — bis dieses Kind endet. `0` heisst „irgendein Kind".
+    Kind(Pid),
+    /// `lese` auf einer leeren Pipe.
+    PipeLesen(crate::pipe::PipeId),
+    /// `schreibe` auf einer vollen Pipe.
+    PipeSchreiben(crate::pipe::PipeId),
+}
+
 /// Der Prozess-Kontrollblock.
 pub struct Prozess {
     pub pid: Pid,
@@ -286,6 +317,27 @@ pub struct Prozess {
     /// wenn `zustand` auf `Beendet` wechselt — an ALLEN drei Stellen: `exit`,
     /// Absturz und Beenden von aussen.
     pub ende: Option<ProzessEnde>,
+    /// WORAUF er wartet (nur bei `Zustand::Wartend` gesetzt).
+    pub wartet_auf: Option<Warteauf>,
+    /// Wer ihn gestartet hat. `None` = direkt vom Kernel (Shell, Explorer).
+    pub eltern: Option<Pid>,
+    /// DIE EXIT-CODES DER EIGENEN KINDER, bis sie jemand abholt.
+    ///
+    /// Hier steckt die Zombie-Vermeidung, und zwar mit einer bewussten
+    /// Umkehrung: Ein Unix hält den *Kind*-Prozesseintrag am Leben, bis der
+    /// Elternteil `wait` ruft — das ist der Zombie. Wir tun das Gegenteil:
+    /// Beim Ende eines Kindes wird sein Ergebnis in DIESES Feld des
+    /// ELTERNTEILS kopiert, und der Kind-Eintrag verschwindet sofort
+    /// vollständig (Adressraum, Kernel-Stack, Handles). Es gibt also gar
+    /// keinen Zustand, in dem ein toter Prozess noch Ressourcen hält.
+    ///
+    /// Zwei Folgen, beide gewollt:
+    ///  * Stirbt der Elternteil, verschwinden die ungelesenen Ergebnisse mit
+    ///    ihm — niemand muss sie noch abholen. Kein Waisen-Aufsammler nötig.
+    ///  * Der Platz ist ENDLICH (festes Feld, keine Allokation im
+    ///    Syscall-Pfad). Läuft er über, geht das ÄLTESTE Ergebnis verloren,
+    ///    nicht das neueste: Wer nicht abholt, verliert die alten Nachrichten.
+    pub kinder_enden: [Option<(Pid, ProzessEnde)>; MAX_PROZESSE],
     /// Die PER-PROZESS-HANDLE-TABELLE (Serie 6, Teil 4): kleine Zahlen, die
     /// NUR in diesem Prozess gelten. Sie steckt bewusst IM Prozess-
     /// Kontrollblock — dadurch schließt ihr `Drop` beim Prozess-Ende
@@ -316,6 +368,9 @@ impl Prozess {
             syscalls: 0,
             wach_ab_ms: 0,
             ende: None,
+            wartet_auf: None,
+            eltern: None,
+            kinder_enden: [None; MAX_PROZESSE],
             handles: crate::syscall::handle::HandleTabelle::neu(),
         }
     }
@@ -405,6 +460,9 @@ impl Prozess {
             syscalls: 0,
             wach_ab_ms: 0,
             ende: None,
+            wartet_auf: None,
+            eltern: None,
+            kinder_enden: [None; MAX_PROZESSE],
             handles: crate::syscall::handle::HandleTabelle::neu(),
         })
     }
@@ -422,6 +480,45 @@ impl Prozess {
     /// User-Prozess)?
     pub fn ist_user(&self) -> bool {
         self.raum.is_some()
+    }
+
+    // --- Die Eltern-Seite der Eltern-Kind-Beziehung ---
+
+    /// Legt das Ergebnis eines beendeten Kindes ab.
+    ///
+    /// Ist kein Platz mehr, wird der ÄLTESTE Eintrag überschrieben: Ein
+    /// Elternteil, der nie abholt, soll das Weiterlaufen seiner Kinder nicht
+    /// verhindern — und die jüngste Nachricht ist die, auf die jemand
+    /// vermutlich gerade wartet.
+    pub fn kind_ende_ablegen(&mut self, pid: Pid, ende: ProzessEnde) {
+        if let Some(platz) = self.kinder_enden.iter_mut().find(|p| p.is_none()) {
+            *platz = Some((pid, ende));
+            return;
+        }
+        // Voll: nach vorne rücken und hinten anhängen.
+        self.kinder_enden.rotate_left(1);
+        self.kinder_enden[MAX_PROZESSE - 1] = Some((pid, ende));
+    }
+
+    /// Ist ein Ergebnis abholbereit? `pid == 0` heisst „irgendeines".
+    /// Reine Abfrage ohne Seiteneffekt — genau das, was der Timer für seine
+    /// Weck-Entscheidung braucht.
+    pub fn kind_ende_bereit(&self, pid: Pid) -> bool {
+        self.kinder_enden.iter().flatten().any(|(kind, _)| pid == 0 || *kind == pid)
+    }
+
+    /// Holt ein Ergebnis AB (und entfernt es). `pid == 0` = das erste beste.
+    pub fn kind_ende_abholen(&mut self, pid: Pid) -> Option<(Pid, ProzessEnde)> {
+        let platz = self
+            .kinder_enden
+            .iter()
+            .position(|eintrag| matches!(eintrag, Some((kind, _)) if pid == 0 || *kind == pid))?;
+        self.kinder_enden[platz].take()
+    }
+
+    /// Wie viele Kind-Ergebnisse liegen noch ungeholt herum? (Leck-Tests.)
+    pub fn kinder_enden_offen(&self) -> usize {
+        self.kinder_enden.iter().flatten().count()
     }
 }
 
@@ -981,11 +1078,53 @@ pub fn prozess_aus_elf(
 /// (dort gälte die Lock-Disziplin aus syscall/mod.rs); ein `spawn`-Syscall
 /// müsste `syscall::mit_vfs` benutzen.
 pub fn prozess_starten(pfad: &str, argumente: &[&str]) -> Result<Pid, StartFehler> {
-    let bytes = crate::fs::mit_fs(|fs| fs.lesen(pfad)).map_err(StartFehler::Fs)?;
+    prozess_starten_mit(pfad, argumente, None, None, None, false)
+}
+
+/// Die volle Form: mit Elternteil, geerbten Standard-Handles und der Wahl
+/// des VFS-Weges.
+///
+/// `aus_syscall` entscheidet, WIE die Datei gelesen wird — und das ist keine
+/// Kosmetik, sondern die Lock-Disziplin aus syscall/mod.rs: Aus einem
+/// Syscall (Interrupts aus) darf man auf `fs::mit_fs` NICHT warten, weil ein
+/// verdrängter Kernel-Task den Lock halten könnte. Dort führt der Weg über
+/// `syscall::mit_vfs` (try_lock + Wartefenster). Aus Kernel-Kontext (Shell,
+/// Explorer) ist `fs::mit_fs` dagegen richtig und billiger.
+pub fn prozess_starten_mit(
+    pfad: &str,
+    argumente: &[&str],
+    eltern: Option<Pid>,
+    erbe_eingabe: crate::syscall::handle::Erbe,
+    erbe_ausgabe: crate::syscall::handle::Erbe,
+    aus_syscall: bool,
+) -> Result<Pid, StartFehler> {
+    let bytes = if aus_syscall {
+        let pfad_kopie = String::from(pfad);
+        crate::syscall::mit_vfs(move |fs| fs.lesen(&pfad_kopie))
+            // `mit_vfs` liefert schon einen ABI-Fehler; für den Start-Fehler
+            // brauchen wir einen FsFehler zurück — „nicht gefunden" ist die
+            // ehrlichste Näherung, und der genaue Code geht ohnehin gleich
+            // wieder in die ABI (start_fehler_abbilden).
+            .map_err(|_| StartFehler::Fs(crate::fs::FsFehler::NichtGefunden))?
+    } else {
+        crate::fs::mit_fs(|fs| fs.lesen(pfad)).map_err(StartFehler::Fs)?
+    };
     // Der Name im Task-Manager ist der Dateiname, nicht der ganze Pfad.
     let name = pfad.rsplit('/').next().unwrap_or(pfad);
 
-    let prozess = prozess_aus_elf(name, &bytes, argumente)?;
+    // argv[0] ist per Konvention der Programmname.
+    let standard_argumente = [name];
+    let argumente = if argumente.is_empty() {
+        &standard_argumente[..]
+    } else {
+        argumente
+    };
+
+    let mut prozess = prozess_aus_elf(name, &bytes, argumente)?;
+    prozess.eltern = eltern;
+    // Die geerbten Standard-Handles einsetzen, SOLANGE das Kind noch nicht
+    // läuft — ein laufender Prozess kann seine Kanäle nicht mehr umbiegen.
+    crate::syscall::handle::standard_erben(&mut prozess.handles, erbe_eingabe, erbe_ausgabe);
     let pid = prozess.pid;
     let seiten = prozess
         .raum

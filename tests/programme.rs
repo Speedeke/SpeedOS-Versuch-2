@@ -793,6 +793,9 @@ fn test_shell_befehle_starte_und_programme() {
 
     for zeile in [
         "programme",
+        // DER PIPE-BEWEIS (Serie 6, Teil 6).
+        "starte zaehle 20 | filter 7",
+        "starte zaehle 5",
         // KURZNAME statt Pfad — `starte` sucht im Programm-Verzeichnis.
         "starte hallo",
         // Mit Argument (und damit mit gesetztem Exit-Code).

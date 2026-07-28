@@ -65,6 +65,21 @@ pub static PROGRAMME: &[Programm] = &[
         beschreibung: "netzhole <url> [datei] — HTTP-GET ueber die Socket-Syscalls",
         elf: include_bytes!(concat!(env!("OUT_DIR"), "/netzhole")),
     },
+    Programm {
+        name: "zaehle",
+        beschreibung: "zaehle [bis] [pause_ms] — gibt Zahlen aus (die linke Pipe-Haelfte)",
+        elf: include_bytes!(concat!(env!("OUT_DIR"), "/zaehle")),
+    },
+    Programm {
+        name: "filter",
+        beschreibung: "filter <text> — gibt passende Zeilen der Eingabe aus (die rechte)",
+        elf: include_bytes!(concat!(env!("OUT_DIR"), "/filter")),
+    },
+    Programm {
+        name: "elternprobe",
+        beschreibung: "elternprobe [ms] — startet ein Kind und wartet auf es (Ring 3)",
+        elf: include_bytes!(concat!(env!("OUT_DIR"), "/elternprobe")),
+    },
 ];
 
 /// Das Verzeichnis, in dem die Programme wohnen — auf der Platte, wenn eine
@@ -195,7 +210,7 @@ mod tests {
     /// userland-Crate nicht — und zwar BEVOR jemand versucht, sie zu starten.
     #[test_case]
     fn test_eingebettete_programme_sind_gueltig() {
-        assert_eq!(PROGRAMME.len(), 3, "es sollen drei Programme mitkommen");
+        assert_eq!(PROGRAMME.len(), 6, "es sollen sechs Programme mitkommen");
         for programm in PROGRAMME {
             // Mit SPEEDOS_OHNE_USERLAND=1 gebaut? Dann gibt es nichts zu
             // pruefen — aber das ist der Notfall-Pfad, nicht der Normalfall.

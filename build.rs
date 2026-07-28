@@ -37,7 +37,7 @@ use std::process::Command;
 /// Die Programme, die mitgebaut und eingebettet werden. Wer hier einen
 /// Namen ergaenzt, muss ihn auch in userland/Cargo.toml als `[[bin]]` und
 /// in src/programme.rs in die Liste eintragen.
-const PROGRAMME: &[&str] = &["hallo", "kopiere", "netzhole"];
+const PROGRAMME: &[&str] = &["hallo", "kopiere", "netzhole", "zaehle", "filter", "elternprobe"];
 
 fn main() {
     let wurzel = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));

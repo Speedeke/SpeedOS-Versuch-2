@@ -16,13 +16,26 @@ use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
 /// im Moment nur das aktuelle Verzeichnis (für cd, dir, relative Pfade).
 pub struct ShellKontext {
     pub aktuelles_verzeichnis: String,
+    /// Die Terminal-Sitzung, zu der diese Shell gehört (0 = keine).
+    ///
+    /// Gebraucht für Strg+C: Der Abbruch-Wunsch liegt PRO SITZUNG, damit
+    /// zwei Terminal-Fenster sich nicht gegenseitig die Programme
+    /// abschiessen (siehe `sitzung::abbruch_anfordern`).
+    pub sitzung: u64,
 }
 
 impl ShellKontext {
     pub fn neu() -> Self {
         ShellKontext {
             aktuelles_verzeichnis: String::from("/"),
+            sitzung: 0,
         }
+    }
+
+    /// Verbindet den Kontext mit seiner Terminal-Sitzung.
+    pub fn mit_sitzung(mut self, sitzung: u64) -> Self {
+        self.sitzung = sitzung;
+        self
     }
 
     /// Löst eine Pfad-Eingabe relativ zum aktuellen Verzeichnis auf.
@@ -2169,9 +2182,33 @@ impl Befehl for PraemptionsTest {
 /// mehrere Sekunden sein.
 const STARTE_FRIST_MS: u64 = 120_000;
 
-/// starte — DER Befehl von Serie 6, Teil 5: laedt ein Programm von der
-/// Platte, laesst es in seinem eigenen Adressraum laufen und zeigt am Ende
-/// seinen Exit-Code.
+/// Höchstzahl von Stufen in einer Pipeline. Mehr als das würde die
+/// Prozess-Tabelle (`MAX_PROZESSE`) sprengen, in der auch der Kernel-Prozess
+/// und alles andere Platz braucht.
+const MAX_PIPELINE: usize = 4;
+
+/// starte — DIE SHELL WIRD ZUR SHELL (Serie 6, Teil 6).
+///
+/// ==========================================================================
+/// WAS SICH GEGENÜBER TEIL 5 GEÄNDERT HAT — UND WARUM
+///
+/// In Teil 5 schrieb ein Programm auf Handle 1, und das landete über
+/// `konsole::_print` direkt im Terminal. Das war der KERNEL-AUSGABEPFAD: Der
+/// Kernel hat für den Prozess gedruckt.
+///
+/// Jetzt legt die Shell eine PIPE an und gibt deren Schreib-Ende dem Kind
+/// als Handle 1. Das Kind schreibt in eine Pipe; die Shell liest heraus und
+/// druckt. Für das Programm ändert sich nichts (es schreibt auf Handle 1
+/// wie immer) — aber für das SYSTEM ändert sich alles:
+///
+///   * Die Ausgabe ist jetzt ein DATENSTROM, kein Seiteneffekt. Und was ein
+///     Strom ist, kann man umleiten — genau daraus wird `a | b`.
+///   * Das Kind BLOCKIERT, wenn niemand liest (die Pipe läuft voll), statt
+///     unbegrenzt in den Kernel zu drucken.
+///   * Der Kernel druckt nicht mehr für fremden Code.
+///
+/// Der Preis ist eine Umdrehung mehr, und der Gewinn ist eine Pipeline.
+/// ==========================================================================
 struct Starte;
 
 impl Befehl for Starte {
@@ -2179,7 +2216,7 @@ impl Befehl for Starte {
         "starte"
     }
     fn beschreibung(&self) -> &'static str {
-        "Startet ein Programm (starte <pfad|name> [argumente ...])"
+        "Startet Programme, auch als Pipeline (starte a [args] | b [args])"
     }
     fn ausfuehren(
         &self,
@@ -2187,79 +2224,295 @@ impl Befehl for Starte {
         kontext: &mut ShellKontext,
         _registry: &[Box<dyn Befehl>],
     ) {
-        let mut teile = argumente.split_whitespace();
-        let wunsch = match teile.next() {
-            Some(wunsch) => wunsch,
-            None => {
-                println!("Benutzung: starte <pfad|name> [argumente ...]");
-                println!();
-                println!("Mitgelieferte Programme (auch ohne Pfad aufrufbar):");
-                for zeile in crate::programme::uebersicht() {
-                    println!("  {}", zeile);
-                }
-                return;
+        if argumente.trim().is_empty() {
+            println!("Benutzung: starte <pfad|name> [argumente ...]");
+            println!("           starte <a> [args] | <b> [args]     (Pipeline)");
+            println!();
+            println!("Mitgelieferte Programme (auch ohne Pfad aufrufbar):");
+            for zeile in crate::programme::uebersicht() {
+                println!("  {}", zeile);
             }
-        };
-
+            println!();
+            println!("Strg+C beendet das laufende Programm.");
+            return;
+        }
         if !crate::scheduler::aktiv() {
             println!("Der Scheduler ist nicht aktiv — ohne ihn kann kein Prozess laufen.");
             return;
         }
+        pipeline_ausfuehren(kontext, argumente);
+    }
+}
 
-        // Der Pfad: erst wie eingegeben (relativ zum Arbeitsverzeichnis),
-        // sonst als KURZNAME eines mitgelieferten Programms. Dadurch
-        // funktioniert `starte hallo` genauso wie
-        // `starte /platte/programme/hallo`.
-        let pfad = pfad_fuer_programm(kontext, wunsch);
+/// Eine Stufe der Pipeline: ein Programm mit seinen Argumenten.
+struct Stufe {
+    pfad: String,
+    /// argv, inklusive argv[0].
+    argumente: Vec<String>,
+}
 
-        // argv[0] ist per Konvention der Programmname — genau so, wie es
-        // jedes Unix seit 1971 macht, und `hallo` gibt es aus.
-        let argumente_liste: Vec<&str> = core::iter::once(wunsch).chain(teile).collect();
+/// Führt eine (ein- oder mehrstufige) Pipeline aus und wartet auf sie.
+///
+/// DER AUFBAU einer Pipeline `a | b`:
+///
+/// ```text
+///                    Pipe 1                    Pipe 2
+///   [ a ] --Handle 1--> [====] --Handle 0--> [ b ] --Handle 1--> [====] --> Shell
+/// ```
+///
+/// Die LETZTE Pipe gehört der Shell: Sie liest daraus und druckt ins
+/// Terminal. Dadurch ist der Fall „ein Programm" kein Sonderfall — er ist
+/// einfach eine Pipeline der Länge 1.
+///
+/// DER ENTSCHEIDENDE SCHRITT ZUM SCHLUSS: Die Shell schliesst ihre EIGENEN
+/// Kopien aller weitergegebenen Enden. Täte sie das nicht, bliebe sie selbst
+/// als Schreiber von Pipe 1 eingetragen — `b` bekäme nie ein Dateiende und
+/// wartete für immer. Das ist der Klassiker bei Pipes, und die Besitz-Zähler
+/// in pipe.rs sind genau dafür da.
+fn pipeline_ausfuehren(kontext: &mut ShellKontext, eingabe: &str) {
+    use crate::pipe::{self, Ende};
+    use crate::syscall::handle::KernelObjekt;
 
-        let pid = match crate::prozess::prozess_starten(&pfad, &argumente_liste) {
-            Ok(pid) => pid,
-            Err(fehler) => {
-                konsole::set_color(Color::LightRed, Color::Black);
-                println!("'{}' konnte nicht gestartet werden: {}", pfad, fehler.meldung());
-                konsole::set_color(Color::LightGray, Color::Black);
+    // --- 1. Die Eingabe in Stufen zerlegen ---
+    let mut stufen: Vec<Stufe> = Vec::new();
+    for abschnitt in eingabe.split('|') {
+        let mut teile = abschnitt.split_whitespace();
+        let wunsch = match teile.next() {
+            Some(wunsch) => wunsch,
+            None => {
+                println!("Leere Stufe in der Pipeline (ein '|' zu viel?).");
                 return;
             }
         };
+        let pfad = pfad_fuer_programm(kontext, wunsch);
+        // argv[0] ist per Konvention der Programmname — so, wie es jedes
+        // Unix seit 1971 macht.
+        let mut argumente: Vec<String> = vec![String::from(wunsch)];
+        argumente.extend(teile.map(String::from));
+        stufen.push(Stufe { pfad, argumente });
+    }
+    if stufen.len() > MAX_PIPELINE {
+        println!("Höchstens {} Stufen je Pipeline.", MAX_PIPELINE);
+        return;
+    }
 
+    // --- 2. Für jede Stufe eine Ausgabe-Pipe anlegen ---
+    let mut pipes: Vec<pipe::PipeId> = Vec::new();
+    for _ in 0..stufen.len() {
+        match pipe::anlegen() {
+            Some(id) => pipes.push(id),
+            None => {
+                println!("Keine Pipe mehr frei (höchstens {}).", pipe::MAX_PIPES);
+                for id in &pipes {
+                    pipe::ende_schliessen(*id, Ende::Lesen);
+                    pipe::ende_schliessen(*id, Ende::Schreiben);
+                }
+                return;
+            }
+        }
+    }
+
+    // --- 3. Die Prozesse starten und verdrahten ---
+    let mut pids: Vec<crate::prozess::Pid> = Vec::new();
+    let mut fehlgeschlagen = false;
+    for (index, stufe) in stufen.iter().enumerate() {
+        // Eingabe: das Lese-Ende der VORHERIGEN Pipe (die erste Stufe erbt
+        // nichts — sie hat keine Eingabe).
+        let erbe_eingabe = if index == 0 {
+            None
+        } else {
+            pipe::ende_uebernehmen(pipes[index - 1], Ende::Lesen);
+            Some(KernelObjekt::PipeLesen(pipes[index - 1]))
+        };
+        // Ausgabe: das Schreib-Ende der EIGENEN Pipe.
+        pipe::ende_uebernehmen(pipes[index], Ende::Schreiben);
+        let erbe_ausgabe = Some(KernelObjekt::PipeSchreiben(pipes[index]));
+
+        let argumente: Vec<&str> = stufe.argumente.iter().map(|s| s.as_str()).collect();
+        match crate::prozess::prozess_starten_mit(
+            &stufe.pfad,
+            &argumente,
+            None, // Elternteil ist die SHELL (Kernel) — kein User-Prozess
+            erbe_eingabe,
+            erbe_ausgabe,
+            false,
+        ) {
+            Ok(pid) => pids.push(pid),
+            Err(fehler) => {
+                konsole::set_color(Color::LightRed, Color::Black);
+                println!(
+                    "'{}' konnte nicht gestartet werden: {}",
+                    stufe.pfad,
+                    fehler.meldung()
+                );
+                konsole::set_color(Color::LightGray, Color::Black);
+                // Die schon übernommenen Enden dieser Stufe wieder abgeben
+                // (die Handles sind nie in einem Prozess gelandet).
+                if index > 0 {
+                    pipe::ende_schliessen(pipes[index - 1], Ende::Lesen);
+                }
+                pipe::ende_schliessen(pipes[index], Ende::Schreiben);
+                fehlgeschlagen = true;
+                break;
+            }
+        }
+    }
+
+    // --- 4. DIE EIGENEN KOPIEN SCHLIESSEN (siehe Funktions-Doku) ---
+    // Behalten wird NUR das Lese-Ende der letzten Pipe — daraus liest die
+    // Shell gleich die Ausgabe.
+    let ausgabe_pipe = *pipes.last().expect("mindestens eine Stufe");
+    for (index, id) in pipes.iter().enumerate() {
+        pipe::ende_schliessen(*id, Ende::Schreiben);
+        if index + 1 != pipes.len() {
+            pipe::ende_schliessen(*id, Ende::Lesen);
+        }
+    }
+
+    if !fehlgeschlagen {
         konsole::set_color(Color::DarkGray, Color::Black);
-        println!("[PID {} gestartet: {}]", pid, pfad);
+        if pids.len() == 1 {
+            println!("[PID {} gestartet: {}]", pids[0], stufen[0].pfad);
+        } else {
+            let namen: Vec<String> = stufen
+                .iter()
+                .zip(&pids)
+                .map(|(stufe, pid)| alloc::format!("{} (PID {})", stufe.argumente[0], pid))
+                .collect();
+            println!("[Pipeline: {}]", namen.join(" | "));
+        }
         konsole::set_color(Color::LightGray, Color::Black);
+    }
 
-        // Warten. Der Prozess laeuft dabei WIRKLICH — der Timer verdraengt
-        // uns (den Kernel-Prozess) zu seinen Gunsten. Was in dieser Zeit
-        // NICHT laeuft, sind die kooperativen Kernel-Tasks (Compositor):
-        // Ein Shell-Befehl ist eine synchrone Funktion, er gibt dem
-        // Executor keine Gelegenheit. Dasselbe gilt fuer praemptionstest.
-        match crate::scheduler::warten_auf(pid, STARTE_FRIST_MS) {
+    // --- 5. Ausgabe durchreichen und auf das Ende warten ---
+    let enden = if pids.is_empty() {
+        Vec::new()
+    } else {
+        ausgabe_pumpen_und_warten(kontext, ausgabe_pipe, &pids)
+    };
+    pipe::ende_schliessen(ausgabe_pipe, Ende::Lesen);
+
+    // --- 6. Die Exit-Codes zeigen ---
+    for (index, pid) in pids.iter().enumerate() {
+        let name = &stufen[index].argumente[0];
+        // Erst das in der Pump-Schleife GEERNTETE Ergebnis, sonst noch
+        // einmal kurz warten (falls einer die Frist knapp verpasst hat).
+        let ende = enden
+            .get(index)
+            .copied()
+            .flatten()
+            .or_else(|| crate::scheduler::warten_auf(*pid, 2_000));
+        match ende {
             Some(ende) => {
                 let code = ende.code();
-                println!();
-                if code == 0 {
-                    konsole::set_color(Color::LightGreen, Color::Black);
-                } else {
-                    konsole::set_color(Color::Yellow, Color::Black);
-                }
-                println!("[PID {} {} — Exit-Code {}]", pid, ende.text(), code);
+                konsole::set_color(if code == 0 { Color::LightGreen } else { Color::Yellow },
+                                   Color::Black);
+                println!("[{} (PID {}) {} — Exit-Code {}]", name, pid, ende.text(), code);
                 konsole::set_color(Color::LightGray, Color::Black);
             }
             None => {
                 konsole::set_color(Color::Yellow, Color::Black);
-                println!();
-                println!(
-                    "[PID {} laeuft nach {} s noch — er bleibt im Hintergrund.]",
-                    pid,
-                    STARTE_FRIST_MS / 1000
-                );
-                println!("('prozesse' zeigt ihn, 'prozess-stop {}' beendet ihn.)", pid);
+                println!("[{} (PID {}) laeuft noch — 'prozess-stop {}' beendet ihn.]",
+                         name, pid, pid);
                 konsole::set_color(Color::LightGray, Color::Black);
             }
         }
     }
+}
+
+/// Liest die Ausgabe-Pipe leer und druckt sie ins Terminal — bis Dateiende,
+/// Strg+C oder Fristablauf.
+///
+/// DIE SCHLEIFE IST DER GRUND, WARUM ES NICHT KLEMMT: Eine Pipe fasst 4 KiB.
+/// Ein Programm, das mehr ausgibt, blockiert beim Schreiben, bis jemand
+/// liest — also muss die Shell WÄHREND der Laufzeit lesen, nicht danach.
+/// „Erst warten, dann Ausgabe abholen" wäre ein Deadlock, sobald ein
+/// Programm mehr als 4 KiB produziert.
+///
+/// Solange wir hier `hlt`-en, laufen die PROZESSE weiter (der Timer nimmt
+/// uns die CPU weg). Was steht, sind die kooperativen Kernel-Tasks —
+/// derselbe bewusste Preis wie bei `praemptionstest`.
+fn ausgabe_pumpen_und_warten(
+    kontext: &ShellKontext,
+    ausgabe_pipe: crate::pipe::PipeId,
+    pids: &[crate::prozess::Pid],
+) -> Vec<Option<crate::prozess::ProzessEnde>> {
+    use crate::pipe::{self, PipeErgebnis};
+
+    // Die geernteten Ergebnisse — eingesammelt, BEVOR `aufraeumen` die
+    // Tabelleneinträge löscht. Danach wäre der Exit-Code unwiederbringlich
+    // weg (genau der Fehler, den die erste Fassung hatte: sie meldete
+    // „laeuft noch" für längst beendete Prozesse).
+    let mut enden: Vec<Option<crate::prozess::ProzessEnde>> = alloc::vec![None; pids.len()];
+
+    // Ein verspätetes Strg+C von vorhin darf dieses Programm nicht treffen.
+    crate::shell::sitzung::abbruch_loeschen(kontext.sitzung);
+
+    let frist = crate::zeit::ms_seit_boot() + STARTE_FRIST_MS;
+    let mut puffer = [0u8; 512];
+    loop {
+        match pipe::lesen(ausgabe_pipe, &mut puffer) {
+            // Dateiende: Alle Schreiber sind weg, die Pipeline ist durch.
+            PipeErgebnis::Bytes(0) => break,
+            PipeErgebnis::Bytes(n) => {
+                // Als BYTES ausgeben: Die Ausgabe eines Programms muss kein
+                // gültiges UTF-8 sein.
+                match core::str::from_utf8(&puffer[..n]) {
+                    Ok(text) => print!("{}", text),
+                    Err(_) => {
+                        for byte in &puffer[..n] {
+                            print!("{}", *byte as char);
+                        }
+                    }
+                }
+                continue; // sofort weiterlesen, solange etwas da ist
+            }
+            // Leer, aber es gibt noch Schreiber -> warten.
+            PipeErgebnis::Blockiert => {}
+            PipeErgebnis::Abgebrochen | PipeErgebnis::Ungueltig => break,
+        }
+
+        // Ergebnisse einsammeln, SOLANGE die Einträge noch da sind.
+        for (index, pid) in pids.iter().enumerate() {
+            if enden[index].is_none() {
+                enden[index] = crate::scheduler::ende_abfragen(*pid);
+            }
+        }
+
+        // STRG+C: den ganzen Vordergrund beenden.
+        if crate::shell::sitzung::abbruch_abholen(kontext.sitzung) {
+            konsole::set_color(Color::Yellow, Color::Black);
+            println!();
+            println!("^C — Vordergrund-Prozess(e) werden beendet.");
+            konsole::set_color(Color::LightGray, Color::Black);
+            for pid in pids {
+                crate::scheduler::beenden(*pid);
+            }
+            // NICHT sofort abbrechen: Noch gepufferte Ausgabe soll heraus,
+            // und das Dateiende kommt, sobald die Handle-Tabellen der
+            // beendeten Prozesse abgeräumt sind.
+        }
+        if crate::zeit::ms_seit_boot() >= frist {
+            konsole::set_color(Color::Yellow, Color::Black);
+            println!();
+            println!("[Frist von {} s abgelaufen.]", STARTE_FRIST_MS / 1000);
+            konsole::set_color(Color::LightGray, Color::Black);
+            break;
+        }
+        // Beendete Prozesse abräumen — erst dadurch fallen ihre
+        // Handle-Tabellen und damit ihre Pipe-Enden.
+        crate::scheduler::aufraeumen();
+        crate::zeit::warte_auf_interrupt();
+    }
+
+    // Zum Schluss noch einmal: Wer zwischen dem letzten Durchgang und dem
+    // Dateiende fertig wurde, wird hier eingesammelt.
+    for (index, pid) in pids.iter().enumerate() {
+        if enden[index].is_none() {
+            enden[index] = crate::scheduler::ende_abfragen(*pid);
+        }
+    }
+    enden
 }
 
 /// Bestimmt den Pfad zu einem Programm: erst als (ggf. relative) Pfad-

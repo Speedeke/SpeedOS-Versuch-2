@@ -37,6 +37,21 @@ path = "src/bin/kopiere.rs"
 name = "netzhole"
 path = "src/bin/netzhole.rs"
 
+# Die beiden Haelften des Pipe-Beweises (Serie 6, Teil 6):
+# `starte zaehle 20 | filter 7`
+[[bin]]
+name = "zaehle"
+path = "src/bin/zaehle.rs"
+
+[[bin]]
+name = "filter"
+path = "src/bin/filter.rs"
+
+# Der Ring-3-Beweis fuer starte()/warte(): ein Prozess startet einen anderen.
+[[bin]]
+name = "elternprobe"
+path = "src/bin/elternprobe.rs"
+
 # panic = "abort" ist Pflicht: Abwickeln (unwinding) bräuchte eine
 # Personality-Funktion und Landing Pads — beides gibt es ohne std nicht.
 # Ein panickendes SpeedOS-Programm beendet sich per exit(101).

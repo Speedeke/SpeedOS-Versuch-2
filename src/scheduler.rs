@@ -38,7 +38,8 @@
 
 use crate::adressraum;
 use crate::prozess::{
-    Pid, Prozess, ProzessEnde, ProzessMoment, TrapFrame, Zustand, KERNEL_PID, MAX_PROZESSE,
+    Pid, Prozess, ProzessEnde, ProzessMoment, TrapFrame, Warteauf, Zustand, KERNEL_PID,
+    MAX_PROZESSE,
 };
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -333,12 +334,77 @@ fn zustands_bild(tabelle: &Tabelle) -> [Option<Zustand>; MAX_PROZESSE] {
     bild
 }
 
-/// Weckt alle wartenden Prozesse, deren Weck-Zeitpunkt erreicht ist.
-fn schlaefer_wecken(tabelle: &mut Tabelle, jetzt_ms: u64) {
+/// Weckt alle wartenden Prozesse, deren Bedingung jetzt erfüllt ist.
+///
+/// Läuft bei JEDEM Timer-Tick (4 ms) und ist deshalb streng an die
+/// Interrupt-Handler-Regel gebunden: keine Allokation, kein blockierendes
+/// Warten auf einen Lock. Die Pipe-Abfragen benutzen `try_lock` und melden
+/// bei belegtem Lock schlicht „noch nicht" — der nächste Tick fragt erneut.
+///
+/// Die KIND-Bedingung braucht dabei keinen fremden Lock: Das Ergebnis eines
+/// beendeten Kindes liegt schon IM WARTENDEN PROZESS selbst
+/// (`kinder_enden`, siehe `prozess::Prozess`). Genau deshalb ist es dort
+/// abgelegt und nicht im Kind — sonst müsste hier die halbe Tabelle
+/// durchsucht werden, während wir sie schon veränderlich in der Hand halten.
+fn warter_wecken(tabelle: &mut Tabelle, jetzt_ms: u64) {
     for prozess in tabelle.iter_mut().flatten() {
-        if prozess.zustand == Zustand::Wartend && weck_faellig(prozess.wach_ab_ms, jetzt_ms) {
+        if prozess.zustand != Zustand::Wartend {
+            continue;
+        }
+        let bereit = match prozess.wartet_auf {
+            Some(Warteauf::Zeit) => weck_faellig(prozess.wach_ab_ms, jetzt_ms),
+            Some(Warteauf::Kind(pid)) => prozess.kind_ende_bereit(pid),
+            Some(Warteauf::PipeLesen(id)) => crate::pipe::lesbar(id),
+            Some(Warteauf::PipeSchreiben(id)) => crate::pipe::schreibbar(id),
+            // Kein Grund vermerkt: Der alte Weg über `wach_ab_ms` allein
+            // (warten_setzen von aussen) — bleibt liegen, bis ihn jemand
+            // ausdrücklich weckt.
+            None => weck_faellig(prozess.wach_ab_ms, jetzt_ms),
+        };
+        if bereit {
             prozess.wach_ab_ms = 0;
+            prozess.wartet_auf = None;
             prozess.zustand = Zustand::Lauffaehig;
+        }
+    }
+}
+
+/// DIE EINE STELLE, an der ein Prozess beendet wird.
+///
+/// Vorher stand „zustand = Beendet; ende = ..." an drei Stellen (exit,
+/// Absturz, Beenden von aussen), und mit der Eltern-Kind-Beziehung kam ein
+/// vierter Schritt dazu: das Ergebnis beim Elternteil abzulegen. Drei Kopien
+/// davon wären drei Gelegenheiten, genau das zu vergessen — deshalb hier
+/// einmal, und alle drei rufen es.
+///
+/// Der Aufrufer hält den Tabellen-Lock bereits.
+fn ende_vermerken(tabelle: &mut Tabelle, slot: usize, ende: ProzessEnde) {
+    let (pid, eltern) = match tabelle[slot].as_mut() {
+        Some(prozess) => {
+            // Schon beendet? Dann NICHT überschreiben — der erste Grund
+            // zählt (ein abgestürzter Prozess, der danach noch gestoppt
+            // wird, ist abgestürzt und nicht gestoppt).
+            if prozess.zustand == Zustand::Beendet {
+                return;
+            }
+            prozess.zustand = Zustand::Beendet;
+            prozess.wartet_auf = None;
+            prozess.ende = Some(ende);
+            (prozess.pid, prozess.eltern)
+        }
+        None => return,
+    };
+
+    // Das Ergebnis beim Elternteil hinterlegen — falls es ihn noch gibt.
+    // Gibt es ihn nicht mehr, verfällt es hier und jetzt: Kein Eintrag
+    // bleibt zurück, den irgendwer später aufräumen müsste.
+    if let Some(eltern_pid) = eltern {
+        if let Some(elternteil) = tabelle
+            .iter_mut()
+            .flatten()
+            .find(|kandidat| kandidat.pid == eltern_pid && kandidat.zustand != Zustand::Beendet)
+        {
+            elternteil.kind_ende_ablegen(pid, ende);
         }
     }
 }
@@ -454,7 +520,7 @@ extern "C" fn timer_dispatch(rahmen: *mut TrapFrame) -> *mut TrapFrame {
         Some(tabelle) => tabelle,
         None => return rahmen,
     };
-    schlaefer_wecken(&mut tabelle, crate::zeit::ms_seit_boot());
+    warter_wecken(&mut tabelle, crate::zeit::ms_seit_boot());
 
     let aktuell = AKTUELL.load(Ordering::Relaxed);
     let bild = zustands_bild(&tabelle);
@@ -557,11 +623,10 @@ pub fn syscall_beenden(rahmen: *mut TrapFrame, code: u64) -> Option<*mut TrapFra
     }
     {
         let mut tabelle = TABELLE.try_lock()?;
-        let prozess = tabelle[aktuell].as_mut()?;
-        prozess.zustand = Zustand::Beendet;
-        // Den Exit-Code festhalten, BEVOR der Prozess die CPU verliert — der
-        // Aufrufer (Shell) holt ihn später über `warten_auf` ab.
-        prozess.ende = Some(ProzessEnde::Beendet(code));
+        // Exit-Code festhalten UND beim Elternteil hinterlegen, BEVOR der
+        // Prozess die CPU verliert — der Aufrufer (Shell, oder ein
+        // wartender Elternprozess) holt ihn später ab.
+        ende_vermerken(&mut tabelle, aktuell, ProzessEnde::Beendet(code));
     }
     // Der Aktuelle ist jetzt nicht mehr lauffähig -> Regel 1 erzwingt den
     // Wechsel, ganz ohne Sonderbehandlung.
@@ -580,9 +645,121 @@ pub fn syscall_schlafen(rahmen: *mut TrapFrame, ms: u64) -> Option<*mut TrapFram
         // Mindestens 1 ms, damit `wach_ab_ms == 0` eindeutig "kein Weckruf"
         // bleibt und schlafen(0) nicht ewig wartet.
         prozess.wach_ab_ms = crate::zeit::ms_seit_boot() + ms.max(1);
+        prozess.wartet_auf = Some(Warteauf::Zeit);
         prozess.zustand = Zustand::Wartend;
     }
     Some(freiwillig_wechseln(rahmen))
+}
+
+/// LEGT DEN LAUFENDEN PROZESS SCHLAFEN, bis `grund` erfüllt ist.
+///
+/// ==========================================================================
+/// WIE EIN BLOCKIERENDER SYSCALL BEI UNS FUNKTIONIERT — DER NEUSTART
+///
+/// Die naheliegende Vorstellung ist: „Der Syscall hält mitten drin an und
+/// macht später weiter." Das geht bei uns NICHT, und zwar aus einem sehr
+/// konkreten Grund: Unser gesicherter Kontext ist der TRAP-RAHMEN am
+/// Eingang des Syscalls (siehe prozess.rs). Schalten wir auf einen anderen
+/// Prozess um, wird dieser Rahmen später per `iretq` geladen — die CPU
+/// landet also hinter dem `int 0x80` in Ring 3, NICHT mitten im Rust-Code
+/// des Dispatchers. Der Rust-Stack des halben Syscalls ist dann verloren.
+///
+/// Also andersherum, so wie es echte Kernel auch machen: Der Syscall wird
+/// **von vorn wiederholt**. Der Aufrufer stellt `rip` um zwei Bytes zurück
+/// — genau die Länge von `int 0x80` (CD 80) —, sodass der erste Befehl nach
+/// dem Aufwachen wieder der Syscall ist, mit unveränderten Argumenten.
+///
+/// Zwei Bedingungen, die daraus folgen (und die jeder blockierende Syscall
+/// erfüllen muss):
+///  * Er darf bis zum Blockieren NICHTS verändert haben. Ein `lese`, das
+///    schon Bytes aus der Pipe genommen hätte, würde sie beim Neustart
+///    doppelt lesen. Deshalb melden die Pipe-Operationen `Blockiert`,
+///    BEVOR sie irgendetwas anfassen.
+///  * `rax` und `rdx` dürfen nicht beschrieben werden — sie tragen beim
+///    Neustart noch die Syscall-Nummer und das dritte Argument.
+///
+/// Liefert den Rahmen, mit dem es weitergeht (der eines anderen Prozesses).
+pub fn blockieren(rahmen: *mut TrapFrame, grund: Warteauf) -> *mut TrapFrame {
+    let aktuell = AKTUELL.load(Ordering::Relaxed);
+    if !PLANUNG_AN.load(Ordering::Relaxed) || aktuell == KERNEL_SLOT {
+        return rahmen;
+    }
+    {
+        let mut tabelle = match TABELLE.try_lock() {
+            Some(tabelle) => tabelle,
+            None => return rahmen,
+        };
+        let prozess = match tabelle[aktuell].as_mut() {
+            Some(prozess) => prozess,
+            None => return rahmen,
+        };
+        prozess.wartet_auf = Some(grund);
+        prozess.wach_ab_ms = 0;
+        prozess.zustand = Zustand::Wartend;
+    }
+    // Nicht mehr lauffähig -> Regel 1 der Wechsel-Entscheidung greift.
+    freiwillig_wechseln(rahmen)
+}
+
+/// Es gibt kein Kind mit dieser PID — auf sein Ende zu warten wäre ein
+/// Hänger für immer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeinSolchesKind;
+
+/// `warte(pid)`: Holt das Ergebnis eines beendeten Kindes ab.
+///
+/// Liefert `Some((pid, ende))`, wenn eines bereitliegt, sonst `None` — dann
+/// blockiert der Aufrufer. `pid == 0` heisst „irgendein Kind".
+///
+/// `Err(KeinSolchesKind)` = es gibt gar kein solches Kind (weder lebend noch
+/// mit Ergebnis). Darauf zu warten wäre ein Hänger für immer, also ist es ein
+/// Fehler.
+pub fn kind_ende_abholen(pid: Pid) -> Result<Option<(Pid, ProzessEnde)>, KeinSolchesKind> {
+    let aktuell = AKTUELL.load(Ordering::Relaxed);
+    let mut tabelle = match TABELLE.try_lock() {
+        Some(tabelle) => tabelle,
+        None => return Ok(None), // gleich nochmal versuchen
+    };
+    let eigene_pid = match tabelle[aktuell].as_ref() {
+        Some(prozess) => prozess.pid,
+        None => return Err(KeinSolchesKind),
+    };
+    // Liegt schon ein Ergebnis bereit?
+    if let Some(prozess) = tabelle[aktuell].as_mut() {
+        if let Some(fund) = prozess.kind_ende_abholen(pid) {
+            return Ok(Some(fund));
+        }
+    }
+    // Nein — gibt es das Kind denn (noch)?
+    let lebt = tabelle.iter().flatten().any(|kandidat| {
+        kandidat.eltern == Some(eigene_pid)
+            && (pid == 0 || kandidat.pid == pid)
+            && kandidat.zustand != Zustand::Beendet
+    });
+    if lebt {
+        Ok(None) // warten lohnt sich
+    } else {
+        Err(KeinSolchesKind) // warten wäre ein Hänger für immer
+    }
+}
+
+/// Trägt den Elternteil eines noch nicht eingeplanten Prozesses ein.
+pub fn eltern_setzen(prozess: &mut Prozess, eltern: Option<Pid>) {
+    prozess.eltern = eltern;
+}
+
+/// Die PID des laufenden Prozesses — oder `None` im Kernel-Prozess.
+/// Damit trägt `prozess_starten` die Eltern-Beziehung ein, wenn ein
+/// PROZESS startet; startet die Shell (Kernel), gibt es keinen Elternteil.
+pub fn aktuelle_user_pid() -> Option<Pid> {
+    let aktuell = AKTUELL.load(Ordering::Relaxed);
+    if aktuell == KERNEL_SLOT {
+        return None;
+    }
+    match TABELLE.try_lock() {
+        Some(tabelle) => tabelle[aktuell].as_ref().map(|prozess| prozess.pid),
+        None => None,
+    }
 }
 
 /// Zählt einen Syscall des laufenden Prozesses (Aktivitätsmaß).
@@ -616,13 +793,15 @@ pub fn user_prozess_toeten(rahmen: &mut TrapFrame) -> bool {
             Some(tabelle) => tabelle,
             None => return false,
         };
-        let prozess = match tabelle[aktuell].as_mut() {
-            Some(prozess) if prozess.ist_user() => prozess,
+        match tabelle[aktuell].as_ref() {
+            Some(prozess) if prozess.ist_user() => {}
             _ => return false,
-        };
-        prozess.zustand = Zustand::Beendet;
-        prozess.ende = Some(ProzessEnde::Abgestuerzt);
-        prozess.kern_stack_oben().as_u64()
+        }
+        ende_vermerken(&mut tabelle, aktuell, ProzessEnde::Abgestuerzt);
+        match tabelle[aktuell].as_ref() {
+            Some(prozess) => prozess.kern_stack_oben().as_u64(),
+            None => return false,
+        }
     };
     rahmen.rip = sterbe_stub_adresse();
     rahmen.cs = crate::gdt::kernel_code_selektor();
@@ -810,14 +989,17 @@ pub fn beenden(pid: Pid) -> bool {
         return false; // Den Kernel-Prozess beendet niemand.
     }
     mit_tabelle(|tabelle| {
-        for prozess in tabelle.iter_mut().flatten() {
-            if prozess.pid == pid && prozess.zustand != Zustand::Beendet {
-                prozess.zustand = Zustand::Beendet;
-                prozess.ende = Some(ProzessEnde::Gestoppt);
-                return true;
+        let slot = tabelle.iter().position(|eintrag| {
+            matches!(eintrag, Some(prozess)
+                if prozess.pid == pid && prozess.zustand != Zustand::Beendet)
+        });
+        match slot {
+            Some(slot) => {
+                ende_vermerken(tabelle, slot, ProzessEnde::Gestoppt);
+                true
             }
+            None => false,
         }
-        false
     })
 }
 
@@ -888,6 +1070,50 @@ pub fn warten_auf(pid: Pid, frist_ms: u64) -> Option<ProzessEnde> {
         // gewartete Prozess seine Zeitscheiben.
         crate::zeit::warte_auf_interrupt();
     }
+}
+
+/// Wie viele Kind-Ergebnisse liegen bei diesem Prozess ungeholt herum?
+/// `None` = den Prozess gibt es nicht (mehr). Für die Zombie-Tests.
+pub fn kinder_enden_offen(pid: Pid) -> Option<usize> {
+    mit_tabelle(|tabelle| {
+        tabelle
+            .iter()
+            .flatten()
+            .find(|prozess| prozess.pid == pid)
+            .map(|prozess| prozess.kinder_enden_offen())
+    })
+}
+
+/// WORAUF ein Prozess gerade wartet (`None` = er wartet nicht).
+///
+/// Diagnose und Tests: Es ist ein Unterschied, ob ein Prozess WIRKLICH
+/// blockiert oder in einer Warteschleife dreht — und nur der vermerkte
+/// Grund macht ihn sichtbar.
+pub fn warte_grund(pid: Pid) -> Option<Warteauf> {
+    mit_tabelle(|tabelle| {
+        tabelle
+            .iter()
+            .flatten()
+            .find(|prozess| prozess.pid == pid)
+            .and_then(|prozess| prozess.wartet_auf)
+    })
+}
+
+/// Wie ein Prozess geendet hat — OHNE ihn abzuräumen.
+///
+/// `None` heisst „lebt noch ODER ist schon abgeräumt". Wer den Unterschied
+/// braucht, muss das Ergebnis rechtzeitig einsammeln — und genau dafür ist
+/// diese Funktion da: Die Shell fragt sie in ihrer Pump-Schleife ab, BEVOR
+/// sie `aufraeumen()` ruft. Sonst wäre der Exit-Code weg, denn Abräumen
+/// löscht den Tabellen-Eintrag.
+pub fn ende_abfragen(pid: Pid) -> Option<ProzessEnde> {
+    mit_tabelle(|tabelle| {
+        tabelle
+            .iter()
+            .flatten()
+            .find(|prozess| prozess.pid == pid)
+            .and_then(|prozess| prozess.ende)
+    })
 }
 
 /// Räumt beendete Prozesse ab: Adressraum-Frames und Kernel-Stack gehen

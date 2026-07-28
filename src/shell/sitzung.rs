@@ -49,6 +49,8 @@ pub struct Sitzung {
     tasten: ArrayQueue<DecodedKey>,
     waker: AtomicWaker,
     beendet: AtomicBool,
+    /// Strg+C wurde gedrückt (siehe `abbruch_anfordern`).
+    abbruch: AtomicBool,
 }
 
 impl Sitzung {
@@ -85,6 +87,7 @@ pub fn neu_registrieren() -> u64 {
         tasten: ArrayQueue::new(TASTEN_KAPAZITAET),
         waker: AtomicWaker::new(),
         beendet: AtomicBool::new(false),
+        abbruch: AtomicBool::new(false),
     });
     mit_sitzungen(|sitzungen| {
         sitzungen.insert(id, sitzung);
@@ -115,6 +118,52 @@ pub fn taste_einwerfen(id: u64, taste: DecodedKey) {
     if let Some(sitzung) = holen(id) {
         let _ = sitzung.tasten.push(taste); // voll -> Taste verfällt
         sitzung.waker.wake();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// STRG+C — der Abbruch-Wunsch (Serie 6, Teil 6)
+// ---------------------------------------------------------------------------
+//
+// WARUM EIN EIGENES FLAG UND NICHT EINFACH EINE TASTE IN DER QUEUE:
+//
+// Solange die Shell auf ein Programm wartet, steckt sie MITTEN in einem
+// synchronen Shell-Befehl (`befehl_ausfuehren`). Sie kommt in dieser Zeit
+// nicht an ihre Tasten-Queue — die liest sie erst wieder, wenn der Befehl
+// fertig ist. Ein Strg+C in der Queue käme also frühestens an, wenn es
+// nichts mehr abzubrechen gibt.
+//
+// Deshalb greift der EINGABE-ROUTER Strg+C ab, bevor er routet, und setzt
+// hier ein Atomic. Die Warteschleife des Vordergrund-Prozesses fragt es bei
+// jedem Durchgang ab. Das ist die schlichteste Form eines Signals, die es
+// gibt — und sie reicht genau für den einen Zweck, für den wir sie brauchen.
+//
+// Das Flag lebt in der SITZUNG, nicht global: Zwei Terminal-Fenster mit je
+// einem laufenden Programm sollen sich nicht gegenseitig abschiessen.
+
+/// Setzt den Abbruch-Wunsch einer Sitzung (Strg+C).
+pub fn abbruch_anfordern(id: u64) {
+    if let Some(sitzung) = holen(id) {
+        sitzung.abbruch.store(true, Ordering::Release);
+        // Auch wecken: Wartet die Sitzung gerade auf eine Taste (kein
+        // Programm läuft), soll sie die neue Eingabezeile zeigen können.
+        sitzung.waker.wake();
+    }
+}
+
+/// Fragt den Abbruch-Wunsch ab und LÖSCHT ihn (einmalige Wirkung).
+pub fn abbruch_abholen(id: u64) -> bool {
+    match holen(id) {
+        Some(sitzung) => sitzung.abbruch.swap(false, Ordering::AcqRel),
+        None => false,
+    }
+}
+
+/// Löscht einen alten Abbruch-Wunsch — VOR jedem Programmstart, damit ein
+/// verspätetes Strg+C nicht das nächste Programm trifft.
+pub fn abbruch_loeschen(id: u64) {
+    if let Some(sitzung) = holen(id) {
+        sitzung.abbruch.store(false, Ordering::Release);
     }
 }
 

@@ -5,6 +5,91 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### Serie 6, Teil 6: PROZESSE ARBEITEN ZUSAMMEN — Pipes, warte, Strg+C
+- **DER BEWEIS:** `starte zaehle 20 | filter 7` → `7`, `17`. Zwei
+  eigenständige Programme, gleichzeitig in getrennten Adressräumen, verbunden
+  durch ein Byte-Rohr im Kernel. **Beide Programme sind bytegleich mit dem,
+  was auch allein läuft** — keine Fallunterscheidung, keine Anpassung. Die
+  Umleitung passiert vollständig ausserhalb, beim Start.
+- **Pipes (`src/pipe.rs`) — der Ringpuffer ist NICHT neu.**
+  `netz::puffer::Ringpuffer` gibt es seit Serie 5 (TCP-Sende-/Empfangspuffer,
+  unit-getestet). Eine Pipe ist genau das plus zwei Besitz-ZÄHLER. Zwei
+  Ringpuffer-Implementierungen im selben Kernel wären zwei Stellen, an denen
+  derselbe Off-by-one wohnen kann. Die drei Entscheidungen, die eine Pipe
+  ausmachen: **voll → der Schreiber wartet** (Gegendruck, nicht abschneiden),
+  **leer + Schreiber da → der Leser wartet**, **leer + kein Schreiber →
+  Dateiende**. Und Lese-Ende zu → der Schreiber bekommt `Abgebrochen`
+  (POSIX-EPIPE).
+  **ZÄHLER STATT FLAGS:** Ein Ende kann mehrere Besitzer haben (die Shell
+  hält es kurz selbst, während sie es dem Kind gibt). Ein Flag wäre je nach
+  Schliess-Reihenfolge ein Leck oder ein zu früh gemeldetes Dateiende.
+- **BLOCKIERENDE SYSCALLS — und wie sie bei uns funktionieren.** Ein Syscall
+  hält NICHT mitten drin an: Unser gesicherter Kontext ist der Trap-Rahmen am
+  Eingang, beim Umschalten landet die CPU per `iretq` hinter dem `int 0x80` —
+  der Rust-Stack des halben Syscalls wäre verloren. Also wird er **von vorn
+  wiederholt**: `rip` um zwei Bytes zurück (die Länge von `int 0x80`), Prozess
+  schlafen legen, fertig. Daraus folgt die eiserne Regel, die jeder
+  blockierende Syscall erfüllt: **bis zum Blockieren darf nichts verändert
+  worden sein.**
+  **GEWECKT WIRD DURCH NACHSEHEN, NICHT DURCH ANSTOSSEN:** Der Timer prüft je
+  Tick die Weck-Bedingung (`Warteauf::{Zeit, Kind, PipeLesen, PipeSchreiben}`).
+  Ein Weckruf aus dem schreibenden Prozess wäre schneller — und eine
+  Lock-Kette quer durch den Kernel, aus einem Syscall heraus, in dem wir nicht
+  warten dürfen. Preis: höchstens 4 ms.
+- **ELTERN, KIND — UND KEINE ZOMBIES.** Das Unix-Modell hält den *Kind*-Eintrag
+  am Leben, bis jemand `wait` ruft; das ist der Zombie. Wir kehren es um: Beim
+  Ende eines Kindes wandert sein Ergebnis in einen kleinen Puffer **im
+  Elternteil**, und der Kind-Eintrag verschwindet **sofort vollständig**
+  (Adressraum, Kernel-Stack, Handles). Es gibt gar keinen Zustand, in dem ein
+  toter Prozess noch Ressourcen hält. Stirbt der Elternteil, verfallen
+  ungelesene Ergebnisse mit ihm — kein Waisen-Aufsammler nötig. Der Puffer ist
+  ein FESTES Feld, keine Allokation im Syscall-Pfad.
+  Neu ist auch **`ende_vermerken` als DIE eine Stelle**, an der ein Prozess
+  endet: Vorher stand „Beendet setzen" an drei Stellen (exit, Absturz, Stopp),
+  und mit der Eltern-Beziehung kam ein vierter Schritt dazu — drei Kopien
+  davon wären drei Gelegenheiten, ihn zu vergessen.
+- **Fünf neue Syscalls** (7..11, docs/syscalls.md §8b): `lese` (Strom-Gegenpart
+  zu `schreibe`, 0 = Dateiende), `warte`, `beende`, `pipe` (beide Handles in
+  einem Register — die ABI hat nur eines), `starte`. **`schreibe` kann seit
+  jetzt ebenfalls blockieren** (volle Pipe).
+- **HANDLE-WEITERGABE:** `starte` nimmt zwei Handles, die im Kind zu 0 und 1
+  werden. `ERBE_KEINS` ist `u64::MAX` und bewusst nicht 0 — **0 ist ein
+  gültiges Handle**, und ein Sonderwert mit Doppelbedeutung ist die Sorte
+  Falle, die man später teuer bezahlt.
+- **DIE SHELL WIRD ZUR SHELL.** Bisher schrieb ein Programm auf Handle 1, und
+  der KERNEL druckte für es. Jetzt legt die Shell eine Pipe an, gibt das
+  Schreib-Ende als Handle 1 weiter, liest heraus und druckt selbst. Für das
+  Programm ändert sich nichts — für das System alles: Die Ausgabe ist ein
+  **Datenstrom** statt eines Seiteneffekts, und was ein Strom ist, kann man
+  umleiten. Daraus wird `a | b`.
+  Dass die Shell **während** der Laufzeit liest (nicht danach), ist kein
+  Detail: Eine Pipe fasst 4 KiB, „erst warten, dann Ausgabe abholen" wäre ein
+  Deadlock, sobald ein Programm mehr produziert.
+- **Strg+C** beendet den Vordergrund. Es geht NICHT in die Tasten-Queue: Die
+  Shell steckt beim Warten mitten in einem synchronen Befehl und käme dort gar
+  nicht heran — das Signal käme frühestens an, wenn es nichts mehr abzubrechen
+  gibt. Der Eingabe-Router setzt deshalb ein Flag **pro Sitzung** (zwei
+  Terminals sollen sich nicht gegenseitig abschiessen), das die Pump-Schleife
+  abfragt.
+- **Task-Manager beendet echte Prozesse** — mit Bestätigungsdialog. Der
+  Unterschied steht jetzt auch in der App: „Task beenden" ist eine **Bitte**
+  (der Task fällt am nächsten await-Punkt), „Prozess beenden" ist eine
+  **Tatsache** (er wird nicht mehr eingeplant, ob er will oder nicht). Genau
+  das ist der Gewinn der Präemption.
+- **Drei neue Programme:** `zaehle` (die linke Pipe-Hälfte), `filter` (die
+  rechte — das erste SpeedOS-Programm, das etwas liest, das keine Datei ist)
+  und `elternprobe`, das aus **Ring 3** ein Kind startet und auf es wartet.
+- **Beweise (`tests/zusammenspiel.rs`, 13 Tests, echt in QEMU):** beide
+  warte/exit-Reihenfolgen (Kind zuerst → Ergebnis gepuffert; Eltern zuerst →
+  blockiert), aus Ring 3 UND kernelseitig; zweites `warte` wird abgelehnt;
+  `beende` räumt über drei Durchgänge **byte-exakt** ab, auch bei einem
+  Prozess, der nie kooperiert; die Pipe blockiert und weckt an **beiden**
+  Enden — nachgemessen am Zustand `Wartend` und daran, dass ein wartender
+  Prozess **keine CPU verbraucht** (der Unterschied zwischen „blockieren" und
+  „in einer Schleife nachsehen"); Handle-Weitergabe; `zaehle 20 | filter 7`
+  von Hand und durch die Shell, inklusive dreistufiger Pipeline und
+  Fehlerfällen. Dazu 6 Pipe-Unit-Tests.
+
 ### Serie 6, Teil 5: ECHTE PROGRAMME — SpeedOS führt fremden Code aus
 - **DER MEILENSTEIN.** `starte /platte/programme/netzhole http://example.com`
   holt eine Webseite aus dem Internet. Das klingt banal und ist es nicht: Es

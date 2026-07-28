@@ -550,6 +550,59 @@
   `starte /platte/programme/netzhole http://example.com` -> 571 Byte von
   example.com, geholt von einem Ring-3-Programm von der eigenen Platte ueber
   den eigenen Netz-Stack.
+- **PROZESS-ZUSAMMENSPIEL (Serie 6, Teil 6, `src/pipe.rs` + Warte-Modell):**
+  PIPES: `netz::puffer::Ringpuffer` WIEDERVERWENDET (nicht nachgebaut — zwei
+  Ringpuffer waeren zwei Stellen fuer denselben Off-by-one) plus zwei
+  Besitz-ZAEHLER je Ende. ZAEHLER statt Flags, weil ein Ende mehrere Besitzer
+  hat (die Shell haelt es, waehrend sie es dem Kind gibt); ein Flag waere je
+  nach Schliess-Reihenfolge ein Leck ODER ein zu frueh gemeldetes Dateiende.
+  Semantik: voll -> Schreiber blockiert (Gegendruck), leer+Schreiber da ->
+  Leser blockiert, leer+kein Schreiber -> `lese` liefert 0 = DATEIENDE, kein
+  Leser mehr -> `schreibe` liefert `Abgebrochen` (EPIPE). PIPES ist ein
+  BLATT-Lock; der Timer fragt `lesbar`/`schreibbar` mit try_lock ab.
+  BLOCKIERENDE SYSCALLS — DIE NEUSTART-MECHANIK: Ein Syscall haelt NICHT
+  mitten drin an (der gesicherte Kontext ist der Trap-Rahmen am EINGANG; beim
+  Umschalten landet die CPU per iretq hinter dem `int 0x80`, der Rust-Stack
+  des halben Syscalls waere weg). Stattdessen `rip -= 2` (Laenge von
+  `int 0x80` = CD 80) und Prozess schlafen legen -> der Syscall laeuft von
+  vorn. EISERNE REGEL: Bis zum `Blockieren` darf NICHTS veraendert worden
+  sein (sonst passiert es beim Neustart zweimal), und rax/rdx duerfen nicht
+  beschrieben werden (sie tragen noch Nummer und Argument 2).
+  GEWECKT WIRD DURCH NACHSEHEN, NICHT DURCH ANSTOSSEN: `prozess::Warteauf`
+  (Zeit/Kind/PipeLesen/PipeSchreiben) steht im PCB, und `warter_wecken` im
+  Timer prueft je Tick die Bedingung. Anstossen aus dem schreibenden Prozess
+  waere schneller — und eine Lock-Kette quer durch den Kernel, aus einem
+  Syscall heraus, in dem man nicht warten darf. Preis: max. 1 Tick (4 ms).
+  ELTERN/KIND OHNE ZOMBIES — die UMKEHRUNG des Unix-Modells: Nicht der
+  Kind-Eintrag bleibt liegen, sondern das ERGEBNIS wandert beim Ende in
+  `Prozess::kinder_enden` des ELTERNTEILS (FESTES Feld, keine Allokation im
+  Syscall-Pfad; Ueberlauf verwirft das AELTESTE), und das Kind verschwindet
+  sofort vollstaendig. Stirbt der Elternteil, verfallen ungelesene Ergebnisse
+  mit ihm — kein Waisen-Aufsammler. `warte` auf ein nicht existierendes Kind
+  ist ein FEHLER (warten waere ein Haenger fuer immer); ein zweites `warte`
+  auf dasselbe Kind ebenso. `scheduler::ende_vermerken` ist DIE EINE STELLE,
+  an der ein Prozess endet (exit/Absturz/Stopp) — vorher drei Kopien, und mit
+  der Eltern-Beziehung kam ein vierter Schritt dazu.
+  ACHTUNG PIPE-DATEIENDE: Ein Pipe-Ende haengt an der Handle-Tabelle und
+  faellt erst beim ABRAEUMEN des beendeten Prozesses (Freigeben darf nicht im
+  Interrupt passieren). Wer auf ein Dateiende wartet, muss also `aufraeumen()`
+  mitlaufen lassen — die Shell-Pumpschleife und die Tests tun das; im Betrieb
+  erledigt es der Aufraeum-Task (250 ms).
+  ACHTUNG EXIT-CODE: `aufraeumen()` LOESCHT den Tabelleneintrag und damit den
+  Exit-Code. Wer in einer Schleife aufraeumt, muss `scheduler::ende_abfragen`
+  VORHER einsammeln (genau dieser Fehler liess die Shell „laeuft noch" fuer
+  laengst beendete Prozesse melden).
+  SHELL: `starte` gibt dem Kind eine PIPE als Handle 1 und liest selbst heraus
+  — die Ausgabe ist damit ein DATENSTROM statt eines Kernel-Seiteneffekts, und
+  daraus wird `a | b` (`MAX_PIPELINE` Stufen). Gelesen wird WAEHREND der
+  Laufzeit; „erst warten, dann abholen" waere ein Deadlock ab 4 KiB Ausgabe.
+  Die Shell schliesst nach dem Start ihre EIGENEN Kopien aller weitergegebenen
+  Enden — sonst bekaeme die naechste Stufe nie ein Dateiende (der Klassiker).
+  STRG+C geht NICHT in die Tasten-Queue (die Shell steckt beim Warten in einem
+  synchronen Befehl und kaeme nicht heran): Der Eingabe-Router setzt ein Flag
+  PRO SITZUNG (`sitzung::abbruch_anfordern`), das die Pumpschleife abfragt.
+  HANDLE-WEITERGABE: `handle::ERBE_KEINS` ist `u64::MAX` und bewusst NICHT 0
+  — 0 ist ein gueltiges Handle.
 - **DIE hlt-FALLE IM SYSCALL (Serie 6, Teil 5) — `zeit::warte_auf_interrupt()`:**
   `int 0x80` geht durch ein INTERRUPT-Gate, im Syscall sind Interrupts also
   AUS. Ein blankes `hlt` haelt die CPU dann FUER IMMER an (nichts kann sie

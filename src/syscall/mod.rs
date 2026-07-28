@@ -61,6 +61,7 @@
 pub mod datei;
 pub mod handle;
 pub mod netz;
+pub mod prozess;
 
 use crate::prozess::TrapFrame;
 use crate::ring3::{self, CopyFehler};
@@ -86,6 +87,17 @@ pub const SYS_SCHLAFE: u64 = 4;
 pub const SYS_ZEIT_JETZT: u64 = 5;
 /// `zeit_epoche()` -> Sekunden seit dem 1.1.2000 (echte Uhr, RTC-Anker).
 pub const SYS_ZEIT_EPOCHE: u64 = 6;
+/// `lese(handle, ptr, len)` -> Bytes (0 = Dateiende). BLOCKIEREND auf Pipes.
+pub const SYS_LESE: u64 = 7;
+/// `warte(pid)` -> Exit-Code des Kindes. BLOCKIEREND. `pid = 0` = irgendeines.
+pub const SYS_WARTE: u64 = 8;
+/// `beende(pid)` — beendet einen Prozess von aussen.
+pub const SYS_BEENDE: u64 = 9;
+/// `pipe()` -> Lese-Handle in den unteren, Schreib-Handle in den oberen
+/// 32 Bit des Ergebnisses.
+pub const SYS_PIPE: u64 = 10;
+/// `starte(pfad_ptr, pfad_len, eingabe_handle, ausgabe_handle)` -> PID.
+pub const SYS_STARTE: u64 = 11;
 
 // ----- Gruppe 1: Dateien über das VFS (16..31) -----
 /// `oeffne(pfad_ptr, pfad_len, modus)` -> Handle.
@@ -424,14 +436,30 @@ pub fn laenge_pruefen(laenge: u64) -> Result<usize, Fehler> {
 pub use handle::{HANDLE_AUSGABE, HANDLE_DIAGNOSE, HANDLE_EINGABE};
 
 /// `schreibe(handle, ptr, len)` — die Ausgabe-Syscall.
-fn sys_schreibe(h: u64, ptr: u64, laenge: u64) -> SysErgebnis {
+///
+/// Seit Teil 6 kann sie BLOCKIEREN: Schreibt der Prozess in eine volle Pipe,
+/// wird er schlafen gelegt und der Syscall später wiederholt (deshalb der
+/// `Ausgang` statt eines schlichten Ergebnisses).
+fn sys_schreibe(h: u64, ptr: u64, laenge: u64) -> prozess::Ausgang {
+    match sys_schreibe_inner(h, ptr, laenge) {
+        Ok(ausgang) => ausgang,
+        Err(fehler) => prozess::Ausgang::Fertig(Err(fehler)),
+    }
+}
+
+fn sys_schreibe_inner(h: u64, ptr: u64, laenge: u64) -> Result<prozess::Ausgang, Fehler> {
     let laenge = laenge_pruefen(laenge)?;
     if laenge == 0 {
-        return Ok(0);
+        return Ok(prozess::Ausgang::Fertig(Ok(0)));
     }
     // Das Ziel BEVOR wir kopieren bestimmen — ein ungültiges Handle soll
     // nicht erst nach einer 64-KiB-Kopie auffallen.
     let ziel = handle::schreib_ziel(h)?;
+    // Der Pipe-Zweig hat seine eigene Reihenfolge (erst Platz prüfen, dann
+    // kopieren), damit ein Neustart nach dem Blockieren nichts wiederholt.
+    if let handle::SchreibZiel::Pipe(id) = ziel {
+        return Ok(prozess::pipe_schreiben(id, ptr, laenge));
+    }
     let bytes = ring3::copy_in(ptr, laenge).map_err(Fehler::von_copy)?;
     // Nicht-UTF-8 wird zeichenweise ausgegeben statt abgelehnt: Ausgabe ist
     // ein Byte-Strom, kein Text-Kanal.
@@ -468,12 +496,14 @@ fn sys_schreibe(h: u64, ptr: u64, laenge: u64) -> SysErgebnis {
         handle::SchreibZiel::Socket(sh) => {
             crate::netz::socket::senden(sh, &bytes).map_err(Fehler::von_socket)?
         }
+        // Oben abgefangen — hier nur, damit das match vollständig ist.
+        handle::SchreibZiel::Pipe(_) => unreachable!("Pipe-Zweig läuft über pipe_schreiben"),
     };
     // Für den Präemptions-Beweis (Serie 6, Teil 3): Wer hat wann gedruckt?
     if let Some(letztes) = bytes.iter().rev().copied().find(|b| b.is_ascii_graphic()) {
         scheduler::spur_melden(scheduler::laufende_user_pid(), letztes);
     }
-    Ok(geschrieben as u64)
+    Ok(prozess::Ausgang::Fertig(Ok(geschrieben as u64)))
 }
 
 // ---------------------------------------------------------------------------
@@ -489,9 +519,11 @@ pub fn ausfuehren(nummer: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> SysErgebni
     match nummer {
         // ----- Gruppe 0: Prozess und Ausgabe -----
         SYS_GETPID => Ok(scheduler::laufende_user_pid() as u64),
-        SYS_SCHREIBE => sys_schreibe(a0, a1, a2),
         SYS_ZEIT_JETZT => Ok(crate::zeit::ms_seit_boot()),
         SYS_ZEIT_EPOCHE => Ok(crate::zeit::sekunden_seit_2000(&crate::zeit::jetzt())),
+        SYS_BEENDE => prozess::sys_beende(a0),
+        SYS_PIPE => prozess::sys_pipe(),
+        SYS_STARTE => prozess::sys_starte(a0, a1, a2, a3),
 
         // ----- Gruppe 1: Dateien -----
         SYS_OEFFNE => datei::sys_oeffne(a0, a1, a2),
@@ -550,6 +582,59 @@ pub fn handler_adresse() -> u64 {
     syscall_entry as *const () as u64
 }
 
+/// Länge des Befehls `int 0x80` in Bytes (CD 80).
+///
+/// Diese Zahl ist der ganze Trick hinter den blockierenden Syscalls: Um
+/// `rip` um genau sie zurückzustellen, zeigt der nächste Befehl nach dem
+/// Aufwachen wieder auf den Syscall — er läuft von vorn.
+const INT_0X80_LAENGE: u64 = 2;
+
+/// Verarbeitet den `Ausgang` eines möglicherweise blockierenden Syscalls.
+///
+/// Fertig    -> Fehlercode nach rax, Ergebnis nach rdx, weiter wie immer.
+/// Blockiert -> `rip` um zwei Bytes zurück, Prozess schlafen legen, auf
+///              einen anderen Prozess umschalten. **rax und rdx bleiben
+///              unberührt** — sie tragen noch Syscall-Nummer und Argument 2,
+///              die der Neustart braucht.
+fn blockierend_behandeln(
+    rahmen: *mut TrapFrame,
+    f: &mut TrapFrame,
+    ausgang: prozess::Ausgang,
+) -> *mut TrapFrame {
+    match ausgang {
+        prozess::Ausgang::Fertig(ergebnis) => {
+            ergebnis_eintragen(f, ergebnis);
+            rahmen
+        }
+        prozess::Ausgang::Blockieren(grund) => {
+            f.rip -= INT_0X80_LAENGE;
+            scheduler::blockieren(rahmen, grund)
+        }
+    }
+}
+
+/// Trägt Fehlercode (rax) und Ergebnis (rdx) in den Rahmen ein.
+fn ergebnis_eintragen(f: &mut TrapFrame, ergebnis: SysErgebnis) {
+    match ergebnis {
+        Ok(wert) => {
+            f.rax = Fehler::Ok.code();
+            f.rdx = wert;
+        }
+        Err(fehler) => {
+            f.rax = fehler.code();
+            f.rdx = 0;
+            // Nur seriell und nur knapp: Ein Prozess darf beliebig oft
+            // Unsinn übergeben, das ist kein Kernel-Ereignis.
+            crate::serial_println!(
+                "[syscall] PID {} -> Fehler {} ({})",
+                scheduler::laufende_user_pid(),
+                fehler.code(),
+                fehler.meldung()
+            );
+        }
+    }
+}
+
 /// Der Rust-Dispatcher: liest Nummer und Argumente aus dem gesicherten
 /// Kontext, führt den Syscall aus, schreibt Fehlercode (rax) und Ergebnis
 /// (rdx) zurück — und liefert den Rahmen, mit dem es weitergeht.
@@ -591,6 +676,13 @@ extern "C" fn syscall_dispatch(rahmen: *mut TrapFrame) -> *mut TrapFrame {
             }
             return rahmen;
         }
+        // DIE BLOCKIERENDEN SYSCALLS (Serie 6, Teil 6). Sie brauchen den
+        // Rahmen, weil sie ihn beim Blockieren zurückstellen müssen — siehe
+        // `blockierend_behandeln` und `scheduler::blockieren`.
+        SYS_SCHREIBE => return blockierend_behandeln(rahmen, f, sys_schreibe(a0, a1, a2)),
+        SYS_LESE => return blockierend_behandeln(rahmen, f, prozess::sys_lese(a0, a1, a2)),
+        SYS_WARTE => return blockierend_behandeln(rahmen, f, prozess::sys_warte(a0)),
+
         SYS_KONTEXT_TEST => {
             // Nur Tests: den EINGEHENDEN Rahmen wegkopieren (beweist die
             // Kontext-Sicherung, siehe tests/scheduler.rs).
@@ -602,25 +694,7 @@ extern "C" fn syscall_dispatch(rahmen: *mut TrapFrame) -> *mut TrapFrame {
         _ => {}
     }
 
-    match ausfuehren(nummer, a0, a1, a2, a3) {
-        Ok(ergebnis) => {
-            f.rax = Fehler::Ok.code();
-            f.rdx = ergebnis;
-        }
-        Err(fehler) => {
-            f.rax = fehler.code();
-            f.rdx = 0;
-            // Nur seriell und nur knapp: Ein Prozess darf beliebig oft
-            // Unsinn übergeben, das ist kein Kernel-Ereignis.
-            crate::serial_println!(
-                "[syscall] PID {} Nr {} -> Fehler {} ({})",
-                scheduler::laufende_user_pid(),
-                nummer,
-                fehler.code(),
-                fehler.meldung()
-            );
-        }
-    }
+    ergebnis_eintragen(f, ausfuehren(nummer, a0, a1, a2, a3));
     rahmen
 }
 
@@ -645,6 +719,11 @@ mod tests {
         assert_eq!(SYS_SCHLAFE, 4);
         assert_eq!(SYS_ZEIT_JETZT, 5);
         assert_eq!(SYS_ZEIT_EPOCHE, 6);
+        assert_eq!(SYS_LESE, 7);
+        assert_eq!(SYS_WARTE, 8);
+        assert_eq!(SYS_BEENDE, 9);
+        assert_eq!(SYS_PIPE, 10);
+        assert_eq!(SYS_STARTE, 11);
         assert_eq!(SYS_OEFFNE, 16);
         assert_eq!(SYS_LESE_AT, 17);
         assert_eq!(SYS_SCHREIBE_AT, 18);
@@ -673,7 +752,7 @@ mod tests {
     /// auch die Lücken zwischen den Gruppen und u64::MAX.
     #[test_case]
     fn test_unbekannte_nummern() {
-        for nummer in [7u64, 15, 25, 31, 38, 100, 239, 241, u64::MAX] {
+        for nummer in [12u64, 15, 25, 31, 38, 100, 239, 241, u64::MAX] {
             assert_eq!(
                 ausfuehren(nummer, 0, 0, 0, 0),
                 Err(Fehler::UnbekannterSyscall),

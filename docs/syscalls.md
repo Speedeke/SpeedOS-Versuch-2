@@ -337,6 +337,96 @@ ein Warte-Modell Pflicht — nicht der direkte Aufruf.
 
 ---
 
+## 8b. Prozesse arbeiten zusammen (Serie 6, Teil 6)
+
+| Nr | Name | Argumente | Ergebnis | Blockiert? |
+|----|------|-----------|----------|-----------|
+| 7 | `lese` | handle, ptr, len | Bytes (**0 = Dateiende**) | ja, auf leerer Pipe |
+| 8 | `warte` | pid (0 = irgendein Kind) | Exit-Code | ja, bis das Kind endet |
+| 9 | `beende` | pid | 0 | nein |
+| 10 | `pipe` | — | lese \| (schreib << 32) | nein |
+| 11 | `starte` | pfad_ptr, pfad_len, eingabe, ausgabe | PID | nein |
+
+Zusätzlich kann seit Teil 6 auch **`schreibe` (3) blockieren** — auf einer
+vollen Pipe.
+
+### Wie ein blockierender Syscall funktioniert: der NEUSTART
+
+Ein Syscall hält bei uns **nicht** mitten drin an. Der gesicherte Kontext ist
+der Trap-Rahmen am Eingang (siehe `prozess.rs`); beim Umschalten wird er per
+`iretq` geladen, die CPU landet also hinter dem `int 0x80` — der Rust-Stack
+des halben Syscalls wäre verloren.
+
+Stattdessen wird der Syscall **von vorn wiederholt**: Der Dispatcher stellt
+`rip` um zwei Bytes zurück (die Länge von `int 0x80` = `CD 80`) und legt den
+Prozess schlafen. Nach dem Aufwachen ist der nächste Befehl wieder der
+Syscall, mit unveränderten Argumenten.
+
+Daraus folgen zwei Regeln für jeden blockierenden Syscall:
+
+* **Bis zum Blockieren darf nichts verändert worden sein** — sonst passiert
+  es beim Neustart ein zweites Mal. Die Pipe-Operationen melden deshalb
+  „blockiert", *bevor* sie Bytes anfassen.
+* **`rax` und `rdx` bleiben unberührt** — sie tragen noch Syscall-Nummer und
+  Argument 2.
+
+Geweckt wird **durch Nachsehen, nicht durch Anstossen**: Der Timer prüft bei
+jedem Tick (4 ms) die Weck-Bedingung jedes wartenden Prozesses (`Warteauf`).
+Ein Weckruf aus dem schreibenden Prozess wäre schneller, würde aber eine
+Lock-Kette quer durch den Kernel bedeuten — aus einem Syscall heraus, in dem
+wir nicht warten dürfen. Der Preis ist höchstens ein Tick Verzögerung.
+
+### Pipes
+
+Ein Byte-Rohr fester Grösse (4 KiB), zwei Enden, jedes mit einem
+**Besitz-Zähler** (nicht Flag — ein Ende kann mehrere Besitzer haben, etwa
+während der Weitergabe an ein Kind).
+
+* **voll** → der Schreiber blockiert (Gegendruck),
+* **leer, Schreiber vorhanden** → der Leser blockiert,
+* **leer, kein Schreiber mehr** → `lese` liefert **0 = Dateiende**,
+* **kein Leser mehr** → `schreibe` liefert `Abgebrochen` (das POSIX-EPIPE).
+
+Ein Pipe-Ende gehört einem Handle. Endet ein Prozess, schliesst der `Drop`
+seiner Handle-Tabelle alle Enden — **beim Abräumen**, nicht beim Markieren
+(Freigeben darf nicht im Interrupt passieren). Das Dateiende kommt also,
+sobald der Aufräum-Task (250 ms) bzw. die Pump-Schleife der Shell den
+beendeten Prozess geerntet hat.
+
+### Handle-Weitergabe an ein Kind
+
+`starte` nimmt zwei Handles, die im Kind zu **0 (Eingabe)** und **1
+(Ausgabe)** werden. `u64::MAX` (`ERBE_KEINS`) heisst „nicht umleiten" —
+bewusst nicht 0, denn **0 ist ein gültiges Handle**.
+
+Ein Kind merkt davon nichts: Es liest von 0 und schreibt auf 1 wie immer.
+Genau daraus wird `zaehle | filter 7`.
+
+### Eltern, Kind und die Abwesenheit von Zombies
+
+`starte` trägt den Aufrufer als **Elternteil** ein. Endet ein Kind, wandert
+sein Ergebnis in einen kleinen Puffer **im Elternteil**, und der Kind-Eintrag
+verschwindet sofort vollständig (Adressraum, Kernel-Stack, Handles).
+
+Das ist die Umkehrung des Unix-Modells: Dort bleibt der *Kind*-Eintrag als
+Zombie liegen, bis jemand `wait` ruft. Bei uns gibt es keinen Zustand, in dem
+ein toter Prozess noch Ressourcen hält. Zwei Folgen, beide gewollt:
+
+* Stirbt der Elternteil, verschwinden ungelesene Ergebnisse mit ihm — kein
+  Waisen-Aufsammler nötig.
+* Der Puffer ist **endlich** (feste Plätze, keine Allokation im Syscall-Pfad).
+  Läuft er über, geht das *älteste* Ergebnis verloren.
+
+`warte` auf ein Kind, das es nicht gibt, ist ein **Fehler**
+(`NichtGefunden`) — darauf zu warten wäre ein Hänger für immer. Ein zweites
+`warte` auf dasselbe Kind schlägt deshalb ebenfalls fehl.
+
+**Rechte:** Es gibt keine. Jeder Prozess darf jeden anderen beenden — die
+Folge davon, dass es keinen Benutzerbegriff gibt (§10). Geschützt ist nur
+der Kernel-Prozess (PID 0).
+
+---
+
 ## 9. Der Prozess-Start: Einsprung und Argumente
 
 *(Serie 6, Teil 5 — ab hier lädt SpeedOS echte Programme, siehe `src/elf.rs`.)*
@@ -418,20 +508,28 @@ von aussen gestoppt wurde (`Gestoppt`, Code 143).
 
 ## 10. Bewusst NICHT in dieser ABI
 
-- **Kein `fork`/`exec`** — ein Prozess kann keinen anderen starten. Programme
-  werden vom Kernel geladen (Shell `starte`, Explorer-Doppelklick). Ein
-  `spawn`-Syscall wäre additiv: Er müsste nur `syscall::mit_vfs` statt
-  `fs::mit_fs` benutzen (Lock-Disziplin, §8).
-- **Kein blockierendes `empfange`/`lese`** und kein `select`/`poll` — beides
-  braucht das Warte-Modell (Prozess wird `Wartend` auf ein Ereignis, ein
-  Kernel-Task weckt ihn). Der nächste Schritt.
+- **Kein `fork`.** Ein Prozess entsteht immer aus einer DATEI (`starte`),
+  nie als Kopie seines Elternteils. Das erspart uns Copy-on-Write und die
+  halbe Semantik von Unix — und `starte` kann alles, wofür wir `fork`+`exec`
+  bräuchten.
+- **`starte` gibt KEINE Argumente an das Kind weiter** (nur `argv[0]` = der
+  Dateiname). Ein Feld von Zeigern aus dem User-Speicher zu prüfen und zu
+  kopieren wäre machbar, kauft aber nichts, solange die Shell die Pipelines
+  baut. Wer Argumente braucht, wird von der Shell gestartet.
+- **Kein `dup`/`dup2`.** Handles lassen sich beim START weitergeben, aber ein
+  laufender Prozess kann seine Kanäle nicht umbiegen.
+- **Kein `select`/`poll`** — auf MEHRERE Quellen gleichzeitig zu warten
+  bräuchte eine Weck-Bedingung aus mehreren Gründen. `Warteauf` trägt genau
+  einen; das zu erweitern ist additiv, aber noch nicht gebraucht.
+- **Kein blockierendes `empfange`** (Sockets). `lese` auf Pipes blockiert
+  seit Teil 6; für Sockets fehlt die Weck-Bedingung „Daten im Socket", weil
+  der RX-Weg über den Netz-Task läuft.
 - **Kein Arbeitsverzeichnis**, also nur absolute Pfade.
 - **Keine Fenster-Syscalls.** Die Fenster/UI-API ist die aufwendigste der drei
   Nähte (ein Protokoll statt einer Funktion), und sie hat eine harte
   Vorbedingung: Ein Zeichenbefehl aus Ring 3 darf den MANAGER-Lock nicht
   synchron nehmen, wenn er lange dauert. Das braucht eine Kommando-Warteschlange
   pro Fenster — bewusst vertagt.
-- **Keine Rechte/Benutzer.** Jeder Prozess darf alles, was die ABI hergibt.
-  Ein Rechte-Modell ohne Benutzerbegriff wäre Attrappe.
-- **Kein `dup`/`dup2`**, keine Handle-Vererbung — es gibt keinen
-  Prozess-Elternteil.
+- **Keine Rechte/Benutzer.** Jeder Prozess darf alles, was die ABI hergibt —
+  einschliesslich `beende` auf fremde Prozesse. Ein Rechte-Modell ohne
+  Benutzerbegriff wäre Attrappe.

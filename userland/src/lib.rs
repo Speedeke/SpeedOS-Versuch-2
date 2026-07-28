@@ -49,6 +49,11 @@ pub const SYS_SCHREIBE: u64 = 3;
 pub const SYS_SCHLAFE: u64 = 4;
 pub const SYS_ZEIT_JETZT: u64 = 5;
 pub const SYS_ZEIT_EPOCHE: u64 = 6;
+pub const SYS_LESE: u64 = 7;
+pub const SYS_WARTE: u64 = 8;
+pub const SYS_BEENDE: u64 = 9;
+pub const SYS_PIPE: u64 = 10;
+pub const SYS_STARTE: u64 = 11;
 
 pub const SYS_OEFFNE: u64 = 16;
 pub const SYS_LESE_AT: u64 = 17;
@@ -68,6 +73,7 @@ pub const SYS_AUFLOESEN: u64 = 36;
 pub const SYS_SOCKET_ZUSTAND: u64 = 37;
 
 /// Die drei reservierten Handles.
+pub const EINGABE: u64 = 0;
 pub const AUSGABE: u64 = 1;
 /// Nur seriell — geht am Bildschirm vorbei (fuer Protokolle und Fehler).
 pub const DIAGNOSE: u64 = 2;
@@ -248,6 +254,90 @@ pub fn schreibe(handle: u64, daten: &[u8]) -> Ergebnis {
             0,
         )
     }
+}
+
+/// Liest Bytes von einem Handle — der STROM-Gegenpart zu `schreibe`.
+///
+/// Liefert 0 = **Dateiende**: Bei einer Pipe heisst das, dass der letzte
+/// Schreiber sein Ende geschlossen hat. Ist die Pipe nur GERADE leer,
+/// BLOCKIERT der Aufruf, bis etwas ankommt — das erledigt der Kernel, das
+/// Programm merkt davon nur, dass der Syscall laenger dauert.
+pub fn lese(handle: u64, ziel: &mut [u8]) -> Ergebnis {
+    unsafe {
+        syscall(
+            SYS_LESE,
+            handle,
+            ziel.as_mut_ptr() as u64,
+            ziel.len() as u64,
+            0,
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Prozesse und Pipes (Serie 6, Teil 6)
+// ---------------------------------------------------------------------------
+
+/// Der Wert, der bei `starte` „nicht umleiten" bedeutet.
+///
+/// Bewusst `u64::MAX` und nicht 0 — **0 ist ein gueltiges Handle** (die
+/// Standard-Eingabe).
+pub const ERBE_KEINS: u64 = u64::MAX;
+
+/// Ein Pipe-Paar: was hineingeschrieben wird, kommt herausgelesen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PipePaar {
+    /// Handle, aus dem gelesen wird.
+    pub lesen: u64,
+    /// Handle, in das geschrieben wird.
+    pub schreiben: u64,
+}
+
+/// Legt eine Pipe an und liefert beide Handles.
+///
+/// Der Kernel packt sie in EIN Ergebnis-Register (Lese-Handle unten,
+/// Schreib-Handle oben) — die ABI hat nur eines, und beide Zahlen sind
+/// winzig. Hier wird das wieder auseinandergenommen.
+pub fn pipe() -> Result<PipePaar, Fehler> {
+    let gepackt = unsafe { syscall(SYS_PIPE, 0, 0, 0, 0)? };
+    Ok(PipePaar {
+        lesen: gepackt & 0xFFFF_FFFF,
+        schreiben: gepackt >> 32,
+    })
+}
+
+/// Startet ein Programm als KIND-Prozess und liefert seine PID.
+///
+/// `eingabe`/`ausgabe` werden zu den Standard-Handles 0 und 1 des Kindes —
+/// so baut man eine Pipeline. `ERBE_KEINS` laesst den jeweiligen Kanal, wie
+/// der Kernel ihn vorgibt.
+///
+/// Das Kind bekommt KEINE Argumente ausser seinem Namen (`argv[0]`) —
+/// bewusste Grenze, siehe docs/syscalls.md.
+pub fn starte(pfad: &str, eingabe: u64, ausgabe: u64) -> Ergebnis {
+    unsafe {
+        syscall(
+            SYS_STARTE,
+            pfad.as_ptr() as u64,
+            pfad.len() as u64,
+            eingabe,
+            ausgabe,
+        )
+    }
+}
+
+/// Wartet auf das Ende eines KINDES und liefert seinen Exit-Code.
+/// `pid = 0` wartet auf irgendeines. BLOCKIEREND.
+///
+/// `NICHT_GEFUNDEN`, wenn es kein solches Kind gibt — darauf zu warten waere
+/// ein Haenger fuer immer, also meldet der Kernel es als Fehler.
+pub fn warte(pid: u64) -> Ergebnis {
+    unsafe { syscall(SYS_WARTE, pid, 0, 0, 0) }
+}
+
+/// Beendet einen Prozess von aussen.
+pub fn beende(pid: u64) -> Ergebnis {
+    unsafe { syscall(SYS_BEENDE, pid, 0, 0, 0) }
 }
 
 // ---------------------------------------------------------------------------
@@ -533,6 +623,87 @@ macro_rules! diagnose {
 macro_rules! diagnoseln {
     () => ($crate::diagnose!("\n"));
     ($($arg:tt)*) => ($crate::diagnose!("{}\n", format_args!($($arg)*)));
+}
+
+// ---------------------------------------------------------------------------
+// Zeilenweise lesen
+// ---------------------------------------------------------------------------
+
+/// Liest ZEILEN von einem Handle (typisch: der Standard-Eingabe).
+///
+/// Warum das nicht jedes Programm selbst macht: Ein Strom kennt keine
+/// Zeilen. `lese` liefert irgendeine Menge Bytes — mitten in einer Zeile,
+/// mehrere Zeilen auf einmal, oder ein einzelnes Zeichen. Wer daraus Zeilen
+/// machen will, braucht einen Puffer, der den REST zwischen zwei Aufrufen
+/// behaelt. Genau das ist diese Struktur.
+///
+/// `N` ist die groesste Zeilenlaenge; laengere Zeilen werden am Puffer-Ende
+/// abgeschnitten (und der Rest als eigene Zeile geliefert) — abschneiden ist
+/// ehrlicher als stillschweigend Speicher zu fressen.
+pub struct ZeilenLeser<const N: usize> {
+    handle: u64,
+    puffer: [u8; N],
+    belegt: usize,
+    quelle_zu: bool,
+}
+
+impl<const N: usize> ZeilenLeser<N> {
+    pub fn neu(handle: u64) -> ZeilenLeser<N> {
+        ZeilenLeser {
+            handle,
+            puffer: [0; N],
+            belegt: 0,
+            quelle_zu: false,
+        }
+    }
+
+    /// Holt die naechste Zeile (OHNE Zeilenumbruch) nach `ziel`.
+    ///
+    /// * `Ok(Some(n))` — eine Zeile mit n Bytes,
+    /// * `Ok(None)`    — Dateiende, es kommt nichts mehr,
+    /// * `Err(..)`     — Lesefehler.
+    ///
+    /// Blockiert, solange die Quelle offen ist und noch nichts anliegt.
+    pub fn zeile(&mut self, ziel: &mut [u8]) -> Result<Option<usize>, Fehler> {
+        loop {
+            // Steckt schon eine vollstaendige Zeile im Puffer?
+            if let Some(stelle) = self.puffer[..self.belegt].iter().position(|b| *b == b'\n') {
+                let laenge = self.entnehmen(stelle, stelle + 1, ziel);
+                return Ok(Some(laenge));
+            }
+            // Puffer randvoll ohne Umbruch: als (ueberlange) Zeile abgeben,
+            // statt ewig weiterzulesen.
+            if self.belegt == N {
+                let laenge = self.entnehmen(N, N, ziel);
+                return Ok(Some(laenge));
+            }
+            // Quelle zu: der Rest ohne Umbruch ist die letzte Zeile.
+            if self.quelle_zu {
+                if self.belegt == 0 {
+                    return Ok(None);
+                }
+                let laenge = self.entnehmen(self.belegt, self.belegt, ziel);
+                return Ok(Some(laenge));
+            }
+            // Nachschub holen (blockiert, bis etwas da ist).
+            let gelesen = lese(self.handle, &mut self.puffer[self.belegt..])? as usize;
+            if gelesen == 0 {
+                self.quelle_zu = true;
+            } else {
+                self.belegt += gelesen;
+            }
+        }
+    }
+
+    /// Nimmt `laenge` Bytes vorne heraus (nach `ziel`) und wirft `verbrauch`
+    /// Bytes aus dem Puffer (inklusive des Zeilenumbruchs).
+    fn entnehmen(&mut self, laenge: usize, verbrauch: usize, ziel: &mut [u8]) -> usize {
+        let nehmen = if laenge < ziel.len() { laenge } else { ziel.len() };
+        ziel[..nehmen].copy_from_slice(&self.puffer[..nehmen]);
+        self.puffer.copy_within(verbrauch..self.belegt, 0);
+        self.belegt -= verbrauch;
+        nehmen
+    }
 }
 
 // ---------------------------------------------------------------------------

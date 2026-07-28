@@ -96,8 +96,10 @@ da es dort keine serielle Debug-Ausgabe gibt.*
   [Syscall-ABI](docs/syscalls.md) und ein **ELF64-Loader** — SpeedOS lädt
   statisch gelinkte Programme von der Platte, mappt ihre Segmente mit **W^X**
   (NX-Bit) und führt sie unprivilegiert aus. Die Programme in `userland/`
-  (`hallo`, `kopiere`, `netzhole`) haben **keine** Kernel-Abhängigkeit und
-  erreichen das System nur über `int 0x80`
+  haben **keine** Kernel-Abhängigkeit und erreichen das System nur über
+  `int 0x80`. Sie **arbeiten zusammen**: Pipes mit Gegendruck und Dateiende,
+  Eltern-Kind-Beziehung mit blockierendem `warte` (ohne Zombies),
+  Handle-Weitergabe — `starte zaehle 20 | filter 7` ist eine echte Pipeline
 - **SpeedShell:** interaktive Kommandozeile mit Befehls-Registry,
   Verlauf (Pfeiltasten), Tab-Vervollständigung und 19 Befehlen —
   läuft im Desktop als Terminal-FENSTER (Ausgabe-Umleitung in ein
@@ -239,11 +241,12 @@ src/
 ├── scheduler.rs     Präemptiver Round-Robin (der Executor ist PID 0)
 ├── syscall/         Die ABI: Dispatcher, Handle-Tabelle, Datei-/Netz-Gruppe
 ├── elf.rs           ELF64-Loader: prüft streng, mappt mit W^X
+├── pipe.rs          Pipes zwischen Prozessen (Ringpuffer aus Serie 5)
 └── programme.rs     Die eingebetteten User-Programme (Installation)
 userland/            DIE ANDERE SEITE DER GRENZE — eigener Workspace ohne
 │                    jede Kernel-Abhängigkeit:
 ├── src/lib.rs       libspeed: Syscall-Wrapper, print!, Panic, _start
-├── src/bin/         hallo, kopiere, netzhole
+├── src/bin/         hallo, kopiere, netzhole, zaehle, filter, elternprobe
 └── speedos.ld       Linker-Skript (ET_EXEC ab 0x80_0000_0000, 4-KiB-Segmente)
 boot/                Host-Runner: baut das UEFI-Disk-Image, startet QEMU
 build.rs             baut userland/ mit und bettet die Programme ein
@@ -263,10 +266,23 @@ starte hallo --code=7              # beweist, dass Exit-Codes durchkommen
 starte kopiere /platte/heim/a.txt /platte/heim/b.txt
 starte netzhole http://example.com          # der Meilenstein
 starte netzhole http://example.com /platte/heim/seite.html
+starte zaehle 20 | filter 7        # eine echte PIPELINE -> 7, 17
+starte zaehle 100 50               # laeuft lange — Strg+C beendet es
+starte elternprobe 500             # ein Prozess startet ein Kind (Ring 3)
 programme                          # was mitgeliefert ist
 elfinfo netzhole                   # Segmente, Rechte, .bss
 prozesse                           # laufende Prozesse
 ```
+
+Bei `zaehle 20 | filter 7` laufen **beide Programme gleichzeitig** in
+getrennten Adressräumen, verbunden durch eine Pipe im Kernel: `zaehle`
+schreibt auf Handle 1, `filter` liest von Handle 0 — und keines von beiden
+weiß, dass dazwischen kein Terminal steht. Läuft `zaehle` der Gegenseite
+davon, blockiert es, bis wieder Platz ist.
+
+**Strg+C** beendet den laufenden Vordergrund-Prozess; im Task-Manager geht
+das ebenfalls (mit Nachfrage) — und zwar *wirklich*, nicht als Bitte: Ein
+Prozess wird schlicht nicht mehr eingeplant.
 
 Im Explorer startet ein **Doppelklick** auf eine ausführbare Datei sie
 direkt — erkannt wird das an den ersten Bytes (ELF-Magie), nicht an einer
@@ -418,9 +434,14 @@ könnte — die unteren Schichten und die Socket-API blieben dabei unsere.
       http://example.com` — ein eigenständiges Programm, von der eigenen
       Platte geladen, im eigenen Adressraum, holt über den eigenen
       Netzwerk-Stack eine Webseite aus dem Internet.
-      *Noch offen:* `fork`/`exec` (ein Prozess kann keinen anderen starten),
-      blockierendes `empfange`/`select`, Fenster-Syscalls (ein Ring-3-Programm
-      kann noch nicht zeichnen) — siehe
+      **Und sie arbeiten zusammen:** Pipes mit Gegendruck und Dateiende,
+      blockierendes `warte` auf Kindprozesse (ohne Zombies — das Ergebnis
+      liegt beim Elternteil, das Kind ist sofort restlos weg), Handle-
+      Weitergabe beim Start und `starte zaehle 20 | filter 7` als echte
+      Pipeline. Strg+C beendet den Vordergrund.
+      *Noch offen:* `fork` (Prozesse entstehen immer aus einer Datei),
+      `select`/`poll`, blockierendes `empfange` auf Sockets, Fenster-Syscalls
+      (ein Ring-3-Programm kann noch nicht zeichnen) — siehe
       [docs/syscalls.md §10](docs/syscalls.md)
 - [ ] Ferner: HTML-Text-Browser (Kernel-App), TLS/HTTPS (geprüfte Krypto),
       Sound

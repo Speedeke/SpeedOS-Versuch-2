@@ -39,8 +39,8 @@ use core::panic::PanicInfo;
 use speed_os::prozess::{self, Pid};
 use speed_os::syscall::datei::{StatDaten, DIR_EINTRAG_GROESSE};
 use speed_os::syscall::handle::{
-    HANDLE_AUSGABE, HANDLE_DIAGNOSE, HANDLE_EINGABE, MODUS_ABSCHNEIDEN, MODUS_ANLEGEN,
-    MODUS_LESEN, MODUS_SCHREIBEN,
+    ERBE_KEINS, HANDLE_AUSGABE, HANDLE_DIAGNOSE, HANDLE_EINGABE, MODUS_ABSCHNEIDEN,
+    MODUS_ANLEGEN, MODUS_LESEN, MODUS_SCHREIBEN,
 };
 use speed_os::syscall::netz::{TYP_TCP, TYP_UDP, ZUSTAND_NEU};
 use speed_os::syscall::{self as sys, Fehler};
@@ -177,6 +177,9 @@ impl Pruefstand {
     }
 
     /// Bequemer Aufruf mit weniger Argumenten.
+    fn ruf4(&self, nummer: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> (u64, u64) {
+        self.ruf(nummer, a0, a1, a2, a3)
+    }
     fn ruf3(&self, nummer: u64, a0: u64, a1: u64, a2: u64) -> (u64, u64) {
         self.ruf(nummer, a0, a1, a2, 0)
     }
@@ -308,9 +311,82 @@ fn test_b_gruppe0_boesartig() {
     let ptr = p.hinlegen(0, text);
 
     // UNBEKANNTE NUMMERN — inklusive der Lücken zwischen den Gruppen.
-    for nummer in [7u64, 15, 25, 31, 38, 99, 239, 241, u64::MAX] {
+    // (7..11 sind seit Serie 6, Teil 6 vergeben: lese/warte/beende/pipe/
+    //  starte. Wer hier eine Nummer ergänzt, muss sie hier austragen — genau
+    //  dafür ist diese Liste da.)
+    for nummer in [12u64, 15, 25, 31, 38, 99, 239, 241, u64::MAX] {
         p.fehler("unbekannte Nummer", p.ruf0(nummer), Fehler::UnbekannterSyscall);
     }
+
+    // DIE NEUEN SYSCALLS MIT UNSINN (Serie 6, Teil 6) — jeder muss einen
+    // sauberen Fehler liefern und darf nie hängen bleiben.
+    //
+    // `warte` auf ein Kind, das es nicht gibt: Der Prüfstand hat KEINE
+    // Kinder. Das MUSS ein Fehler sein und darf nicht blockieren — sonst
+    // schliefe der Prozess für immer.
+    p.fehler("warte ohne Kinder", p.ruf1(sys::SYS_WARTE, 0), Fehler::NichtGefunden);
+    p.fehler("warte auf fremde PID", p.ruf1(sys::SYS_WARTE, 12345), Fehler::NichtGefunden);
+    p.fehler(
+        "warte mit absurder PID",
+        p.ruf1(sys::SYS_WARTE, u64::MAX),
+        Fehler::UngueltigesArgument,
+    );
+    // `beende`: Der Kernel-Prozess ist geschützt, unbekannte PIDs sind ein
+    // Fehler.
+    p.fehler(
+        "beende den Kernel-Prozess",
+        p.ruf1(sys::SYS_BEENDE, 0),
+        Fehler::UngueltigesArgument,
+    );
+    p.fehler(
+        "beende unbekannte PID",
+        p.ruf1(sys::SYS_BEENDE, 12345),
+        Fehler::NichtGefunden,
+    );
+    // `lese` auf Handles, aus denen man nicht lesen kann.
+    p.fehler(
+        "lese von der Ausgabe",
+        p.ruf3(sys::SYS_LESE, HANDLE_AUSGABE, ptr, 8),
+        Fehler::FalscherHandleTyp,
+    );
+    p.fehler(
+        "lese von der Standard-Eingabe (keine Quelle)",
+        p.ruf3(sys::SYS_LESE, HANDLE_EINGABE, ptr, 8),
+        Fehler::NichtUnterstuetzt,
+    );
+    p.fehler(
+        "lese mit Kernel-Zeiger",
+        p.ruf3(sys::SYS_LESE, HANDLE_EINGABE, kernel_va(), 8),
+        Fehler::UngueltigerZeiger,
+    );
+    p.fehler(
+        "lese mit fremdem Handle",
+        p.ruf3(sys::SYS_LESE, 99, ptr, 8),
+        Fehler::UngueltigerHandle,
+    );
+    // `starte` mit unsinnigen Pfaden und Handles.
+    p.fehler(
+        "starte mit Kernel-Zeiger als Pfad",
+        p.ruf4(sys::SYS_STARTE, kernel_va(), 8, ERBE_KEINS, ERBE_KEINS),
+        Fehler::UngueltigerZeiger,
+    );
+    let relativ = p.hinlegen(0x40, b"kein-absoluter-pfad");
+    p.fehler(
+        "starte mit relativem Pfad",
+        p.ruf4(sys::SYS_STARTE, relativ, 19, ERBE_KEINS, ERBE_KEINS),
+        Fehler::UngueltigerPfad,
+    );
+    let fehlt = p.hinlegen(0x80, b"/gibt-es-ganz-sicher-nicht");
+    p.fehler(
+        "starte mit fehlender Datei",
+        p.ruf4(sys::SYS_STARTE, fehlt, 26, ERBE_KEINS, ERBE_KEINS),
+        Fehler::NichtGefunden,
+    );
+    p.fehler(
+        "starte mit fremdem Erb-Handle",
+        p.ruf4(sys::SYS_STARTE, fehlt, 26, 99, ERBE_KEINS),
+        Fehler::UngueltigerHandle,
+    );
 
     // ZEIGER-ANGRIFFE auf schreibe:
     p.fehler(

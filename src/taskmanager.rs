@@ -47,7 +47,12 @@ use core::sync::atomic::{AtomicU64, Ordering};
 // ----- Nachricht-IDs -----
 const N_BEENDEN: u32 = 1;
 const N_DEMO_STARTEN: u32 = 2;
+// Serie 6, Teil 6: echte Prozesse beenden — mit Nachfrage.
+const N_PROZESS_BEENDEN: u32 = 3;
+const N_BEENDEN_JA: u32 = 4;
+const N_BEENDEN_NEIN: u32 = 5;
 const N_LISTE: u32 = 1000; // + Zeilen-Index (Auswahl und Doppelklick)
+const N_PROZESS_LISTE: u32 = 500_000; // + Zeilen-Index (Prozess-Auswahl)
 
 /// Wie viele Sekunden CPU-Geschichte der Graph zeigt.
 const GRAPH_SEKUNDEN: usize = 60;
@@ -190,6 +195,12 @@ pub struct TaskManagerApp {
     heap: Option<(usize, usize)>,
     /// Auswahl als Task-ID (nicht Index — überlebt Neu-Aufnahmen).
     auswahl_id: Option<u64>,
+    /// Auswahl in der PROZESS-Tabelle, als PID (nicht Index).
+    auswahl_pid: Option<crate::prozess::Pid>,
+    /// Läuft gerade die Sicherheitsabfrage? Dann zeigt die App statt ihrer
+    /// Tabellen den Bestätigungs-Dialog (dasselbe Muster wie SpeedText:
+    /// Dialoge ERSETZEN den Inhalt, sie liegen nicht darüber).
+    beenden_nachfrage: Option<(crate::prozess::Pid, String)>,
     /// Sekündliche Aktualisierung (geteilter Toolkit-Baustein).
     sekunden_tick: crate::ui::app::SekundenTick,
 }
@@ -206,6 +217,8 @@ impl TaskManagerApp {
             cpu_prozent: 0,
             heap: None,
             auswahl_id: None,
+            auswahl_pid: None,
+            beenden_nachfrage: None,
             sekunden_tick: crate::ui::app::SekundenTick::neu(),
         };
         app.aktualisieren();
@@ -254,6 +267,21 @@ impl TaskManagerApp {
                 self.auswahl_id = None;
             }
         }
+        // Dasselbe für die Prozess-Auswahl: Ein beendeter Prozess
+        // verschwindet aus der Tabelle, sobald der Aufräum-Task ihn geholt
+        // hat — dann darf die Auswahl nicht auf eine tote PID zeigen.
+        if let Some(pid) = self.auswahl_pid {
+            if !self.prozesse.iter().any(|prozess| prozess.pid == pid) {
+                self.auswahl_pid = None;
+            }
+        }
+    }
+
+    /// Der ausgewählte Prozess (nach PID gesucht, nicht nach Index — die
+    /// Auswahl überlebt so das sekündliche Neu-Einlesen).
+    fn auswahl_prozess(&self) -> Option<&ProzessMoment> {
+        let pid = self.auswahl_pid?;
+        self.prozesse.iter().find(|prozess| prozess.pid == pid)
     }
 
     fn auswahl_task(&self) -> Option<&TaskMoment> {
@@ -286,6 +314,23 @@ impl App for TaskManagerApp {
     }
 
     fn aufbau(&self) -> Box<dyn Widget> {
+        // DIALOG STATT INHALT (das SpeedText-Muster): Läuft die Nachfrage,
+        // ersetzt sie den ganzen Fensterinhalt. Kein Overlay, keine zweite
+        // Ereignis-Ebene — der Dialog ist einfach der Baum, den `aufbau`
+        // gerade liefert.
+        if let Some((pid, name)) = &self.beenden_nachfrage {
+            return crate::ui::dialog::bestaetigung(
+                &format!(
+                    "Prozess {} (PID {}) wirklich beenden?\n\n\
+                     Er wird sofort gestoppt: sein Adressraum, sein\n\
+                     Kernel-Stack und alle offenen Handles gehen zurueck.\n\
+                     Nicht gespeicherte Daten des Programms sind verloren.",
+                    name, pid
+                ),
+                &[("Beenden", N_BEENDEN_JA), ("Abbrechen", N_BEENDEN_NEIN)],
+            );
+        }
+
         // --- Kopf: CPU/Heap/Tasks links, Live-Graph rechts ---
         // heap_statistik liefert (belegt, frei) — gesamt ist die Summe.
         let (heap_belegt, heap_frei) = self.heap.unwrap_or((0, 0));
@@ -330,9 +375,21 @@ impl App for TaskManagerApp {
                 }
             })
             .collect();
-        // Reine Anzeige-Liste (keine Nachrichten, kein Fokus) — beendet werden
-        // Prozesse über die Shell (`prozess-stop <pid>`).
-        let prozess_liste = ScrollListe::neu(prozess_eintraege, 0, 0).mit_layout(160, 1);
+        // AUSWÄHLBAR seit Serie 6, Teil 6: Ein Prozess lässt sich hier
+        // WIRKLICH beenden — anders als ein kooperativer Task, bei dem
+        // „beenden" nur eine Bitte ist, die der Task am nächsten await-Punkt
+        // erfüllt (oder eben nicht). Ein Prozess wird schlicht nicht mehr
+        // eingeplant; sein Adressraum und alle seine Handles gehen zurück,
+        // ob er will oder nicht. Genau das ist der Unterschied, den
+        // Präemption ausmacht.
+        let prozess_auswahl = self
+            .prozesse
+            .iter()
+            .position(|prozess| Some(prozess.pid) == self.auswahl_pid);
+        let prozess_liste =
+            ScrollListe::mit_index_nachrichten(prozess_eintraege, N_PROZESS_LISTE, N_PROZESS_LISTE)
+                .mit_auswahl(prozess_auswahl)
+                .mit_layout(160, 1);
 
         // --- TASK-Tabelle (kooperativ): Kopfzeile + eine Zeile pro Task ---
         // (Monospace-Font: Spalten entstehen durch feste Breiten.)
@@ -367,9 +424,20 @@ impl App for TaskManagerApp {
 
         // --- Fußzeile: Aktionen + die ehrliche Kooperativ-Zeile ---
         let beenden_erlaubt = self.auswahl_task().map(|t| t.beendbar).unwrap_or(false);
+        // Der Knopf, den es in Serie 3 für Prozesse noch gar nicht gab:
+        // Erlaubt ist er für jeden ausgewählten USER-Prozess — PID 0 (der
+        // Kernel-Prozess) ist geschützt, ihn zu beenden hiesse, das System
+        // anzuhalten.
+        let prozess_beenden_erlaubt = self
+            .auswahl_prozess()
+            .map(|prozess| prozess.ist_user && prozess.zustand != crate::prozess::Zustand::Beendet)
+            .unwrap_or(false);
         let aktionen = hbox(vec![
-            Box::new(Button::neu("Task beenden", N_BEENDEN).mit_deaktiviert(!beenden_erlaubt))
-                as Box<dyn Widget>,
+            Box::new(
+                Button::neu("Prozess beenden", N_PROZESS_BEENDEN)
+                    .mit_deaktiviert(!prozess_beenden_erlaubt),
+            ) as Box<dyn Widget>,
+            Box::new(Button::neu("Task beenden", N_BEENDEN).mit_deaktiviert(!beenden_erlaubt)),
             Box::new(Button::neu("Demo-Task starten", N_DEMO_STARTEN)),
             Box::new(Fueller),
         ]);
@@ -389,10 +457,10 @@ impl App for TaskManagerApp {
             Box::new(liste),
             Box::new(aktionen),
             Box::new(Label::sekundaer(
-                "Kooperativ: 'Beenden' laesst den Task beim naechsten Durchlauf an\n\
-                 seinem await-Punkt fallen; Kernel-/Fenster-Tasks sind geschuetzt.\n\
-                 Prozesse dagegen werden per Zeitscheibe (20 ms) umgeschaltet —\n\
-                 beenden mit 'prozess-stop <pid>' in der Shell.",
+                "Kooperativ: 'Task beenden' ist eine BITTE - der Task faellt beim\n\
+                 naechsten Durchlauf an seinem await-Punkt; Kernel-Tasks geschuetzt.\n\
+                 Praeemptiv: 'Prozess beenden' ist eine TATSACHE - der Prozess wird\n\
+                 nicht mehr eingeplant, Adressraum und Handles gehen zurueck.",
             )),
         ]))
     }
@@ -424,6 +492,47 @@ impl App for TaskManagerApp {
                         .als_beendbar(),
                 );
                 self.aktualisieren();
+            }
+            // --- Einen Prozess beenden: erst FRAGEN ---
+            N_PROZESS_BEENDEN => {
+                // Der Name wird JETZT festgehalten: Bis der Benutzer
+                // antwortet, kann der Prozess längst weg sein — dann soll
+                // im Dialog trotzdem stehen, worum es ging.
+                match self.auswahl_prozess() {
+                    Some(prozess) if prozess.ist_user => {
+                        self.beenden_nachfrage = Some((prozess.pid, prozess.name.clone()));
+                    }
+                    // Kein oder kein beendbarer Prozess ausgewählt: nichts
+                    // tun (der Knopf ist dann ohnehin gedimmt).
+                    _ => return AppReaktion::keine(),
+                }
+            }
+            N_BEENDEN_JA => {
+                if let Some((pid, name)) = self.beenden_nachfrage.take() {
+                    // HIER passiert das, was bei einem kooperativen Task
+                    // unmöglich ist: Der Prozess wird beendet, ob er will
+                    // oder nicht. Er bekommt keine Zeitscheibe mehr, und der
+                    // Aufräum-Task gibt Adressraum, Kernel-Stack und alle
+                    // Handles zurück.
+                    let erfolg = crate::scheduler::beenden(pid);
+                    crate::serial_println!(
+                        "[TASKMGR] Prozess {} (PID {}) beenden: {}",
+                        name,
+                        pid,
+                        if erfolg { "ok" } else { "gibt es nicht mehr" }
+                    );
+                    self.auswahl_pid = None;
+                }
+                self.aktualisieren();
+            }
+            N_BEENDEN_NEIN => {
+                self.beenden_nachfrage = None;
+            }
+            // Auswahl in der PROZESS-Tabelle (die höheren Ids zuerst
+            // prüfen — N_LISTE ist die kleinere Basis!).
+            id if id >= N_PROZESS_LISTE => {
+                let index = (id - N_PROZESS_LISTE) as usize;
+                self.auswahl_pid = self.prozesse.get(index).map(|prozess| prozess.pid);
             }
             id if id >= N_LISTE => {
                 let index = (id - N_LISTE) as usize;

@@ -87,6 +87,10 @@ pub enum KernelObjekt {
     Datei { pfad: String, modus: u64 },
     /// Ein Socket. Das GLOBALE Handle bleibt im Kernel.
     Socket(socket::Handle),
+    /// Das LESE-Ende einer Pipe (Serie 6, Teil 6).
+    PipeLesen(crate::pipe::PipeId),
+    /// Das SCHREIB-Ende einer Pipe.
+    PipeSchreiben(crate::pipe::PipeId),
 }
 
 impl KernelObjekt {
@@ -98,6 +102,31 @@ impl KernelObjekt {
             KernelObjekt::Diagnose => "Diagnose",
             KernelObjekt::Datei { .. } => "Datei",
             KernelObjekt::Socket(_) => "Socket",
+            KernelObjekt::PipeLesen(_) => "Pipe (lesen)",
+            KernelObjekt::PipeSchreiben(_) => "Pipe (schreiben)",
+        }
+    }
+
+    /// Schliesst das dahinterliegende Kernel-Objekt.
+    ///
+    /// EINE Stelle für alle Wege, auf denen ein Handle verschwindet:
+    /// `schliesse`, Ersetzen beim Erben, und der `Drop` beim Prozess-Ende.
+    /// Genau deshalb kann kein Pfad das Schliessen einer Pipe vergessen.
+    pub fn schliessen(self) {
+        match self {
+            KernelObjekt::Socket(handle) => {
+                let _ = socket::schliessen(handle);
+            }
+            KernelObjekt::PipeLesen(id) => {
+                crate::pipe::ende_schliessen(id, crate::pipe::Ende::Lesen)
+            }
+            KernelObjekt::PipeSchreiben(id) => {
+                crate::pipe::ende_schliessen(id, crate::pipe::Ende::Schreiben)
+            }
+            // Dateien sind pfadbasiert, die Standard-Kanäle gehören dem
+            // Kernel — da gibt es nichts zu tun.
+            KernelObjekt::Eingabe | KernelObjekt::Ausgabe | KernelObjekt::Diagnose => {}
+            KernelObjekt::Datei { .. } => {}
         }
     }
 }
@@ -165,6 +194,25 @@ impl HandleTabelle {
             .ok_or(Fehler::UngueltigerHandle)
     }
 
+    /// Ersetzt einen Platz (auch einen reservierten) durch ein anderes
+    /// Objekt. Das alte wird sauber geschlossen.
+    ///
+    /// NUR für die Handle-Weitergabe beim Prozess-Start gedacht: Ein
+    /// laufender Prozess kann seine Standard-Handles nicht umbiegen (dafür
+    /// gäbe es `dup2` — bewusst nicht in der ABI).
+    pub fn ersetzen(&mut self, handle: u64, objekt: KernelObjekt) {
+        let index = handle as usize;
+        if index >= MAX_HANDLES {
+            return;
+        }
+        while self.eintraege.len() <= index {
+            self.eintraege.push(None);
+        }
+        if let Some(alt) = self.eintraege[index].replace(objekt) {
+            alt.schliessen();
+        }
+    }
+
     /// Wie viele Handles sind offen (inklusive der drei reservierten)?
     pub fn anzahl_offen(&self) -> usize {
         self.eintraege.iter().filter(|platz| platz.is_some()).count()
@@ -199,14 +247,18 @@ impl Drop for HandleTabelle {
     fn drop(&mut self) {
         let mut geschlossen = 0usize;
         for objekt in self.eintraege.iter_mut().filter_map(|platz| platz.take()) {
-            if let KernelObjekt::Socket(handle) = objekt {
-                let _ = socket::schliessen(handle);
+            let zaehlt = matches!(
+                objekt,
+                KernelObjekt::Socket(_) | KernelObjekt::PipeLesen(_) | KernelObjekt::PipeSchreiben(_)
+            );
+            objekt.schliessen();
+            if zaehlt {
                 geschlossen += 1;
             }
         }
         if geschlossen > 0 {
             crate::serial_println!(
-                "[handles] {} Socket(s) beim Prozess-Ende automatisch geschlossen.",
+                "[handles] {} Socket(s)/Pipe-Ende(n) beim Prozess-Ende automatisch geschlossen.",
                 geschlossen
             );
         }
@@ -223,6 +275,84 @@ pub enum SchreibZiel {
     Diagnose,
     Datei { pfad: String, modus: u64 },
     Socket(socket::Handle),
+    Pipe(crate::pipe::PipeId),
+}
+
+/// Woraus `lese` liest (aus dem Handle aufgelöst).
+pub enum LeseQuelle {
+    /// Standard-Eingabe ohne Umleitung — dafür gibt es (noch) keine Quelle.
+    Eingabe,
+    Pipe(crate::pipe::PipeId),
+    Datei { pfad: String, modus: u64 },
+}
+
+/// Löst ein Handle für `lese` auf.
+pub fn lese_quelle(handle: u64) -> Result<LeseQuelle, Fehler> {
+    crate::scheduler::mit_handles(|tabelle| match tabelle.hole(handle)? {
+        KernelObjekt::Eingabe => Ok(LeseQuelle::Eingabe),
+        KernelObjekt::PipeLesen(id) => Ok(LeseQuelle::Pipe(*id)),
+        KernelObjekt::Datei { pfad, modus } => {
+            if modus & MODUS_LESEN == 0 {
+                return Err(Fehler::NichtUnterstuetzt);
+            }
+            Ok(LeseQuelle::Datei {
+                pfad: pfad.clone(),
+                modus: *modus,
+            })
+        }
+        // Auf das SCHREIB-Ende einer Pipe oder auf die Ausgabe zu lesen ist
+        // ein Typ-Fehler, kein „ungültig": Das Handle existiert ja.
+        _ => Err(Fehler::FalscherHandleTyp),
+    })?
+}
+
+/// Was ein Kind für einen seiner Standard-Kanäle erben soll.
+///
+/// `None` = nicht umleiten (das Kind bekommt den Kernel-Standard).
+pub type Erbe = Option<KernelObjekt>;
+
+/// Der ABI-Wert, der „nicht umleiten" bedeutet.
+///
+/// Bewusst `u64::MAX` und nicht 0: **0 ist ein gültiges Handle** (die
+/// Standard-Eingabe). Ein Sonderwert, der zufällig auch eine echte Bedeutung
+/// hat, ist genau die Sorte Falle, die man später einmal teuer bezahlt.
+pub const ERBE_KEINS: u64 = u64::MAX;
+
+/// Löst ein Handle auf, das an ein KIND weitergegeben werden soll.
+///
+/// Weitergegeben wird eine EIGENSTÄNDIGE Kopie: Bei einer Pipe wird das Ende
+/// zusätzlich in Besitz genommen (`ende_uebernehmen`), damit es nicht
+/// verschwindet, wenn der Elternteil sein eigenes Handle schliesst. Genau
+/// das ist der Grund, warum die Pipe Besitz-ZÄHLER hat und keine Flags.
+pub fn erbe_aufloesen(handle: u64) -> Result<Erbe, Fehler> {
+    if handle == ERBE_KEINS {
+        return Ok(None);
+    }
+    let objekt = crate::scheduler::mit_handles(|tabelle| match tabelle.hole(handle)? {
+        KernelObjekt::PipeLesen(id) => Ok(KernelObjekt::PipeLesen(*id)),
+        KernelObjekt::PipeSchreiben(id) => Ok(KernelObjekt::PipeSchreiben(*id)),
+        KernelObjekt::Ausgabe => Ok(KernelObjekt::Ausgabe),
+        KernelObjekt::Diagnose => Ok(KernelObjekt::Diagnose),
+        KernelObjekt::Eingabe => Ok(KernelObjekt::Eingabe),
+        // Dateien und Sockets zu vererben wäre möglich, ist aber nicht
+        // gebraucht — und was nicht gebraucht wird, kommt nicht in die ABI.
+        _ => Err(Fehler::FalscherHandleTyp),
+    })??;
+    besitz_uebernehmen(&objekt);
+    Ok(Some(objekt))
+}
+
+/// Nimmt das Kernel-Objekt hinter einem geerbten Handle zusätzlich in Besitz.
+pub fn besitz_uebernehmen(objekt: &KernelObjekt) {
+    match objekt {
+        KernelObjekt::PipeLesen(id) => {
+            crate::pipe::ende_uebernehmen(*id, crate::pipe::Ende::Lesen);
+        }
+        KernelObjekt::PipeSchreiben(id) => {
+            crate::pipe::ende_uebernehmen(*id, crate::pipe::Ende::Schreiben);
+        }
+        _ => {}
+    }
 }
 
 /// Löst ein Handle für `schreibe` auf — und prüft dabei das Schreibrecht.
@@ -246,7 +376,21 @@ pub fn schreib_ziel(handle: u64) -> Result<SchreibZiel, Fehler> {
             })
         }
         KernelObjekt::Socket(h) => Ok(SchreibZiel::Socket(*h)),
+        KernelObjekt::PipeSchreiben(id) => Ok(SchreibZiel::Pipe(*id)),
+        // Auf das LESE-Ende zu schreiben ist ein Typ-Fehler.
+        KernelObjekt::PipeLesen(_) => Err(Fehler::FalscherHandleTyp),
     })?
+}
+
+/// Ersetzt die Standard-Handles 0 und 1 einer FRISCHEN Tabelle durch geerbte
+/// Objekte. Nur beim Prozess-Start aufzurufen (das Kind läuft noch nicht).
+pub fn standard_erben(tabelle: &mut HandleTabelle, eingabe: Erbe, ausgabe: Erbe) {
+    if let Some(objekt) = eingabe {
+        tabelle.ersetzen(HANDLE_EINGABE, objekt);
+    }
+    if let Some(objekt) = ausgabe {
+        tabelle.ersetzen(HANDLE_AUSGABE, objekt);
+    }
 }
 
 /// Löst ein DATEI-Handle auf: liefert (Pfad-Kopie, Modus).
@@ -282,11 +426,9 @@ pub fn einfuegen_aktuell(objekt: KernelObjekt) -> Result<u64, Fehler> {
 /// Socket ein geordneter TCP-Abbau, bei einer Datei nichts), weiß der Kernel.
 pub fn sys_schliesse(handle: u64) -> SysErgebnis {
     let objekt = crate::scheduler::mit_handles(|tabelle| tabelle.entfernen(handle))??;
-    // Nur Sockets halten ein Kernel-Objekt offen; Dateien sind pfadbasiert,
-    // da gibt es schlicht nichts zu tun.
-    if let KernelObjekt::Socket(h) = objekt {
-        socket::schliessen(h).map_err(Fehler::von_socket)?;
-    }
+    // Was dahinter zu tun ist, weiss das Objekt selbst — dieselbe Stelle,
+    // die auch der Drop der Tabelle benutzt.
+    objekt.schliessen();
     Ok(0)
 }
 

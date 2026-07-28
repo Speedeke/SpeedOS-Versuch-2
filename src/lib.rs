@@ -48,6 +48,7 @@ pub mod maus;
 pub mod memory;
 pub mod netz;
 pub mod pci;
+pub mod pipe;
 pub mod programme;
 pub mod protokoll;
 pub mod prozess;

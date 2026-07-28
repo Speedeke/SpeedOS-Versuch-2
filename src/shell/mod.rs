@@ -37,6 +37,22 @@ const MAX_VERLAUF: usize = 10;
 pub async fn eingabe_router() {
     let mut keys = KeyStream::new();
     while let Some(key) = keys.next().await {
+        // STRG+C ZUERST (Serie 6, Teil 6): Der KeyStream dekodiert es als
+        // U+0003. Es geht NICHT in die Tasten-Queue, sondern setzt den
+        // Abbruch-Wunsch der Zielsitzung — denn wenn gerade ein Programm
+        // läuft, kommt die Shell an ihre Queue gar nicht heran (sie steckt
+        // in einem synchronen Befehl). Siehe sitzung::abbruch_anfordern.
+        if key == DecodedKey::Unicode('\u{3}') {
+            let ziel = if crate::fenster::desktop_aktiv() {
+                crate::fenster::terminal_fokus_sitzung().unwrap_or(0)
+            } else {
+                sitzung::haupt()
+            };
+            if ziel != 0 {
+                sitzung::abbruch_anfordern(ziel);
+            }
+            continue;
+        }
         // Desktop-Modus? ESC schließt erst das Startmenü, dann den
         // Desktop; Tasten gehen ins offene Startmenü, in die
         // fokussierte Terminal-Sitzung oder ans fokussierte Fenster.
@@ -103,8 +119,9 @@ pub async fn sitzung_laufen(sitzungs_id: u64, mit_banner: bool) {
     };
 
     let registry = befehle::alle_befehle();
-    // Der Shell-Zustand: aktuelles Verzeichnis (Befehle ändern ihn).
-    let mut kontext = ShellKontext::neu();
+    // Der Shell-Zustand: aktuelles Verzeichnis (Befehle ändern ihn) und die
+    // eigene Sitzung (Strg+C zielt darauf).
+    let mut kontext = ShellKontext::neu().mit_sitzung(sitzungs_id);
     // Der Editor übernimmt Eingabezeile, Verlauf und Tab-Logik.
     let mut editor = ZeilenEditor::neu(MAX_VERLAUF);
     let vervollstaendiger = FsVervollstaendiger;
