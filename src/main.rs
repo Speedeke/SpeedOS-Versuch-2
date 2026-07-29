@@ -47,6 +47,13 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     //     Genauigkeit) und die echte Uhrzeit einmal aus der RTC lesen.
     speed_os::zeit::init();
 
+    // 1c. Den Zufallsgenerator aufsetzen (Serie 7, Teil 1) — MUSS nach
+    //     zeit::init() laufen: Die Entropie steckt in TSC-Zeitstempeln, und
+    //     das Boot-Salz braucht die RTC-Zeit. Der Aufruf SÄT NICHT, er
+    //     stellt nur fest, welche Quellen es gibt; gesät wird, sobald genug
+    //     Interrupt-Jitter angefallen ist (docs/zufall.md).
+    speed_os::zufall::init();
+
     // 2. Den Framebuffer aus der BootInfo HERAUSNEHMEN (take), bevor
     //    wir die BootInfo zu &'static abwerten — sonst Borrow-Konflikt.
     let framebuffer = boot_info.framebuffer.take();
@@ -284,6 +291,13 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     executor.spawn(Task::new(
         "Prozess-Aufraeumer",
         speed_os::scheduler::aufraeum_task(),
+    ));
+    // Der Zufalls-Nachsäer: mischt alle 5 Sekunden frische Entropie in den
+    // DRBG. Er ist ausserdem der Weg, auf dem der Generator NACH dem Boot
+    // erstmals in den Zustand „gesät" wechselt.
+    executor.spawn(Task::new(
+        "Zufall-Nachsaat",
+        speed_os::zufall::nachsaat_task(),
     ));
     executor.run();
 }

@@ -94,6 +94,59 @@
   Epilog-`iretq` springt in den Kernel statt zurück nach Ring 3. NUR ein Fehler
   im KERNEL selbst (Ring 0) hält an, denn das ist ein echter Bug.
 
+## RNG-DAUERREGEL (Serie 7, ab Juli 2026 — gilt AB SOFORT ueberall)
+- **(I) ES GIBT GENAU EINE ZUFALLSQUELLE: `zufall::fuellen()`.** Wer
+  Zufall braucht (Schluessel, Nonces, TCP-Anfangssequenznummern, ephemere
+  Ports, Token), nimmt sie — NIE die TSC, NIE einen LCG, NIE `RDRAND`
+  direkt. Die zwei LCGs im Projekt (Plattentest, TCP-Verlusttest) sind
+  ABSICHTLICH reproduzierbare TESTHILFEN und heissen deshalb nicht
+  „Zufall"; sie duerfen nie auf einen Sicherheitspfad wandern.
+- **(II) NIE AUS EINER QUELLE ALLEIN.** Auch wenn RDSEED/RDRAND vorhanden
+  sind, werden sie nur EINGEMISCHT (XOR in den Pool) und hoechstens mit der
+  HALBEN Schwelle angerechnet (128 von 256 Bit) — der Rest MUSS aus
+  Interrupt-Jitter kommen. Gruende: Der Rauschgenerator einer CPU ist nicht
+  auditierbar, und es gab reale Errata (AMD nach S3: dauerhaft 0xFFFF_FFFF
+  MIT gesetztem Carry, also als „gueltig" gemeldet). Weil per XOR gemischt
+  wird, kann eine defekte Quelle die anderen NICHT verschlechtern.
+  Nachpruefbar im Bootlog: „RDSEED: ja … Start mit 134 von 256 Bit —
+  noch nicht gesaet".
+- **(III) SALZ IST KEINE ENTROPIE.** RTC-Zeit, Boot-TSC und Speicher-Layout
+  werden eingemischt, aber mit NULL angerechneten Bits: Ein Angreifer kennt
+  sie (die Bootzeit steht in jeder Logzeile). Sie trennen zwei identische
+  Rechner — mehr nicht. `Quelle::Salz.bits_je_probe() == 0` ist getestet.
+- **(IV) LIEBER WARTEN ALS SCHWACH — es gibt KEINEN Fallback.** Ist der Pool
+  ungesaet, liefert `fuellen` `Err(NichtGesaet)` und LAESST DEN PUFFER IN
+  RUHE (halb gefuellt waere heimtueckisch: Nullen sehen aus wie Zufall). Der
+  Syscall `zufall` (Nr. 12) blockiert bis zu 10 s und liefert dann
+  `Fehler::NichtGesaet` (25) — nie ein Haenger ohne Ende, nie schwache Bytes.
+  Begruendung und die Bewertung der Alternativen: docs/zufall.md §4.
+- **(V) ENTROPIE-SCHAETZUNG WIRD UNTERTRIEBEN, NICHT SCHOENGERECHNET.** Die
+  Bits je Quelle (Tastatur 4, Maus 3, Netz/Platte 2, PIT 1 je 8. Probe) sind
+  BEGRUENDETE UNTERTREIBUNGEN, keine Messungen — und im Code als solche
+  gekennzeichnet. Wer eine Quelle hinzufuegt, traegt sie mit einer
+  Begruendung in docs/zufall.md §3 ein. Zu wenig anzurechnen kostet
+  Wartezeit, zu viel kostet Sicherheit, ohne dass es jemand merkt.
+- **(VI) IM INTERRUPT NUR ATOMICS.** `zufall::einspeisen(Quelle)` ist die
+  EINZIGE Funktion, die ein IRQ-Handler aufruft: ein `rdtsc` und drei
+  atomare Operationen, kein Lock, keine Allokation. Der DRBG-Mutex ist ein
+  BLATT-Lock und wird ausschliesslich mit ausgeschalteten Interrupts
+  gehalten (`mit_drbg`) — nur deshalb darf ein Syscall ihn nehmen.
+- **(VII) WAS TESTS BEWEISEN — und was nicht.** Statistik (Byteverteilung,
+  keine Wiederholungen, andere Werte nach Neustart) findet GROBE FEHLER und
+  beweist KEINE kryptographische Qualitaet: Ein Zaehler durch AES besteht
+  jeden dieser Tests. BELASTBAR ist allein der Testvektor-Vergleich
+  (RFC 8439 §2.1.1 + §2.3.2, zusaetzlich gegen eine unabhaengige
+  Python-Referenz gegengeprueft). Diese Unterscheidung steht als Kommentar
+  an den Tests und darf nicht wegredigiert werden.
+- **EIGENBAU-KRYPTO-GRENZE, praezisiert:** ChaCha20 als DRBG-Kern ist SELBST
+  geschrieben, TLS wird es NIE (docs/serie7-bestandsaufnahme.md). Der
+  Unterschied ist die PRUEFBARKEIT: 40 Zeilen, eine RFC-Seite, bitgenaue
+  Testvektoren, keine schluesselabhaengigen Zweige oder Tabellenzugriffe
+  (also seitenkanalfrei von selbst). Bei TLS waere der Test ein Angreifer,
+  den wir nicht haben. Regel: Eine kryptographische Primitive darf selbst
+  gebaut werden, WENN es offizielle Testvektoren gibt und die
+  Implementierung datenunabhaengig laeuft — ein PROTOKOLL nie.
+
 ## Platten-Sicherheits-Regel (Juli 2026)
 - Der ATA-Treiber weigert sich PER KONSTRUKTION, auf das Boot-Laufwerk
   zu schreiben: Das Feld `beschreibbar` ist privat, Laufwerke entstehen
@@ -1247,6 +1300,8 @@
   extend mit derselben Signatur. Kein automatisches Wachsen — bewusst
   manuell vor großen Puffern aufrufen.
 - **Boot-/Init-Reihenfolge (main.rs):** GDT/TSS → IDT → PIC → Interrupts an
+  → zeit::init → **zufall::init** (braucht die TSC und die RTC fürs Salz;
+  sät NICHT, stellt nur die Quellen fest)
   → memory::init (globaler Mapper + Frame-Allocator) → Heap → Dateisystem
   → scheduler::init (trägt den LAUFENDEN Kontext als Kernel-Prozess PID 0
   ein — muss NACH dem Heap laufen und VOR dem ersten Prozess)

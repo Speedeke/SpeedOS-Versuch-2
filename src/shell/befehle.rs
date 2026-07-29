@@ -116,6 +116,8 @@ pub fn alle_befehle() -> Vec<Box<dyn Befehl>> {
         Box::new(Starte),
         Box::new(Programme),
         Box::new(ElfInfo),
+        // Serie 7, Teil 1: der Zufallsgenerator.
+        Box::new(ZufallBefehl),
     ]
 }
 
@@ -2663,6 +2665,134 @@ impl Befehl for ElfInfo {
                 konsole::set_color(Color::LightRed, Color::Black);
                 println!("KEIN ladbares Programm: {}", fehler.meldung());
                 konsole::set_color(Color::LightGray, Color::Black);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Serie 7, Teil 1: der Zufallsgenerator
+// ---------------------------------------------------------------------------
+
+/// zufall [bytes] — zeigt Zufallsbytes als Hex UND den Zustand des
+/// Entropie-Pools.
+///
+/// Der Status ist hier nicht Beiwerk, sondern der eigentliche Punkt: Wenn
+/// `zufall` nichts liefert, soll der Nutzer SEHEN, warum — wie viele Bit
+/// fehlen, welche Quellen ueberhaupt Proben liefern, ob es eine
+/// Hardware-Quelle gibt. Ein Generator, der nur „geht nicht" sagt, waere
+/// nicht nachvollziehbar (docs/zufall.md §4).
+struct ZufallBefehl;
+
+impl Befehl for ZufallBefehl {
+    fn name(&self) -> &'static str {
+        "zufall"
+    }
+    fn beschreibung(&self) -> &'static str {
+        "Zeigt Zufallsbytes (Hex) und den Zustand des Entropie-Pools"
+    }
+    fn ausfuehren(&self, argumente: &str, _kontext: &mut ShellKontext, _registry: &[Box<dyn Befehl>]) {
+        use crate::zufall::{self, Quelle};
+
+        let anzahl: usize = match argumente.trim() {
+            "" => 32,
+            text => match text.parse::<usize>() {
+                // 1 KiB ist genug zum Ansehen; wer mehr will, nimmt den
+                // Syscall. Die Shell soll das Terminal nicht zumuellen.
+                Ok(n) if n > 0 && n <= 1024 => n,
+                _ => {
+                    konsole::set_color(Color::LightRed, Color::Black);
+                    println!("Benutzung: zufall [1..1024]");
+                    konsole::set_color(Color::LightGray, Color::Black);
+                    return;
+                }
+            },
+        };
+
+        let s = zufall::status();
+
+        // --- Der Pool-Status, immer zuerst ---
+        konsole::set_color(Color::LightCyan, Color::Black);
+        println!("Entropie-Pool:");
+        konsole::set_color(Color::LightGray, Color::Black);
+        print!("  Zustand:   ");
+        if s.gesaet {
+            konsole::set_color(Color::LightGreen, Color::Black);
+            println!("GESAET (einsatzbereit)");
+        } else {
+            konsole::set_color(Color::Yellow, Color::Black);
+            println!("NICHT GESAET — es gibt keine Bytes, siehe unten");
+        }
+        konsole::set_color(Color::LightGray, Color::Black);
+        println!(
+            "  Entropie:  {} von {} Bit (geschaetzt, bewusst untertrieben)",
+            s.entropie_bits, s.schwelle_bits
+        );
+        print!("  Hardware:  RDSEED {}", if s.rdseed { "ja" } else { "nein" });
+        print!(", RDRAND {}", if s.rdrand { "ja" } else { "nein" });
+        if s.hardware_defekt {
+            konsole::set_color(Color::LightRed, Color::Black);
+            print!("  [Gesundheitspruefung fehlgeschlagen — abgeschaltet]");
+            konsole::set_color(Color::LightGray, Color::Black);
+        }
+        println!();
+        println!("  Nachsaat:  {}x, ausgegeben: {} Byte", s.nachsaaten, s.ausgegebene_bytes);
+
+        println!("  Quellen (Proben):");
+        for quelle in Quelle::alle() {
+            let proben = s.proben[quelle.index()];
+            let aktiv = proben > 0;
+            if aktiv {
+                konsole::set_color(Color::LightGray, Color::Black);
+            } else {
+                konsole::set_color(Color::DarkGray, Color::Black);
+            }
+            println!(
+                "    {:<16} {:>8}   {}",
+                quelle.name(),
+                proben,
+                match quelle.bits_je_probe() {
+                    // Salz wird ausdruecklich als solches ausgewiesen — wer
+                    // die Zahl sieht, soll nicht denken, sie zaehle mit.
+                    0 => alloc::format!("0 Bit/Probe (SALZ, keine Entropie)"),
+                    bits => alloc::format!("{} Bit/Probe", bits),
+                }
+            );
+        }
+        konsole::set_color(Color::LightGray, Color::Black);
+
+        // --- Die Bytes ---
+        println!();
+        let mut puffer = alloc::vec![0u8; anzahl];
+        match zufall::fuellen(&mut puffer) {
+            Ok(()) => {
+                println!("{} Zufallsbytes:", anzahl);
+                for (i, byte) in puffer.iter().enumerate() {
+                    if i % 16 == 0 {
+                        if i > 0 {
+                            println!();
+                        }
+                        konsole::set_color(Color::DarkGray, Color::Black);
+                        print!("  {:04x}  ", i);
+                        konsole::set_color(Color::LightGray, Color::Black);
+                    }
+                    print!("{:02x} ", byte);
+                }
+                println!();
+            }
+            Err(fehler) => {
+                konsole::set_color(Color::LightRed, Color::Black);
+                println!("Keine Bytes: {}", fehler.meldung());
+                konsole::set_color(Color::LightGray, Color::Black);
+                println!(
+                    "Es fehlen {} Bit. SpeedOS liefert in diesem Zustand KEINEN",
+                    s.schwelle_bits.saturating_sub(s.entropie_bits)
+                );
+                println!(
+                    "schwachen Zufall — lieber warten als etwas ausgeben, das"
+                );
+                println!("wie Zufall aussieht und keiner ist (docs/zufall.md §4).");
+                println!("Tipp: Tasten druecken oder die Maus bewegen fuellt den Pool.");
             }
         }
     }

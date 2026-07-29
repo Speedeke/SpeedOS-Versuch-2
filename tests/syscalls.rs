@@ -312,9 +312,10 @@ fn test_b_gruppe0_boesartig() {
 
     // UNBEKANNTE NUMMERN — inklusive der Lücken zwischen den Gruppen.
     // (7..11 sind seit Serie 6, Teil 6 vergeben: lese/warte/beende/pipe/
-    //  starte. Wer hier eine Nummer ergänzt, muss sie hier austragen — genau
-    //  dafür ist diese Liste da.)
-    for nummer in [12u64, 15, 25, 31, 38, 99, 239, 241, u64::MAX] {
+    //  starte; 12 seit Serie 7, Teil 1: zufall. Wer hier eine Nummer
+    //  ergänzt, muss sie hier austragen — genau dafür ist diese Liste da,
+    //  und genau so ist sie beim Hinzufügen von `zufall` auch angeschlagen.)
+    for nummer in [13u64, 14, 15, 25, 31, 38, 99, 239, 241, u64::MAX] {
         p.fehler("unbekannte Nummer", p.ruf0(nummer), Fehler::UnbekannterSyscall);
     }
 

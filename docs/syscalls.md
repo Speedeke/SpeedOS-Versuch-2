@@ -118,6 +118,13 @@ welcher Treiber unter ihm liegt.
 | 22 | `Abgebrochen` | Verbindung abgebrochen/abgelehnt |
 | 23 | `NichtUnterstuetzt` | Operation gibt es (noch) nicht |
 | 24 | `Belegt` | Kernel-Ressource belegt, erneuter Versuch kann gelingen |
+| 25 | `NichtGesaet` | Zufallsgenerator nicht ausreichend gesät (Serie 7, Teil 1) |
+
+**Warum `NichtGesaet` (25) und nicht `Belegt` (24):** Der Aufrufer muss etwas
+völlig anderes tun. `Belegt` heisst „gleich nochmal"; `NichtGesaet` heisst
+„es gibt in diesem Zustand keinen Zufall — warte auf Entropie oder verzichte
+auf Kryptographie". Es gibt dazu **keine schwachen Ersatzbytes**
+(docs/zufall.md §4).
 
 **Absichtlich GROB abgebildet:** Alle Zeiger-Prüfungsfehler außer der
 Längen-Überschreitung werden zu `UngueltigerZeiger` (3). Ob eine Adresse
@@ -166,6 +173,9 @@ inklusive geordnetem TCP-Abbau).
 | 4 | `schlafe` | `ms` | 0 | — |
 | 5 | `zeit_jetzt` | — | Millisekunden seit dem Boot (monoton) | — |
 | 6 | `zeit_epoche` | — | Sekunden seit 1.1.2000 (echte Uhr) | — |
+| 12 | `zufall` | `ptr`, `len` | gefüllte Bytes | 3, 4, **25** |
+
+*(7–11 sind Ströme und Prozesse — siehe §8b.)*
 
 - **`exit`** setzt den Prozess auf `Beendet` und schaltet auf den nächsten
   lauffähigen um. Der Aufräum-Task gibt Adressraum, Kernel-Stack und alle
@@ -180,6 +190,15 @@ inklusive geordnetem TCP-Abbau).
 - **`zeit_jetzt` gegen `zeit_epoche`:** Das erste ist monoton (für Messungen),
   das zweite die Wanduhr (RTC-Anker + TSC). Wer Zeitspannen messen will, nimmt
   `zeit_jetzt` — die Wanduhr kann später Sprünge machen.
+- **`zufall`** füllt den Puffer mit kryptographisch brauchbarem Zufall
+  (ChaCha20-DRBG über einem Entropie-Pool, `docs/zufall.md`). Er ist
+  **BLOCKIEREND**: Ist der Pool noch nicht gesät, wartet der Aufruf bis zu
+  10 s (`ZUFALL_FRIST_MS`) und liefert dann `NichtGesaet` (25).
+  **Er gibt unter keinen Umständen schwache Bytes heraus** — und im
+  Fehlerfall bleibt der Puffer unverändert, damit ein Programm nicht
+  versehentlich Nullen für Zufall hält. `len == 0` ist `Ok(0)`, `len` über
+  `MAX_PUFFER` ist `ZuGross`. Das ist der einzige Syscall, den Serie 7 für
+  TLS hinzufügt (`docs/serie7-bestandsaufnahme.md` §b).
 
 ---
 

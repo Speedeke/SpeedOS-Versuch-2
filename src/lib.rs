@@ -65,6 +65,7 @@ pub mod theme;
 pub mod ui;
 pub mod virtio;
 pub mod zeit;
+pub mod zufall;
 
 /// Die gemeinsame Bootloader-Konfiguration für den Kernel und alle
 /// Test-Kernel: Der Bootloader soll den kompletten physischen Speicher

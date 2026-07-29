@@ -98,6 +98,10 @@ pub const SYS_BEENDE: u64 = 9;
 pub const SYS_PIPE: u64 = 10;
 /// `starte(pfad_ptr, pfad_len, eingabe_handle, ausgabe_handle)` -> PID.
 pub const SYS_STARTE: u64 = 11;
+/// `zufall(ptr, len)` -> gefüllte Bytes. Kryptographisch brauchbarer Zufall.
+/// BLOCKIEREND, bis der Entropie-Pool gesät ist (Frist: `ZUFALL_FRIST_MS`,
+/// danach `NichtGesaet`). Siehe docs/zufall.md.
+pub const SYS_ZUFALL: u64 = 12;
 
 // ----- Gruppe 1: Dateien über das VFS (16..31) -----
 /// `oeffne(pfad_ptr, pfad_len, modus)` -> Handle.
@@ -208,6 +212,12 @@ pub enum Fehler {
     /// Eine Kernel-Ressource ist gerade belegt; ein erneuter Versuch kann
     /// gelingen (siehe die Lock-Disziplin im Kopfkommentar).
     Belegt = 24,
+    /// Der Zufallsgenerator ist noch nicht ausreichend gesät (Serie 7,
+    /// Teil 1). **Ein eigener Code und kein `Belegt`**, weil der Aufrufer
+    /// etwas völlig anderes tun muss: nicht „gleich nochmal", sondern
+    /// „warte auf Entropie — oder verzichte auf Kryptographie". Es gibt in
+    /// diesem Zustand KEINE schwachen Bytes (docs/zufall.md §4).
+    NichtGesaet = 25,
 }
 
 impl Fehler {
@@ -244,6 +254,7 @@ impl Fehler {
             Fehler::Abgebrochen => "abgebrochen",
             Fehler::NichtUnterstuetzt => "nicht unterstuetzt",
             Fehler::Belegt => "Ressource belegt, spaeter erneut versuchen",
+            Fehler::NichtGesaet => "Zufallsgenerator noch nicht ausreichend gesaet",
         }
     }
 
@@ -507,6 +518,74 @@ fn sys_schreibe_inner(h: u64, ptr: u64, laenge: u64) -> Result<prozess::Ausgang,
 }
 
 // ---------------------------------------------------------------------------
+// zufall
+// ---------------------------------------------------------------------------
+
+/// Wie lange `zufall` höchstens auf einen gesäten Pool wartet.
+///
+/// 10 Sekunden, weil der schwächste denkbare Fall (nur PIT-Jitter, keine
+/// Hardware-Quelle, keine Eingabe) rechnerisch ~8 s braucht — die Frist ist
+/// also so gewählt, dass die schlechteste Konfiguration es gerade noch
+/// schafft und alles darunter ein echter Befund ist (docs/zufall.md §4).
+pub const ZUFALL_FRIST_MS: u64 = 10_000;
+
+/// `zufall(ptr, len)` -> gefüllte Bytes.
+///
+/// ==========================================================================
+/// DIE ENTSCHEIDUNG „BLOCKIEREN STATT SCHWACHEM ZUFALL", in Code:
+///
+/// Ist der Pool nicht gesät, WARTET dieser Syscall — er liefert unter keinen
+/// Umständen Bytes aus einem ungesäten Generator. Der Grund steht in
+/// docs/zufall.md §4 und ist kurz: Der Aufrufer kann Zufall nicht auf
+/// Qualität prüfen. Er baut daraus einen Sitzungsschlüssel, die Verbindung
+/// steht, das Schloss-Symbol erscheint — und der Fehler bleibt für immer
+/// still. Ein Fallback wäre hier die schlimmste Lösung, nicht die bequemste.
+///
+/// ABER MIT FRIST, und das ist der Unterschied zu Linux' `getrandom`: Ewiges
+/// Blockieren wäre auf einem Rechner ohne Netz und ohne Tastatur ein Hänger
+/// ohne Meldung — und „keine Meldung" verstösst gegen die
+/// Daten-Integritäts-Regel dieses Projekts genauso wie stiller Datenverlust.
+/// Nach `ZUFALL_FRIST_MS` gibt es deshalb einen klaren Fehler.
+///
+/// Gewartet wird über `warte_fenster()` (dasselbe Muster wie `verbinde`):
+/// Interrupts an, `hlt`, Interrupts aus. Genau dort darf der Scheduler
+/// verdrängen, und genau dort fällt die Entropie an, auf die wir warten —
+/// jeder Timer-Tick speist den Pool.
+/// ==========================================================================
+fn sys_zufall(ptr: u64, laenge: u64) -> SysErgebnis {
+    let laenge = laenge_pruefen(laenge)?;
+    if laenge == 0 {
+        return Ok(0);
+    }
+    // Den Zielbereich VOR dem Warten prüfen: Ein kaputter Zeiger soll nicht
+    // erst nach zehn Sekunden auffallen.
+    ring3::user_bereich_pruefen(ptr, laenge, true).map_err(Fehler::von_copy)?;
+
+    let frist = crate::zeit::ms_seit_boot() + ZUFALL_FRIST_MS;
+    while !crate::zufall::bereit() {
+        if crate::zeit::ms_seit_boot() >= frist {
+            return Err(Fehler::NichtGesaet);
+        }
+        // WARTEFENSTER: Wir halten hier nichts. Interrupts an, damit der
+        // Timer tickt — er ist die Quelle, die den Pool füllt.
+        warte_fenster();
+    }
+
+    // In einen KERNEL-Puffer erzeugen und geprüft hinauskopieren
+    // (Dauerregel I). Nie direkt in User-Speicher schreiben: Schlägt die
+    // Prüfung fehl, hat der Prozess NICHTS bekommen statt eines halb
+    // gefüllten Puffers — und bei Zufall wäre „halb gefüllt" besonders
+    // heimtückisch, weil die Nullen wie Zufall aussehen.
+    let mut puffer = alloc::vec![0u8; laenge];
+    crate::zufall::fuellen(&mut puffer).map_err(|_| Fehler::NichtGesaet)?;
+    let ergebnis = puffer_schreiben(ptr, &puffer);
+    // Den Kernel-Puffer nicht mit Schlüsselmaterial liegen lassen.
+    puffer.iter_mut().for_each(|b| *b = 0);
+    ergebnis?;
+    Ok(laenge as u64)
+}
+
+// ---------------------------------------------------------------------------
 // DER DISPATCHER — die Syscall-Tabelle
 // ---------------------------------------------------------------------------
 
@@ -524,6 +603,7 @@ pub fn ausfuehren(nummer: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> SysErgebni
         SYS_BEENDE => prozess::sys_beende(a0),
         SYS_PIPE => prozess::sys_pipe(),
         SYS_STARTE => prozess::sys_starte(a0, a1, a2, a3),
+        SYS_ZUFALL => sys_zufall(a0, a1),
 
         // ----- Gruppe 1: Dateien -----
         SYS_OEFFNE => datei::sys_oeffne(a0, a1, a2),
@@ -754,6 +834,7 @@ mod tests {
         assert_eq!(SYS_BEENDE, 9);
         assert_eq!(SYS_PIPE, 10);
         assert_eq!(SYS_STARTE, 11);
+        assert_eq!(SYS_ZUFALL, 12);
         assert_eq!(SYS_OEFFNE, 16);
         assert_eq!(SYS_LESE_AT, 17);
         assert_eq!(SYS_SCHREIBE_AT, 18);
@@ -776,13 +857,14 @@ mod tests {
         assert_eq!(Fehler::UngueltigerHandle.code(), 5);
         assert_eq!(Fehler::NichtGefunden.code(), 8);
         assert_eq!(Fehler::Belegt.code(), 24);
+        assert_eq!(Fehler::NichtGesaet.code(), 25);
     }
 
     /// Unbekannte Nummern liefern IMMER einen Fehler und panicken nie —
     /// auch die Lücken zwischen den Gruppen und u64::MAX.
     #[test_case]
     fn test_unbekannte_nummern() {
-        for nummer in [12u64, 15, 25, 31, 38, 100, 239, 241, u64::MAX] {
+        for nummer in [13u64, 15, 25, 31, 38, 100, 239, 241, u64::MAX] {
             assert_eq!(
                 ausfuehren(nummer, 0, 0, 0, 0),
                 Err(Fehler::UnbekannterSyscall),

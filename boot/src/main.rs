@@ -195,6 +195,23 @@ fn main() {
     // unser PIC/PIT von QEMU emuliert werden soll (WHPX-Eigenheit).
     qemu.arg("-accel").arg("whpx,kernel-irqchip=off");
     qemu.arg("-accel").arg("tcg");
+    // CPU-MODELL — wählbar per SPEEDOS_CPU (Serie 7, Teil 1).
+    //
+    // GEMESSEN (docs/zufall.md §2): Unter WHPX sind RDSEED und RDRAND
+    // vorhanden, und zwar UNABHÄNGIG vom CPU-Modell — auch mit einem
+    // ausdrücklichen `-cpu qemu64`. Der Hypervisor reicht die CPUID-Bits der
+    // Host-CPU durch; das Modell filtert sie nicht. Die Erwartung „qemu64
+    // maskiert das schon" war falsch und ist nachgemessen widerlegt.
+    //
+    // Der Schalter bleibt trotzdem, denn er ist der einzige Weg, die
+    // Hardware-Erkennung überhaupt zu variieren (z. B. `SPEEDOS_CPU=max`
+    // gegen ein anderes Modell zu vergleichen).
+    if let Ok(modell) = std::env::var("SPEEDOS_CPU") {
+        let modell = modell.trim();
+        if !modell.is_empty() {
+            qemu.arg("-cpu").arg(modell);
+        }
+    }
     // Arbeitsspeicher passend zur Auflösung (siehe Rechnung oben):
     qemu.arg("-m").arg(format!("{ram_mb}M"));
     // Die emulierte RTC läuft auf der LOKALEN Host-Uhr — die

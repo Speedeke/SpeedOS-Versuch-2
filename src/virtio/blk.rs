@@ -157,6 +157,11 @@ impl VirtioBlk {
         loop {
             if let Some((fertig_kopf, _laenge)) = self.vq.used_abholen() {
                 debug_assert_eq!(fertig_kopf, kopf);
+                // ENTROPIE (Serie 7, Teil 1): WANN das Gerät fertig wurde.
+                // Die Antwortzeit schwankt mit den Warteschlangen des Wirts —
+                // bewusst niedrig bewertet, weil sie eben dort entsteht und
+                // nicht bei uns (docs/zufall.md §3).
+                crate::zufall::einspeisen(crate::zufall::Quelle::Platte);
                 break;
             }
             if zeit::us_seit_boot() - start > TIMEOUT_US {

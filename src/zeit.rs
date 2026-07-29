@@ -61,6 +61,16 @@ fn tsc_lesen() -> u64 {
     unsafe { core::arch::x86_64::_rdtsc() }
 }
 
+/// Der ROHE TSC-Wert — die Entropie-Quelle des Zufallsgenerators.
+///
+/// Warum roh und nicht `us_seit_boot()`: Die Entropie steckt ausgerechnet in
+/// den UNTERSTEN Bits (Interrupt-Latenz, Buslaufzeit, DRAM-Refresh). Die
+/// Umrechnung in Mikrosekunden dividiert sie weg — sie ist für eine Uhr
+/// richtig und für einen Zufallsgenerator das Gegenteil davon.
+pub fn tsc_roh() -> u64 {
+    tsc_lesen()
+}
+
 /// Ist der TSC laut CPUID "invariant" (tickt konstant, unabhängig
 /// von Stromsparmodi)? Blatt 0x8000_0007, EDX Bit 8. (__cpuid ist
 /// auf aktuellem Rust eine SICHERE Funktion — sie liest nur

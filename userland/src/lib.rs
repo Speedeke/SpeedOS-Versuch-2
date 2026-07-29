@@ -54,6 +54,7 @@ pub const SYS_WARTE: u64 = 8;
 pub const SYS_BEENDE: u64 = 9;
 pub const SYS_PIPE: u64 = 10;
 pub const SYS_STARTE: u64 = 11;
+pub const SYS_ZUFALL: u64 = 12;
 
 pub const SYS_OEFFNE: u64 = 16;
 pub const SYS_LESE_AT: u64 = 17;
@@ -122,6 +123,7 @@ impl Fehler {
     pub const ZEITUEBERSCHREITUNG: Fehler = Fehler(17);
     pub const NICHT_KONFIGURIERT: Fehler = Fehler(18);
     pub const ABGEBROCHEN: Fehler = Fehler(22);
+    pub const NICHT_GESAET: Fehler = Fehler(25);
 
     /// Deutsche Klartext-Meldung. Bewusst hier und nicht im Kernel: Der
     /// Kernel liefert eine ZAHL ueber die Grenze, die Uebersetzung in Text
@@ -154,6 +156,7 @@ impl Fehler {
             22 => "Verbindung abgebrochen",
             23 => "nicht unterstuetzt",
             24 => "Ressource belegt",
+            25 => "Zufallsgenerator noch nicht ausreichend gesaet",
             _ => "unbekannter Fehlercode",
         }
     }
@@ -452,6 +455,29 @@ pub fn umbenenne(von: &str, nach: &str) -> Ergebnis {
 /// Legt ein Verzeichnis an.
 pub fn mkdir(pfad: &str) -> Ergebnis {
     unsafe { syscall(SYS_MKDIR, pfad.as_ptr() as u64, pfad.len() as u64, 0, 0) }
+}
+
+/// FUELLT einen Puffer mit kryptographisch brauchbarem Zufall.
+///
+/// BLOCKIEREND: Direkt nach dem Boot ist der Entropie-Pool des Kernels
+/// womoeglich noch nicht gesaet — dann wartet dieser Aufruf, bis er es ist.
+/// Bleibt er es auch nach der Frist des Kernels (10 s) nicht, kommt
+/// `Fehler::NICHT_GESAET` zurueck.
+///
+/// **SpeedOS liefert in diesem Fall KEINE schwachen Bytes**, und darauf darf
+/// man sich verlassen: Der Puffer bleibt dann unveraendert. Ein Programm,
+/// das hier einen Fehler bekommt, darf auf keinen Fall selbst etwas
+/// zusammenreimen — es hat schlicht keinen Zufall (docs/zufall.md §4).
+pub fn zufall(ziel: &mut [u8]) -> Ergebnis {
+    unsafe {
+        syscall(
+            SYS_ZUFALL,
+            ziel.as_mut_ptr() as u64,
+            ziel.len() as u64,
+            0,
+            0,
+        )
+    }
 }
 
 /// Zaehlt die Eintraege eines Verzeichnisses (ohne sie zu holen).

@@ -466,6 +466,12 @@ pub fn timer_ticks() -> u64 {
 pub fn timer_basisarbeit() {
     TICKS.fetch_add(1, Ordering::Relaxed);
     crate::zeit::tick_waker_wecken();
+    // ENTROPIE (Serie 7, Teil 1): der TSC-Zeitpunkt dieses Ticks. Die
+    // SCHWÄCHSTE Quelle im System — ein 250-Hz-Timer tickt regelmässig,
+    // unvorhersagbar ist allein die Interrupt-Latenz. `zufall` rechnet sie
+    // deshalb nur jede 8. Probe an (docs/zufall.md §3). Kostet ein `rdtsc`
+    // und drei Atomics: kein Lock, keine Allokation — Handler-Regel erfüllt.
+    crate::zufall::einspeisen(crate::zufall::Quelle::Pit);
 
     // Dem PIC melden: "fertig behandelt" (End of Interrupt).
     // Ohne das schickt er nie wieder einen Timer-Interrupt!
@@ -492,6 +498,9 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
     // Controllers; das Lesen ist genau die vorgesehene Bedienung.
     let mut port = Port::new(0x60);
     let scancode: u8 = unsafe { port.read() };
+    // ENTROPIE: die BESTE Quelle, die wir haben — ein Mensch tippt, und
+    // Tippabstände schwanken um zehntel Sekunden (Millionen TSC-Zyklen).
+    crate::zufall::einspeisen(crate::zufall::Quelle::Tastatur);
     // In die lock-freie Queue damit + Tastatur-Task wecken. Fertig!
     crate::task::keyboard::add_scancode(scancode);
 
@@ -510,6 +519,10 @@ extern "x86-interrupt" fn maus_interrupt_handler(_stack_frame: InterruptStackFra
     // unsafe (Port-I/O): 0x60 ist der Datenport des PS/2-Controllers.
     let mut port = Port::new(0x60);
     let byte: u8 = unsafe { port.read() };
+    // ENTROPIE: wie die Tastatur ein Mensch — aber 200 Proben/s, und
+    // aufeinanderfolgende Proben sind korreliert (eine Bewegung ist glatt).
+    // Deshalb weniger Bits je Probe (docs/zufall.md §3).
+    crate::zufall::einspeisen(crate::zufall::Quelle::Maus);
     crate::maus::byte_hinzufuegen(byte);
 
     // unsafe: korrekte Interrupt-Nummer, siehe Timer-Handler.
@@ -537,6 +550,10 @@ extern "x86-interrupt" fn virtio_pci_irq11(_stack_frame: InterruptStackFrame) {
 /// dann EOI. Minimal wie alle Handler: KEIN Lock auf Treiber-Zustand,
 /// KEINE Allokation.
 fn pci_virtio_irq(vektor: u8) {
+    // ENTROPIE: Die Ankunftszeit eines Pakets hängt von einer FREMDEN
+    // Gegenstelle und der Netzlaufzeit ab. Bewusst niedrig bewertet: Ein
+    // Angreifer im selben Netz kann sie mitbestimmen (docs/zufall.md §3).
+    crate::zufall::einspeisen(crate::zufall::Quelle::Netz);
     crate::virtio::net::irq_pruefen_und_wecken();
     // unsafe: korrekte Vektor-Nummer — der Handler ist genau dort
     // registriert; notify_end_of_interrupt behandelt die Kaskade selbst.

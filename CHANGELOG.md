@@ -5,6 +5,140 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### Serie 7, Teil 1: ZUFALL — SpeedOS bekommt einen Generator
+
+Der erste Schritt der Serie, und ausdrücklich **nicht** TLS: Bis hierhin gab
+es in SpeedOS **keinen einzigen Zufallsgenerator**. Die zwei Stellen mit
+„Zufall" im Namen waren LCGs in Testhilfen, absichtlich reproduzierbar. Ohne
+kryptographisch brauchbaren Zufall ist TLS nicht „etwas schwächer", sondern
+**wertlos** — Client-Random, Handshake-Schlüsselanteile und alle Nonces
+hängen daran.
+
+**Entwurf zuerst: `docs/zufall.md`** (Projektregel wie bei `speedfs-format.md`
+und `scheduler-design.md`) — mit den Quellen, der Entropie-Rechnung, der
+Bewertung des Boot-Falls und dem, was Tests hier wert sind.
+
+- **DREI QUELLEN-KLASSEN, und sie sind nicht gleichwertig:**
+  - **RDSEED/RDRAND** per CPUID erkannt, mit Wiederholungsgrenze (CF=0 heisst
+    „kein Wert" — wer das nicht prüft, liest den unveränderten Registerinhalt
+    und hält ihn für Zufall) und **Gesundheitsprüfung** (8 Werte; alle gleich,
+    oder mehrfach 0 / `u64::MAX` ⇒ Quelle dauerhaft abgeschaltet). Anlass ist
+    ein reales Erratum: AMD-CPUs lieferten nach S3 dauerhaft `0xFFFFFFFF` —
+    **mit gesetztem Carry-Flag**, also als „gültig" gemeldet.
+  - **Interrupt-Jitter**: TSC-Zeitstempel von PIT, Tastatur, Maus, Netz-RX und
+    Platten-Antworten, eingespeist direkt in den IRQ-Handlern.
+  - **RTC/Boot-Layout als SALZ — mit null angerechneten Bits.** Begründung
+    ohne Spielraum: Ein Angreifer kennt die Bootzeit (sie steht in jeder
+    Logzeile, in jedem `Date`-Header). Salz trennt zwei identische Rechner
+    voneinander und behindert keinen einzigen Angreifer. Das *ist* die
+    Definition von Salz — und genau deshalb darf es nie als Entropie zählen.
+- **DIE ENTROPIE-RECHNUNG, bewusst untertrieben** (docs/zufall.md §3):
+  Tastatur 4 Bit/Probe, Maus 3, Netz/Platte 2, **PIT 1 Bit je 8. Tick**. Die
+  PIT-Abwertung ist die wichtigste Zahl: Ein 250-Hz-Timer tickt *regelmässig*;
+  mit voller Anrechnung wäre die 256-Bit-Schwelle nach **einer Sekunde**
+  erreicht — ausgerechnet aus der vorhersagbarsten Quelle im System. Eine
+  Zahl, die gut aussieht und nichts bedeutet. Mit der Abwertung sind es
+  ~8 Sekunden. Dazu ein **Wiederholungs-Test** (zweimal dieselbe TSC-Differenz
+  ⇒ die Quelle ist gerade ein Zähler ⇒ null Bits, angelehnt an den Repetition
+  Count Test aus NIST SP 800-90B) und ein Deckel bei 4096 Bit.
+  **Ausdrücklich Annahmen, keine Messungen** — steht so im Code und im
+  Dokument.
+- **CHACHA20-DRBG mit fast key erasure.** Die ersten 32 Byte jedes Aufrufs
+  werden der **neue Schlüssel**, der alte wird per `write_volatile`
+  überschrieben. Das kauft **Vorwärts-Sicherheit**: Wer den Kernel-Speicher
+  später liest, kann frühere Ausgaben nicht rekonstruieren. Nachsäen ist
+  `schluessel ^= pool_falten()` — **XOR und nicht ersetzen**, damit eine
+  schlechte neue Quelle den Zustand nicht verschlechtern kann. Genau darauf
+  steht die ganze „nie aus einer Quelle allein"-Regel.
+- **DER DECKEL, der die Regel zu mehr als einem Kommentar macht:** Die
+  Hardwarequelle darf höchstens die **halbe** Schwelle beisteuern (128 von
+  256 Bit). Im Bootlog sichtbar, und es ist die Zeile, auf die es ankommt:
+  ```
+  [ZUFALL] RDSEED: ja, RDRAND: ja — Start mit 134 von 256 Bit.
+  [ZUFALL] Noch nicht gesaet — es fehlen 122 Bit aus Interrupt-Jitter.
+  ```
+  Der Generator ist beim Boot **nicht** gesät, obwohl RDSEED vorhanden ist.
+  Der Wartepfad wird damit bei *jedem* Testlauf durchlaufen und kann nicht
+  unbemerkt verrotten.
+- **DER UNANGENEHME FALL, bewertet statt umschifft** (docs/zufall.md §4):
+  frisch gebootet, keine Eingabe, kein RDRAND. *Schwachen Zufall liefern*
+  wäre die schlimmste Lösung — der Aufrufer kann Zufall nicht auf Qualität
+  prüfen, baut daraus einen Sitzungsschlüssel, und der Fehler bleibt für immer
+  still (dieselbe Asymmetrie, wegen der es kein Eigenbau-TLS gibt). *Sofort
+  ein Fehler* verschiebt das Problem nach oben. **Gewählt: blockieren — mit
+  Frist.** Der Syscall wartet bis zu 10 s (die schwächste Konfiguration
+  braucht rechnerisch ~8 s) und liefert dann `NichtGesaet`. Nie schwache
+  Bytes, nie ein Hänger ohne Ende. Linux hat 2020 mit `getrandom(2)` dieselbe
+  Entscheidung getroffen; die Frist ist unsere Ergänzung, weil ein Hänger
+  ohne Meldung gegen die Daten-Integritäts-Regel verstösst.
+- **Syscall `zufall(ptr, len)` (Nr. 12)** und **Fehlercode `NichtGesaet` (25)**
+  — eine ABI-*Erweiterung*, keine Änderung. Copy-out über `ring3::copy_out`;
+  **im Fehlerfall bleibt der Puffer unverändert** (halb gefüllt wäre hier
+  besonders heimtückisch: Nullen sehen aus wie Zufall). Der Kernel-Puffer wird
+  nach dem Kopieren genullt.
+- **Shell `zufall [bytes]`:** Hex-Ausgabe *und* der Pool-Status — geschätzte
+  Entropie, Schwelle, Hardware-Quellen, Proben je Quelle (Salz ausdrücklich
+  als „0 Bit/Probe (SALZ, keine Entropie)" markiert), Nachsaaten. Wenn nichts
+  geliefert wird, sieht der Nutzer **warum** und wie viele Bit fehlen.
+
+**GEMESSEN — und eine Erwartung, die sich als falsch erwies:** Der Entwurf
+nahm an, QEMU maskiere RDRAND/RDSEED im Modell `qemu64`, die Testumgebung
+hätte also keine Hardwarequelle. **Nachgemessen widerlegt:** Unter WHPX sind
+beide vorhanden, auch mit ausdrücklichem `-cpu qemu64` — der Hypervisor
+reicht die CPUID-Bits der Host-CPU durch. Die Annahme steht in
+docs/zufall.md §2 stehen gelassen statt stillschweigend korrigiert, weil sie
+zeigt, wozu ein Mess-Abschnitt da ist. (Der Runner nimmt jetzt `SPEEDOS_CPU`
+entgegen — er war für diese Messung nötig.)
+
+**Leistung:** 451–609 MiB/s am Stück, **104–149 ns je 32-Byte-Aufruf**
+(ChaCha20 in Software, ohne SIMD — unser Target ist `-sse/+soft-float`). Für
+TLS, das je Handshake einige Dutzend Byte zieht, ist das weit jenseits von
+relevant.
+
+**TESTS — und die Grenze, die dazugehört.** `tests/zufall.rs` (9 Stück) und
+die Lib-Tests:
+- **BELASTBAR: die Testvektoren.** RFC 8439 §2.1.1 (Quarter Round) und §2.3.2
+  (Blockfunktion — voller Zustand *und* die serialisierten 64 Byte, damit ein
+  Byte-Reihenfolge-Fehler nicht durchrutscht). Zusätzlich **unabhängig
+  gegengeprüft** mit einer aus der Spezifikation heraus geschriebenen
+  Python-Referenz: zwei Herleitungen, ein Ergebnis. Dazu Key Erasure
+  (Schlüssel nach jedem Aufruf anders), Determinismus bei gleichem Zustand,
+  und dass `saeen` den Zustand wirklich ändert.
+- **NICHT BELASTBAR: die Statistik.** Byteverteilung über 1 MiB (min 3918,
+  max 4290 bei Erwartung 4096, kein Wert fehlt), 0 wiederholte 16-Byte-Blöcke
+  in 1 MiB, ~50 % steigende u64-Paare, andere Werte nach einem Neustart
+  (Vergleich mit einer auf der Platte hinterlegten Probe des Vorlaufs).
+  **Das beweist keine kryptographische Qualität** — ein Zähler durch AES
+  besteht jeden dieser Tests. Was sie finden, ist die Klasse grober Fehler:
+  Generator lief nicht, konstanter Wert, Zähler statt Zufall, identischer
+  Start nach jedem Boot. Diese Unterscheidung steht als Kommentar an den
+  Tests, damit niemand später ein grünes Häkchen für mehr hält.
+- **Der Ring-3-Beweis:** `zufall(ptr,len)` über den Syscall-Prüfstand, echt
+  unprivilegiert — Erfolgsfall (und **kein Byte** über die angeforderte Länge
+  hinaus), zweimal verschieden, `len == 0`, Überlänge, Kernel-Zeiger,
+  Nullzeiger, Bereich über die Seitengrenze.
+- **Der Startbefund**, in `init()` eingefroren: Ohne ihn prüfte der
+  Zustandstest nichts — die Tests laufen alphabetisch, und bis zum letzten
+  ist der Pool längst gefüllt. Jetzt ist nachgewiesen, dass der Generator
+  beim Start **nicht** gesät ist (134 von 256 Bit), obwohl eine
+  Hardwarequelle vorhanden ist.
+
+**Selbst hineingelaufen, deshalb notiert:** Der Lib-Test-Kernel ruft
+`zufall::init()` nicht, weshalb der Hardware-Bericht dort „keine Quelle"
+meldete — und beinahe eine falsche Zahl in docs/zufall.md §2 geschrieben
+hätte. Und die erste Fassung des „nicht gesät"-Tests prüfte auf `bereit()`
+statt auf die Bit-Zahl: `fuellen` hat daraufhin korrekt nachgesät und Bytes
+geliefert, der Test also nicht den Kernel gefunden, sondern seine eigene
+falsche Annahme.
+
+**Die RNG-Dauerregel steht in CLAUDE.md** (sieben Punkte, u. a.: es gibt
+genau eine Zufallsquelle; nie aus einer Quelle allein; Salz ist keine
+Entropie; kein Fallback; Schätzungen werden untertrieben; im Interrupt nur
+Atomics; was Tests beweisen). Dort ist auch die Eigenbau-Krypto-Grenze
+präzisiert: Eine **Primitive** darf selbst gebaut werden, wenn es offizielle
+Testvektoren gibt und die Implementierung datenunabhängig läuft — ein
+**Protokoll** nie.
+
 ### Serie 7, Teil 0: DIE WECK-LATENZ — aus 199 KiB/s werden 202 MiB/s
 
 Die Vorarbeit für TLS. Der Serie-6-Abschluss hatte eine Zahl hinterlassen,
