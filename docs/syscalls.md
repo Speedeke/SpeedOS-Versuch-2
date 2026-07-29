@@ -3,7 +3,7 @@
 Stand: Juli 2026, **Serie 6 abgeschlossen**. Dieses Dokument ist die
 Schnittstelle zwischen Kernel und User-Space.
 
-Die ABI umfasst **28 Syscalls** in drei Gruppen. Sie ist unter Feuer
+Die ABI umfasst **31 Syscalls** in drei Gruppen. Sie ist unter Feuer
 geprüft: `tests/sicherheit.rs` lässt ein absichtlich böswilliges Programm
 (`userland/angreifer`) systematisch dagegen anrennen — jeder Versuch endet
 mit einem Fehlercode oder dem Tod des Angreifers, nie mit einem Schaden am
@@ -176,6 +176,7 @@ inklusive geordnetem TCP-Abbau).
 | 6 | `zeit_epoche` | — | Sekunden seit 1.1.2000 (echte Uhr) | — |
 | 12 | `zufall` | `ptr`, `len` | gefüllte Bytes | 3, 4, **25** |
 | 13 | `zeit_geprueft` | — | UNIX-Sekunden (UTC) | **26** |
+| 14 | `speicher` | `bytes` | Basis des neuen Heap-Stücks | 2, 4, 14, 23, 24 |
 
 *(7–11 sind Ströme und Prozesse — siehe §8b.)*
 
@@ -213,6 +214,23 @@ inklusive geordnetem TCP-Abbau).
     (`docs/tls-vertrauen.md` §3e).
   * Beide liefern **UTC**. Die Anzeige-Zeitzone ist reine Kosmetik und lebt
     in den Einstellungen, nicht in der ABI (`src/zeit.rs`).
+- **`speicher(bytes)`** erweitert den **User-Heap** des aufrufenden Prozesses
+  und liefert die Basis des NEUEN Stücks (Serie 7, Teil 3). `bytes` wird auf
+  Seiten aufgerundet; die neuen Seiten sind beschreibbar, **nicht
+  ausführbar** (W^X gilt weiter) und genullt.
+  * **Das neue Stück schliesst IMMER lückenlos an das bisherige Heap-Ende
+    an.** Darauf verlässt sich der Allocator im User-Space
+    (`libspeed::heap`): Es gibt genau einen zusammenhängenden Heap, der nach
+    oben wächst — dasselbe Modell wie `brk` unter Unix.
+  * Layout: ab `prozess::HEAP_START` (= `elf::IMAGE_ENDE` + 4 KiB), höchstens
+    `HEAP_MAX_BYTES` (12 MiB). Darüber `KeinPlatz` (14). Danach bleiben
+    3 MiB ungemappt als Abstand zum Stack.
+  * **Es gibt kein Gegenstück zum Freigeben, und das ist Absicht:** Ein
+    Prozess gibt Seiten nie einzeln zurück; sein Adressraum fällt beim Ende
+    als Ganzes (Serie 6, Teil 3). Der Allocator verwaltet innerhalb dessen,
+    was er bekommen hat.
+  * Aus dem Kernel-Prozess (PID 0) gerufen: `NichtUnterstuetzt` (23) — der
+    Kernel hat seinen eigenen Heap.
 
 ---
 

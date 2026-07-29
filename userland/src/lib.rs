@@ -34,7 +34,12 @@
 // ==========================================================================
 
 #![no_std]
+// Seit Serie 7, Teil 3 hat libspeed einen HEAP (heap.rs) — dafuer braucht es
+// die `alloc`-Kiste und einen eigenen Fehler-Handler.
+#![feature(alloc_error_handler)]
 #![allow(clippy::missing_safety_doc)]
+
+extern crate alloc;
 
 use core::fmt::{self, Write};
 
@@ -56,6 +61,7 @@ pub const SYS_PIPE: u64 = 10;
 pub const SYS_STARTE: u64 = 11;
 pub const SYS_ZUFALL: u64 = 12;
 pub const SYS_ZEIT_GEPRUEFT: u64 = 13;
+pub const SYS_SPEICHER: u64 = 14;
 
 pub const SYS_OEFFNE: u64 = 16;
 pub const SYS_LESE_AT: u64 = 17;
@@ -105,7 +111,9 @@ pub const STAT_BYTES: usize = 32;
 // Fehler
 // ---------------------------------------------------------------------------
 
+pub mod heap;
 pub mod pem;
+pub mod tls;
 
 /// Ein Fehlercode des Kernels. Die Zahlen sind ABI (docs/syscalls.md).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,6 +136,7 @@ impl Fehler {
     pub const ABGEBROCHEN: Fehler = Fehler(22);
     pub const NICHT_GESAET: Fehler = Fehler(25);
     pub const ZEIT_UNPLAUSIBEL: Fehler = Fehler(26);
+    pub const NICHT_VERBUNDEN: Fehler = Fehler(20);
 
     /// Deutsche Klartext-Meldung. Bewusst hier und nicht im Kernel: Der
     /// Kernel liefert eine ZAHL ueber die Grenze, die Uebersetzung in Text
@@ -264,6 +273,19 @@ pub fn zeit_epoche() -> u64 {
 /// eine Uhr im Taskleisten-Feld darf falsch gehen.
 pub fn zeit_geprueft() -> Ergebnis {
     unsafe { syscall(SYS_ZEIT_GEPRUEFT, 0, 0, 0, 0) }
+}
+
+/// FORDERT HEAP-SPEICHER beim Kernel an (Serie 7, Teil 3).
+///
+/// Liefert die Basisadresse des NEUEN Stuecks; es schliesst immer
+/// lueckenlos an das bisherige Heap-Ende an. Es gibt bewusst kein
+/// Gegenstueck zum Freigeben — ein Prozess gibt Seiten nie einzeln
+/// zurueck, sein Adressraum faellt beim Ende als Ganzes.
+///
+/// Direkt braucht das niemand: Der `#[global_allocator]` in `heap.rs` ruft
+/// es, wenn ihm der Platz ausgeht.
+pub fn speicher_anfordern(bytes: u64) -> Ergebnis {
+    unsafe { syscall(SYS_SPEICHER, bytes, 0, 0, 0) }
 }
 
 /// Schreibt Bytes auf ein Handle. Liefert die uebernommene Anzahl.

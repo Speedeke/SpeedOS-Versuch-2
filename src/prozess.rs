@@ -344,6 +344,9 @@ pub struct Prozess {
     /// automatisch alle offenen Sockets, ohne dass irgendein Pfad das
     /// vergessen könnte (siehe `syscall::handle::HandleTabelle`).
     pub handles: crate::syscall::handle::HandleTabelle,
+    /// Wie viele Bytes User-Heap diesem Prozess schon gemappt sind
+    /// (Serie 7, Teil 3). Waechst nur ueber `SYS_SPEICHER`, nie von selbst.
+    pub heap_bytes: u64,
 }
 
 impl Prozess {
@@ -372,6 +375,7 @@ impl Prozess {
             eltern: None,
             kinder_enden: [None; MAX_PROZESSE],
             handles: crate::syscall::handle::HandleTabelle::neu(),
+            heap_bytes: 0,
         }
     }
 
@@ -464,6 +468,7 @@ impl Prozess {
             eltern: None,
             kinder_enden: [None; MAX_PROZESSE],
             handles: crate::syscall::handle::HandleTabelle::neu(),
+            heap_bytes: 0,
         })
     }
 
@@ -899,6 +904,43 @@ pub const ELF_STACK_OBEN: u64 = crate::elf::IMAGE_ENDE + 16 * 1024 * 1024;
 /// Seiten des User-Stacks (64 KiB). Reichlich für Programme ohne Rekursion;
 /// darunter liegt eine Guard-Page.
 pub const ELF_STACK_SEITEN: usize = 16;
+
+// ---------------------------------------------------------------------------
+// DER USER-HEAP (Serie 7, Teil 3)
+// ---------------------------------------------------------------------------
+//
+// Bis hierher war `libspeed` ALLOKATIONSFREI: feste Puffer, `.bss`, fertig.
+// Das trug bis `zertifikate`, aber nicht weiter — `rustls` braucht einen
+// Allocator, und zwar ohne Alternative.
+//
+// WO ER LIEGT: in der 16-MiB-LÜCKE zwischen Programm-Image und Stack. Die
+// war bisher absichtlich leer („ein durchgehender Fehlergreifer"), und sie
+// bleibt es zu beiden Seiten — der Heap beginnt eine Seite HINTER dem
+// Image-Ende und hört weit vor der Stack-Guard-Page auf:
+//
+//   IMAGE_ENDE          ---- Obergrenze des Programms ----
+//   + 4 KiB             HEAP_START      \
+//                       ... Heap ...     |  waechst NACH OBEN, auf Anforderung
+//   + 4 KiB + 12 MiB    HEAP_ENDE       /
+//                       ... 4 MiB ungemappt: der Abstand zum Stack ...
+//   ELF_STACK_GUARD     Guard-Page
+//   ELF_STACK_OBEN      Stack-Spitze
+//
+// Der Heap WÄCHST NUR AUF ANFORDERUNG (`SYS_SPEICHER`). Er wird nie im
+// Voraus gemappt: Ein Programm, das keinen Heap braucht, zahlt keine Seite.
+
+/// Erste Adresse des User-Heaps (eine Seite Abstand zum Image — ein
+/// Zeiger-Ausrutscher hinter das Image-Ende trifft damit ein Loch).
+pub const HEAP_START: u64 = crate::elf::IMAGE_ENDE + 4096;
+/// Höchstgrösse des User-Heaps.
+///
+/// 12 MiB von den 16 MiB der Lücke; die restlichen 4 MiB bleiben als
+/// Abstand zum Stack ungemappt. Das reicht für rustls (gemessen: ein
+/// Handshake bewegt sich im dreistelligen KiB-Bereich) und lässt einem
+/// Programm, das Amok läuft, eine harte Grenze.
+pub const HEAP_MAX_BYTES: u64 = 12 * 1024 * 1024;
+/// Erste Adresse hinter dem Heap.
+pub const HEAP_ENDE: u64 = HEAP_START + HEAP_MAX_BYTES;
 
 /// Höchstzahl von Argumenten (inklusive des Programmnamens als `argv[0]`).
 pub const MAX_ARGUMENTE: usize = 16;

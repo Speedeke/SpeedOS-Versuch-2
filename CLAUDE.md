@@ -227,6 +227,62 @@
   Ablaufdaten-Spanne. Es holt die Zeit ueber `zeit_geprueft` — bei kaputter
   Uhr zeigt es Daten AN, bewertet sie aber NICHT.
 
+## TLS-MACHBARKEIT + USER-HEAP (Serie 7, Teil 3)
+- **ERGEBNIS DER EVALUATION (docs/tls-entscheidung.md): rustls GEHT.**
+  `rustls` 0.23 (`default-features = false`, `custom-provider`) mit
+  `rustls-rustcrypto` als Anbieter uebersetzt fuer x86_64-unknown-none und
+  laeuft in Ring 3 (`userland/tlsspike`, `tests/tlsspike.rs`). Gewaehlt
+  gegen `embedded-tls`, weil dessen Zertifikatspruefung schwach ist — und
+  die ist die Haelfte, auf die es ankommt. WARNUNG, die stehen bleibt: Der
+  Anbieter ist **0.0.2-ALPHA**.
+- **DIE VIER cfg-FLAGGEN in userland/.cargo/config.toml sind PFLICHT** —
+  ohne sie bricht LLVM ab (`Do not know how to split the result of this
+  operator!`), und zwar bei JEDER TLS-Bibliothek: `aes_force_soft`,
+  `polyval_force_soft`, `poly1305_force_soft`,
+  `curve25519_dalek_backend="serial"`. Grund: Die RustCrypto-Kisten
+  uebersetzen auf x86_64 IMMER ihren SIMD-Zweig mit (Auswahl erst zur
+  LAUFZEIT per `cpufeatures`), unser Target hat SSE aber ab
+  (`-sse,+soft-float`, wegen des Kontext-Wechsels). Es sind cfg-Flaggen und
+  KEINE Cargo-Features — deshalb stehen sie in der config.toml.
+- **FUENFTE BEDINGUNG: `opt-level >= 1`.** `sha2` hat keinen force-soft-
+  Schalter und bricht bei `-O0` ab (der tote SHA-NI-Zweig ueberlebt bis zur
+  LLVM-Legalisierung). Unser Bau ist `--release` — aber ein Debug-Build von
+  userland/ scheitert, und das ist eine ueberraschende Bedingung.
+- **no_std VERAENDERT DIE rustls-API:** `ClientConfig::builder()` und
+  `builder_with_provider()` sind std-gated. Nutzbar ist
+  `builder_with_details(provider, time_provider)` — die Zeit ist ein
+  PFLICHT-ARGUMENT. Und statt `ClientConnection` gibt es nur
+  `UnbufferedClientConnection`: ein anderes Programmiermodell (Zustands-
+  maschine selbst treiben, Puffer selbst verwalten). Das ist die eigentliche
+  Arbeit des Handshake-Schritts.
+- **USER-HEAP: `SYS_SPEICHER` (14) + `libspeed::heap`.** Der Kernel mappt
+  Seiten IMMER lueckenlos hinter dem bisherigen Heap-Ende (darauf verlaesst
+  sich `linked_list_allocator::extend` — es gibt genau EINEN
+  zusammenhaengenden Heap, `brk`-Modell). Lage: `HEAP_START =
+  elf::IMAGE_ENDE + 4 KiB`, max 12 MiB, danach 3 MiB ungemappter Abstand zum
+  Stack; Seiten sind NX (W^X gilt weiter). **KEIN `frei`-Gegenstueck, und
+  das ist Absicht** — ein Prozess gibt Seiten nie einzeln zurueck, sein
+  Adressraum faellt beim Ende als Ganzes.
+- **DIE ZEIT-NAHT IST DIE WICHTIGE:** `SpeedUhr: TimeProvider` liefert bei
+  unplausibler Uhr `None`, und rustls LEHNT die Gueltigkeitspruefung dann ab
+  statt sie zu ueberspringen. Damit ist „Uhr kaputt, pruefen wir halt nicht"
+  nicht implementierbar.
+- **`TcpStrom` glaettet die EINE Stelle, an der unsere ABI nicht passt:**
+  `empfange` ist nicht-blockierend (0 = „noch nichts"), TLS erwartet einen
+  blockierenden Strom. Die Warteschleife benutzt `abgeben()` (nicht
+  `schlafe` — wir warten auf den Netz-Task) und unterscheidet „noch nichts"
+  / „Gegenstelle zu" (Dateiende) / „Frist abgelaufen".
+- **ZAHLEN:** ELF 830 KiB (.text 567 KiB) gegen 28 KiB fuer `zertifikate`;
+  **Heap-SPITZE 66 944 Byte**; 119/119 Wurzeln von rustls-webpki
+  akzeptiert; 3 Ciphersuites; 201 Zeilen im cargo tree; 0 Frames geleckt
+  ueber 3 Laeufe.
+- **DER SPIKE SPRICHT KEIN TLS.** Kein Socket, kein Handshake — das ist der
+  naechste Schritt und ausdruecklich nicht dieser.
+- **MESSFALLE, selbst hineingelaufen:** Heap-Bedarf ist die SPITZE, nicht
+  der Endstand (der war 16 Byte, die Spitze 65 KiB). Und ein Deadlock im
+  eigenen Allocator: Der `MutexGuard` aus einer `if let`-BEDINGUNG lebt bis
+  zum ENDE DES BLOCKS — ein zweites `lock()` darin dreht sich fuer immer.
+
 ## Platten-Sicherheits-Regel (Juli 2026)
 - Der ATA-Treiber weigert sich PER KONSTRUKTION, auf das Boot-Laufwerk
   zu schreiben: Das Feld `beschreibbar` ist privat, Laufwerke entstehen

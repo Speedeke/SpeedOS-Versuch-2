@@ -91,6 +91,11 @@ pub static PROGRAMME: &[Programm] = &[
         elf: include_bytes!(concat!(env!("OUT_DIR"), "/zertifikate")),
     },
     Programm {
+        name: "tlsspike",
+        beschreibung: "tlsspike [name] — Machbarkeitsnachweis: rustls in Ring 3 (kein Handshake)",
+        elf: include_bytes!(concat!(env!("OUT_DIR"), "/tlsspike")),
+    },
+    Programm {
         name: "elternprobe",
         beschreibung: "elternprobe [ms] — startet ein Kind und wartet auf es (Ring 3)",
         elf: include_bytes!(concat!(env!("OUT_DIR"), "/elternprobe")),
@@ -291,7 +296,7 @@ mod tests {
         // ist Absicht: Wer ein Programm ergaenzt, muss es an DREI Stellen tun
         // (userland/Cargo.toml, build.rs, PROGRAMME) — dieser Test faengt
         // die vergessene dritte.
-        assert_eq!(PROGRAMME.len(), 9, "es sollen neun Programme mitkommen");
+        assert_eq!(PROGRAMME.len(), 10, "es sollen zehn Programme mitkommen");
         for programm in PROGRAMME {
             // Mit SPEEDOS_OHNE_USERLAND=1 gebaut? Dann gibt es nichts zu
             // pruefen — aber das ist der Notfall-Pfad, nicht der Normalfall.

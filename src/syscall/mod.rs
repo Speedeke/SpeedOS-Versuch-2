@@ -106,6 +106,9 @@ pub const SYS_ZUFALL: u64 = 12;
 /// ist**, sonst `ZeitUnplausibel`. Das ist die Zeitquelle für die
 /// Zertifikatsprüfung (Serie 7, Teil 2; siehe docs/zeit.md).
 pub const SYS_ZEIT_GEPRUEFT: u64 = 13;
+/// `speicher(bytes)` -> Basisadresse des NEUEN Heap-Stuecks.
+/// Erweitert den User-Heap des aufrufenden Prozesses (Serie 7, Teil 3).
+pub const SYS_SPEICHER: u64 = 14;
 
 // ----- Gruppe 1: Dateien über das VFS (16..31) -----
 /// `oeffne(pfad_ptr, pfad_len, modus)` -> Handle.
@@ -633,6 +636,11 @@ pub fn ausfuehren(nummer: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> SysErgebni
         // darf falsch gehen. Wer PRÜFT, nimmt diesen hier und bekommt bei
         // einer kaputten Uhr einen Fehler statt einer Zahl.
         SYS_ZEIT_GEPRUEFT => crate::zeit::zertifikatszeit().map_err(Fehler::von_zeit),
+        // DER USER-HEAP. Es gibt bewusst kein `frei` dazu: Ein Prozess gibt
+        // Seiten nie einzeln zurueck, sein Adressraum faellt beim Ende als
+        // Ganzes (Serie 6, Teil 3). Der Allocator im User-Space verwaltet
+        // innerhalb dessen, was er bekommen hat — genau wie `brk` unter Unix.
+        SYS_SPEICHER => scheduler::heap_erweitern(a0).map(|(basis, _)| basis),
 
         // ----- Gruppe 1: Dateien -----
         SYS_OEFFNE => datei::sys_oeffne(a0, a1, a2),
@@ -865,6 +873,7 @@ mod tests {
         assert_eq!(SYS_STARTE, 11);
         assert_eq!(SYS_ZUFALL, 12);
         assert_eq!(SYS_ZEIT_GEPRUEFT, 13);
+        assert_eq!(SYS_SPEICHER, 14);
         assert_eq!(SYS_OEFFNE, 16);
         assert_eq!(SYS_LESE_AT, 17);
         assert_eq!(SYS_SCHREIBE_AT, 18);
@@ -895,7 +904,7 @@ mod tests {
     /// auch die Lücken zwischen den Gruppen und u64::MAX.
     #[test_case]
     fn test_unbekannte_nummern() {
-        for nummer in [14u64, 15, 25, 31, 38, 100, 239, 241, u64::MAX] {
+        for nummer in [15u64, 25, 31, 38, 100, 239, 241, u64::MAX] {
             assert_eq!(
                 ausfuehren(nummer, 0, 0, 0, 0),
                 Err(Fehler::UnbekannterSyscall),

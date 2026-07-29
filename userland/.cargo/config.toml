@@ -30,7 +30,30 @@ target = "x86_64-unknown-none"
 # ADRESSIERT, nicht ob er verschiebbar GELADEN wird. Die Alternative waere
 # `-C code-model=large` (movabs fuer jede Adresse) — laeuft auch, macht die
 # Programme aber unnoetig gross und langsam.
-rustflags = []
+# DIE DREI FLAGGEN, OHNE DIE DER TLS-STAPEL NICHT UEBERSETZT
+#
+# Die RustCrypto-Kisten `aes`, `polyval` und `poly1305` compilieren auf
+# x86_64 IMMER ihren SIMD-Zweig mit — die Auswahl passiert erst zur LAUFZEIT
+# per `cpufeatures`. Unser Target hat SSE aber abgeschaltet (siehe oben,
+# wegen des Kontext-Wechsels), und dann kann LLVM `__m128i` nicht
+# legalisieren:
+#
+#     rustc-LLVM ERROR: Do not know how to split the result of this operator!
+#
+# Die drei cfg-Flaggen waehlen stattdessen die reinen Software-Zweige. Sie
+# sind KEIN Cargo-Feature (die Kisten bieten keins) — deshalb stehen sie
+# hier und nicht in Cargo.toml. Gemessen und begruendet in
+# docs/tls-entscheidung.md §3.
+# Und eine vierte, aus demselben Grund mit anderer Mechanik:
+# `curve25519-dalek` waehlt seinen Backend im BUILD-SKRIPT und nimmt auf
+# nightly + x86_64 automatisch "simd" — mit demselben LLVM-Fehler. Der
+# Schalter dagegen ist eine cfg-Variable, die sein build.rs abfragt.
+rustflags = [
+    "--cfg", "aes_force_soft",
+    "--cfg", "polyval_force_soft",
+    "--cfg", "poly1305_force_soft",
+    "--cfg", "curve25519_dalek_backend=\"serial\"",
+]
 
 # SpeedOS-Programme laufen NICHT auf dem Host. Der Runner des Kernel-Repos
 # (der QEMU startet) darf hier auf keinen Fall greifen — deshalb wird er

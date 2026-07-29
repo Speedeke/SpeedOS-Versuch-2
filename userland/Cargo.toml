@@ -20,6 +20,26 @@ description = "Die Standard-Bibliothek der SpeedOS-Programme (no_std)"
 # Nicht Teil des Kernel-Workspaces (der excludet uns zusätzlich).
 [workspace]
 
+[dependencies]
+# Der Heap-Allocator des User-Space (Serie 7, Teil 3) — dieselbe Kiste, die
+# auch der Kernel benutzt (src/allocator.rs). Sie ist no_std und kann
+# `extend`, und genau das braucht ein Heap, der auf Anforderung waechst.
+linked_list_allocator = { version = "0.10", default-features = false }
+# Spinlock fuer den GlobalAlloc (der muss `Sync` sein). Ein SpeedOS-Prozess
+# hat einen Ausfuehrungsstrang — der Lock ist nie umkaempft.
+spin = { version = "0.9", default-features = false, features = ["spin_mutex"] }
+
+# --- TLS (Serie 7, Teil 3) ---
+# rustls OHNE std: `custom-provider` schaltet den eingebauten
+# aws-lc-rs/ring-Anbieter ab (beide bringen C-Code mit). Der Anbieter kommt
+# aus RustCrypto — reines Rust, no_std.
+rustls = { version = "0.23", default-features = false, features = ["custom-provider", "tls12"] }
+rustls-rustcrypto = { version = "0.0.2-alpha", default-features = false, features = ["alloc"] }
+# getrandom kennt x86_64-unknown-none nicht (und kann es nicht — es weiss
+# nichts von SpeedOS). Das `custom`-Backend ist genau dafuer da: Wir liefern
+# die Implementierung (libspeed::tls, ueber Syscall 12).
+getrandom = { version = "0.2", default-features = false, features = ["custom"] }
+
 [lib]
 name = "libspeed"
 path = "src/lib.rs"
@@ -68,6 +88,12 @@ path = "src/bin/messung.rs"
 [[bin]]
 name = "zertifikate"
 path = "src/bin/zertifikate.rs"
+
+# Der TLS-Machbarkeitsnachweis (Serie 7, Teil 3): baut rustls ein und legt
+# einen Client-Zustand an. KEIN Handshake — siehe docs/tls-entscheidung.md.
+[[bin]]
+name = "tlsspike"
+path = "src/bin/tlsspike.rs"
 
 # panic = "abort" ist Pflicht: Abwickeln (unwinding) bräuchte eine
 # Personality-Funktion und Landing Pads — beides gibt es ohne std nicht.

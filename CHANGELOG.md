@@ -5,6 +5,153 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### Serie 7, Teil 3: TLS-MACHBARKEIT — der Spike läuft
+
+Ein Prompt, der mit „geht nicht" hätte enden dürfen. **Es geht.**
+
+**Evaluation zuerst: `docs/tls-entscheidung.md`** — alle Angaben gemessen
+(Probe-Crates gegen unser echtes Target, `cargo info`, `llvm-size`), nicht
+erinnert.
+
+#### Die Entscheidung
+
+**`rustls` 0.23.42 (`default-features = false`, `custom-provider`) mit
+`rustls-rustcrypto` 0.0.2-alpha als Anbieter.** Gegen `embedded-tls` 0.19
+entschieden — das baut zwar mit **exakt denselben** Flaggen, aber seine
+Zertifikatsprüfung ist historisch schwach, und das ist die Hälfte, auf die
+es ankommt. `portable-rustls` (ein Fork) notiert als Rückfallebene; ein Fork
+eines Sicherheitsprojekts bekommt Sicherheitsaktualisierungen nicht
+automatisch. **Die Alpha-Warnung bleibt stehen:** Der Anbieter ist 0.0.2.
+
+#### Der Blocker — und er lag nicht bei TLS
+
+Der erste Bauversuch endete mit
+`rustc-LLVM ERROR: Do not know how to split the result of this operator!`
+in `polyval`, `sha2`, `poly1305`, `aes`. **`embedded-tls` scheitert an
+denselben vier Kisten** — das war der Hinweis, dass die Ursache tiefer liegt.
+
+Nachgesehen statt vermutet: `aes 0.8.4` übersetzt auf x86_64 **immer** seinen
+AES-NI-Zweig mit (`mod ni;` mit `__m128i`); ausgewählt wird erst zur
+*Laufzeit* per `cpufeatures`. Unser Target hat SSE aber abgeschaltet
+(`-sse,+soft-float` — nötig, weil der Kontext-Wechsel nur die 15
+GP-Register sichert). LLVM kann `__m128i` dann nicht legalisieren.
+
+Zwei Gegenproben: **`u128` allein baut** (es liegt also nicht an
+128-Bit-Arithmetik), und **mit `+sse,+sse2,-soft-float` baut der ganze
+Stapel** (was die Diagnose bestätigt).
+
+**Der genommene Ausweg — vier cfg-Flaggen** in
+`userland/.cargo/config.toml` (cfg-Flaggen, **keine** Cargo-Features — die
+Kisten bieten keine):
+```
+--cfg aes_force_soft  --cfg polyval_force_soft
+--cfg poly1305_force_soft  --cfg curve25519_dalek_backend="serial"
+```
+Die vierte kam später und mit anderer Mechanik: `curve25519-dalek` wählt
+seinen Backend im **Build-Skript** und nimmt auf nightly + x86_64
+automatisch `simd`.
+
+**Und eine fünfte Bedingung, die niemand erwartet: `opt-level ≥ 1`.**
+`sha2` hat keinen force-soft-Schalter und bricht bei `-O0` ab (gemessen:
+0 → nein, 1/2/"s" → ja; bei `-O0` überlebt der tote SHA-NI-Zweig bis zur
+Legalisierung). Unser Bau ist `--release`, also unauffällig — ein
+Debug-Build von `userland/` scheitert aber.
+
+**Was NICHT abgeschaltet werden musste:** `tls12` ist an, die
+Zertifikatsprüfung ist vollständig, es wurde keine Sicherheitsfunktion
+geopfert. Die Flaggen wählen nur Software- statt SIMD-Implementierungen
+*derselben* Algorithmen.
+
+#### no_std verändert die rustls-API (Fund aus den Quellen)
+
+* `ClientConfig::builder()` **und** `builder_with_provider()` sind
+  `#[cfg(feature = "std")]`. Nutzbar ist nur
+  **`builder_with_details(provider, time_provider)`** — die Zeit ist ein
+  **Pflicht-Argument**.
+* `ClientConnection` (die gepufferte `std::io`-Variante) gibt es nicht; in
+  no_std nur **`UnbufferedClientConnection`**. Das ist ein anderes
+  Programmiermodell: Zustandsmaschine selbst treiben, Puffer selbst
+  verwalten. **Das ist die eigentliche Arbeit des Handshake-Schritts** — und
+  gut, sie jetzt zu kennen statt später.
+
+#### Was libspeed dafür bekommen hat
+
+* **Ein Heap.** Neuer Syscall **`speicher` (14)** + `libspeed::heap`
+  (`linked_list_allocator` als `#[global_allocator]`). Der Kernel mappt
+  Seiten **immer lückenlos hinter** dem bisherigen Heap-Ende — darauf
+  verlässt sich `extend`, es gibt genau *einen* zusammenhängenden Heap
+  (`brk`-Modell). Lage: ab `IMAGE_ENDE + 4 KiB`, max **12 MiB**, danach
+  **3 MiB ungemappter Abstand** zum Stack; Seiten sind NX (W^X gilt weiter).
+  **Kein `frei`-Gegenstück, und das ist Absicht:** Ein Prozess gibt Seiten
+  nie einzeln zurück, sein Adressraum fällt beim Ende als Ganzes.
+  Geht der Speicher aus, meldet der `alloc_error_handler` es und beendet den
+  Prozess mit Code 102 — kein stiller Nullzeiger.
+* **Zufall** → Syscall 12, registriert als `getrandom`-Backend
+  (`custom`-Feature; `getrandom` kennt unser Target nicht und kann es nicht
+  kennen).
+* **Zeit** → `SpeedUhr: TimeProvider` über Syscall 13. **Bei unplausibler
+  Uhr `None`** — rustls lehnt die Gültigkeitsprüfung dann ab, statt sie zu
+  überspringen. „Uhr kaputt, prüfen wir halt nicht" ist damit nicht
+  implementierbar.
+* **`TcpStrom`** glättet die eine Stelle, an der unsere ABI nicht passt:
+  `empfange` ist nicht-blockierend (0 = „noch nichts"), TLS erwartet einen
+  blockierenden Strom. Die Warteschleife nutzt `abgeben()` (nicht `schlafe`
+  — wir warten auf den Netz-Task) und unterscheidet sauber „noch nichts" /
+  „Gegenstelle zu" (Dateiende) / „Frist abgelaufen".
+
+#### Der Spike — echt in Ring 3
+
+```
+1) Heap:   16 Byte belegt von 65536 Byte gemappt
+2) Zufall: 32 Byte geholt, beginnt mit 32 a4 46 8b
+3) Zeit:   1785344504 (UNIX-Sekunden, UTC, geprueft)
+4) Wurzeln: 119 aus dem Buendel gelesen, 119 von rustls uebernommen
+5) Krypto:  3 Ciphersuites vom RustCrypto-Anbieter
+6) Konfig:  ClientConfig steht
+7) Zustand: ClientConnection fuer 'example.com' angelegt
+   Heap-SPITZE:  66944 Byte
+```
+
+| Grösse | Wert |
+|---|---|
+| ELF gesamt | **830 224 Byte** |
+| `.text` | **581 053 Byte** (~567 KiB) |
+| Heap-Spitze | **66 944 Byte** |
+| Abhängigkeiten | 201 Zeilen `cargo tree` |
+| Vergleich `zertifikate` (ohne TLS) | 28 312 Byte, `.text` 10 543 |
+
+~30× so gross wie unser bisher grösstes Programm — passt trotzdem locker
+(Image-Grenze 16 MiB, Heap-Grenze 12 MiB). **Kein Leck:** drei Läufe,
+Frame-Bilanz 0.
+
+> **DER SPIKE SPRICHT KEIN TLS.** Kein Socket, kein Handshake, kein Byte über
+> die Leitung. Der Erfolg ist: es übersetzt, es läuft unprivilegiert, es
+> stürzt nicht ab, und es sagt, wie viel Heap es braucht.
+
+#### Zwei eigene Fehler, beide notiert
+
+* **Ein Deadlock im eigenen Allocator.** Die erste Fassung schrieb den
+  Heap-Höchststand in `if let Ok(z) = self.innen.lock()...{ merken(&self.innen) }`
+  fort. Der `MutexGuard` aus einer `if let`-**Bedingung** lebt **bis zum Ende
+  des Blocks** — der zweite `lock()` drehte sich für immer. Der Spike blieb
+  nach der ersten Zeile stehen.
+* **Die erste Messung war die falsche Zahl.** Gemeldet wurden „16 Byte Heap"
+  — der *Endstand*, nachdem rustls alles freigegeben hatte. Wer wissen will,
+  wie viel ein Programm *braucht*, misst die **Spitze** (65 KiB).
+
+#### Zwei Tests nachgezogen
+
+* Die Listen „unbekannter" Syscall-Nummern (`tests/syscalls.rs`,
+  `angreifer`) enthielten die 14 — jetzt `speicher`. Dritte Erweiterung in
+  Folge, dritte Meldung durch genau diesen Test.
+* `test_speicher_100_zyklen` prüfte den Kernel-Heap **byte-exakt**. Die
+  Messung rechnet den Log-Puffer über seine **Kapazität** heraus, und die
+  springt in Zweierpotenzen — die Byte-Exaktheit ging nur um die
+  Sprungstellen herum auf und tut es seit dem längeren Boot-Protokoll nicht
+  mehr (gemessen: **−368 Byte**, reproduzierbar). Eine *Abnahme* ist per
+  Definition kein Leck; die Zusicherung heisst jetzt „nicht gewachsen" und
+  ist in der Richtung, auf die es ankommt, unverändert scharf.
+
 ### Serie 7, Teil 2: ZEIT UND VERTRAUEN — die zwei Dinge, die TLS von der Plattform verlangt
 
 TLS-Bibliotheken brauchen zwei Sachen, die nichts mit Kryptographie zu tun

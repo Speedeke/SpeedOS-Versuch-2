@@ -37,6 +37,7 @@
 // EINE Ausstieg `schalte_auf_rahmen`.
 
 use crate::adressraum;
+use x86_64::VirtAddr;
 use crate::prozess::{
     Pid, Prozess, ProzessEnde, ProzessMoment, TrapFrame, Warteauf, Zustand, KERNEL_PID,
     MAX_PROZESSE,
@@ -1211,6 +1212,69 @@ pub fn mit_handles<T>(
         .as_mut()
         .ok_or(crate::syscall::Fehler::UngueltigerHandle)?;
     Ok(f(&mut prozess.handles))
+}
+
+/// ERWEITERT DEN USER-HEAP des laufenden Prozesses um `bytes` (aufgerundet
+/// auf Seiten) und liefert `(neue Basis, neue Gesamtgrösse)`.
+///
+/// Warum das hier steht und nicht in `adressraum`: Es braucht BEIDES — den
+/// Adressraum (mappen) und den Prozess-Kontrollblock (wie viel ist schon
+/// da?). Der Scheduler ist die einzige Stelle, die an beides herankommt.
+///
+/// Die neuen Seiten sind `PRESENT|WRITABLE|USER_ACCESSIBLE|NX` und **frisch
+/// genullt** (`map_benutzer` nullt jeden Frame — sonst leckte der Inhalt des
+/// Vorbesitzers nach Ring 3).
+pub fn heap_erweitern(bytes: u64) -> Result<(u64, u64), crate::syscall::Fehler> {
+    use crate::syscall::Fehler;
+    let aktuell = AKTUELL.load(Ordering::Relaxed);
+    if aktuell == KERNEL_SLOT {
+        return Err(Fehler::NichtUnterstuetzt);
+    }
+    // Auf ganze Seiten aufrunden.
+    let bytes = bytes
+        .checked_add(4095)
+        .ok_or(Fehler::ZuGross)?
+        & !0xfff;
+    if bytes == 0 {
+        return Err(Fehler::UngueltigesArgument);
+    }
+
+    // try_lock statt lock: Im Syscall sind Interrupts aus, es hält sie
+    // niemand — aber warten würden wir hier nie (Lock-Disziplin).
+    let mut tabelle = TABELLE.try_lock().ok_or(Fehler::Belegt)?;
+    let prozess = tabelle[aktuell].as_mut().ok_or(Fehler::NichtUnterstuetzt)?;
+
+    let alt = prozess.heap_bytes;
+    let neu = alt.checked_add(bytes).ok_or(Fehler::ZuGross)?;
+    if neu > crate::prozess::HEAP_MAX_BYTES {
+        // HARTE GRENZE: Der Heap darf die Lücke zum Stack nicht auffressen.
+        return Err(Fehler::KeinPlatz);
+    }
+    let basis = crate::prozess::HEAP_START + alt;
+
+    let raum = prozess.raum.as_mut().ok_or(Fehler::NichtUnterstuetzt)?;
+    raum.bereich_mappen_mit_rechten(
+        VirtAddr::new(basis),
+        bytes as usize,
+        // NX: Auf dem Heap liegen Daten. Ausführbarer Heap wäre die
+        // Einladung, die W^X aus Serie 6 Teil 5 wieder aufzuheben.
+        adressraum::Rechte::SCHREIBEN,
+    )
+    .map_err(|_| Fehler::KeinPlatz)?;
+
+    prozess.heap_bytes = neu;
+    Ok((basis, neu))
+}
+
+/// Wie viel User-Heap hält ein Prozess? (Diagnose und Leck-Tests.)
+pub fn heap_bytes(pid: Pid) -> Option<u64> {
+    mit_tabelle(|tabelle| {
+        tabelle
+            .iter()
+            .flatten()
+            .find(|prozess| prozess.pid == pid)
+            .map(|prozess| prozess.heap_bytes)
+    })
 }
 
 /// Zugriff auf den ADRESSRAUM eines Prozesses (Diagnose und Tests: So legt der

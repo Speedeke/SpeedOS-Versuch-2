@@ -39,7 +39,7 @@ use std::process::Command;
 /// in src/programme.rs in die Liste eintragen.
 const PROGRAMME: &[&str] = &[
     "hallo", "kopiere", "netzhole", "zaehle", "filter", "elternprobe",
-    "angreifer", "messung", "zertifikate",
+    "angreifer", "messung", "zertifikate", "tlsspike",
 ];
 
 fn main() {
