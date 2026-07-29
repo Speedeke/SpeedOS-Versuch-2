@@ -252,7 +252,8 @@ fn print_datum_roh(unix: u64) {
 /// UNIX-Sekunden -> (Jahr, Monat, Tag). Die Umkehrung von
 /// `pem::unix_aus_datum`.
 fn datum_aus_unix(unix: u64) -> (u64, u64, u64) {
-    let schaltjahr = |j: u64| j % 4 == 0 && (j % 100 != 0 || j % 400 == 0);
+    let schaltjahr =
+        |j: u64| j.is_multiple_of(4) && (!j.is_multiple_of(100) || j.is_multiple_of(400));
     let mut tage = unix / 86_400;
     let mut jahr = 1970u64;
     loop {

@@ -39,7 +39,7 @@ use std::process::Command;
 /// in src/programme.rs in die Liste eintragen.
 const PROGRAMME: &[&str] = &[
     "hallo", "kopiere", "netzhole", "zaehle", "filter", "elternprobe",
-    "angreifer", "messung", "zertifikate", "tlsspike",
+    "angreifer", "messung", "zertifikate", "tlsspike", "holes",
 ];
 
 fn main() {
@@ -54,6 +54,8 @@ fn main() {
     println!("cargo:rerun-if-changed=userland/build.rs");
     println!("cargo:rerun-if-changed=userland/speedos.ld");
     println!("cargo:rerun-if-changed=userland/.cargo/config.toml");
+    // Der geteilte HTTP-Parser (Serie 7, Teil 4) haengt an BEIDEN Seiten.
+    println!("cargo:rerun-if-changed=speedhttp/src");
     // Notausgang, falls die verschachtelte cargo-Ausfuehrung in einer
     // fremden Umgebung Probleme macht: SPEEDOS_OHNE_USERLAND=1 baut den
     // Kernel mit LEEREN Programmen (er bootet dann ohne /platte/programme).

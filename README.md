@@ -8,6 +8,19 @@ ist alles selbst gebaut (auf Basis der bewährten Architektur aus
 > Lernprojekt: Der Code ist bewusst ausführlich auf Deutsch kommentiert —
 > jede Datei erklärt, *was* sie tut und *warum* es so funktioniert.
 
+![HTTPS aus SpeedOS](docs/screenshots/serie7-https-meilenstein.png)
+*Der Meilenstein von Serie 7: `starte holes https://example.com/ --info` —
+eine **verschlüsselte Verbindung** aus einem Ring-3-Programm. TLS 1.3 über
+den selbstgebauten TCP/IP-Stack, die Zertifikatskette gegen den eigenen
+Vertrauensanker geprüft (119 Wurzeln), Hostname abgeglichen — und darüber
+HTTP/1.1 mit **demselben Parser, den auch der Kernel benutzt**.
+Details: [`docs/tls-verbindung.md`](docs/tls-verbindung.md).*
+
+![Abgelehnt](docs/screenshots/serie7-https-abgelehnt.png)
+*Und die andere Hälfte, die erst beweist, dass wirklich geprüft wird: ein
+selbst ausgestelltes Zertifikat wird abgelehnt, mit Begründung. **Es gibt
+keinen Schalter, der das übergeht.***
+
 ![Pipeline im Terminal](docs/screenshots/pipeline.png)
 *Der Abschluss von Serie 6: `starte zaehle 20 | filter 7` — zwei
 eigenständige Ring-3-Programme, gleichzeitig, in getrennten Adressräumen,
@@ -270,8 +283,12 @@ src/
 userland/            DIE ANDERE SEITE DER GRENZE — eigener Workspace ohne
 │                    jede Kernel-Abhängigkeit:
 ├── src/lib.rs       libspeed: Syscall-Wrapper, print!, Panic, _start
-├── src/bin/         hallo, kopiere, netzhole, zaehle, filter, elternprobe
+├── src/tls.rs       TcpStrom + TlsStrom (rustls), SpeedUhr, deutsche Fehler
+├── src/bin/         hallo, kopiere, netzhole, holes, zaehle, filter, ...
 └── speedos.ld       Linker-Skript (ET_EXEC ab 0x80_0000_0000, 4-KiB-Segmente)
+speedhttp/           DER HTTP-PARSER, ohne jeden Transport und ohne jede
+                     Abhängigkeit — benutzt vom Kernel (über TCP) UND von
+                     `holes` (über TLS). Ein Parser, zwei Transporte.
 boot/                Host-Runner: baut das UEFI-Disk-Image, startet QEMU
 build.rs             baut userland/ mit und bettet die Programme ein
 tests/               Integrationstests (booten einzeln in QEMU)
@@ -288,8 +305,11 @@ Kernel-Code**: eigenes Crate, eigener Linker, eigener Adressraum, Ring 3.
 starte hallo                       # Text + argv + PID, Exit-Code 0
 starte hallo --code=7              # beweist, dass Exit-Codes durchkommen
 starte kopiere /platte/heim/a.txt /platte/heim/b.txt
-starte netzhole http://example.com          # der Meilenstein
+starte netzhole http://example.com          # der Meilenstein von Serie 6
 starte netzhole http://example.com /platte/heim/seite.html
+starte holes https://example.com/           # DER MEILENSTEIN VON SERIE 7
+starte holes https://example.com/ --info    # Version, Ciphersuite, Kette
+starte holes https://example.com/ /platte/heim/seite.html
 starte zaehle 20 | filter 7        # eine echte PIPELINE -> 7, 17
 starte zaehle 100 50               # laeuft lange — Strg+C beendet es
 starte elternprobe 500             # ein Prozess startet ein Kind (Ring 3)

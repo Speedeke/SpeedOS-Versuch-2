@@ -138,10 +138,21 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     //    Der Heap wächst später in desktop_starten auf Bildschirm-
     //    größe — aber die Auto-Mounts hier davor brauchen schon Luft
     //    (der FAT32-Treiber liest die ganze FAT in den RAM, ~256 KiB;
-    //    dazu die SpeedFS-Block-Caches). 1 MiB vorab reicht bequem —
-    //    und der virtio-blk-Treiber braucht den Heap für seine
-    //    Virtqueue-Verwaltung, also VOR pci/virtio wachsen lassen.
-    allocator::heap_erweitern(256).expect("Heap-Erweiterung vor den Mounts fehlgeschlagen");
+    //    dazu die SpeedFS-Block-Caches). Und der virtio-blk-Treiber
+    //    braucht den Heap für seine Virtqueue-Verwaltung, also VOR
+    //    pci/virtio wachsen lassen.
+    //
+    //    8 MiB SEIT SERIE 7, TEIL 4, und die Zahl hat einen Grund: Das
+    //    Programm `holes` bringt rustls mit und ist ~950 KiB groß.
+    //    `programme::installieren()` liest beim Boot jede vorhandene Datei
+    //    ganz in den Heap, um sie mit der eingebetteten Fassung zu
+    //    vergleichen — mit 1 MiB vorab panickte der Kernel dabei
+    //    ("Heap-Allokation fehlgeschlagen: Layout { size: 844320 }"), und
+    //    zwar BEVOR irgendetwas auf dem Bildschirm stand. OHNE Daten-Platte
+    //    kommt es dicker: Dann landen ALLE Programme (~2 MiB) im RAM-VFS,
+    //    also im selben Heap. Wer hier ein weiteres großes Programm
+    //    ergänzt, prüft diese Zahl mit.
+    allocator::heap_erweitern(2048).expect("Heap-Erweiterung vor den Mounts fehlgeschlagen");
 
     //    PCI enumerieren und den virtio-blk-Treiber aufsetzen (falls
     //    QEMU die Daten-Platte per virtio statt IDE anbietet). Danach

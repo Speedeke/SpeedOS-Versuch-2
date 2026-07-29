@@ -28,7 +28,7 @@ extern crate alloc;
 
 use bootloader_api::{entry_point, BootInfo};
 use core::panic::PanicInfo;
-use speed_os::netz::{self, http, http::HttpFehler, socket::SocketFehler};
+use speed_os::netz::{self, http, http::KlientFehler, socket::SocketFehler};
 use speed_os::{allocator, memory, pci, serial_println, virtio, zeit};
 use x86_64::VirtAddr;
 
@@ -84,21 +84,28 @@ enum Befund {
 }
 
 /// Bewertet ein Abruf-Ergebnis ehrlich.
-fn bewerten(ergebnis: &Result<(http::Url, http::Antwort), HttpFehler>) -> (Befund, &'static str) {
+///
+/// Seit Serie 7, Teil 4 unterscheidet der Kernel-Klient zwischen
+/// PROTOKOLL-Fehlern (`HttpFehler`, aus der transportfreien Kiste
+/// `speedhttp`) und TRANSPORT-Fehlern (`KlientFehler::{Dns,Socket}`). Fuer
+/// diesen Test aendert das nur die Schreibweise — die Einteilung in
+/// "TCP-Fehler" und "Umgebung" bleibt exakt dieselbe.
+fn bewerten(ergebnis: &Result<(http::Url, http::Antwort), KlientFehler>) -> (Befund, &'static str) {
+    use http::HttpFehler::*;
     match ergebnis {
         Ok(_) => (Befund::TcpOk, "vollstaendige Antwort"),
-        Err(HttpFehler::TlsNichtUnterstuetzt) => (Befund::Umgebung, "Server leitet auf https"),
-        Err(HttpFehler::Dns(_)) => (Befund::Umgebung, "DNS"),
-        Err(HttpFehler::UngueltigeUrl) => (Befund::Umgebung, "URL"),
-        Err(HttpFehler::ZuVieleWeiterleitungen) => (Befund::Umgebung, "zu viele Weiterleitungen"),
-        Err(HttpFehler::ZuGross) => (Befund::Umgebung, "Antwort zu gross"),
-        Err(HttpFehler::UnvollstaendigeAntwort) => (Befund::TcpFehler, "RUMPF UNVOLLSTAENDIG"),
-        Err(HttpFehler::KaputterKopf) => (Befund::TcpFehler, "KAPUTTER KOPF"),
-        Err(HttpFehler::Socket(SocketFehler::Zeitueberschreitung)) => {
+        Err(KlientFehler::Http(TlsNichtUnterstuetzt)) => (Befund::Umgebung, "Server leitet auf https"),
+        Err(KlientFehler::Dns(_)) => (Befund::Umgebung, "DNS"),
+        Err(KlientFehler::Http(UngueltigeUrl)) => (Befund::Umgebung, "URL"),
+        Err(KlientFehler::Http(ZuVieleWeiterleitungen)) => (Befund::Umgebung, "zu viele Weiterleitungen"),
+        Err(KlientFehler::Http(ZuGross)) => (Befund::Umgebung, "Antwort zu gross"),
+        Err(KlientFehler::Http(UnvollstaendigeAntwort)) => (Befund::TcpFehler, "RUMPF UNVOLLSTAENDIG"),
+        Err(KlientFehler::Http(KaputterKopf)) => (Befund::TcpFehler, "KAPUTTER KOPF"),
+        Err(KlientFehler::Socket(SocketFehler::Zeitueberschreitung)) => {
             (Befund::TcpFehler, "ZEITUEBERSCHREITUNG (Haenger)")
         }
-        Err(HttpFehler::Socket(SocketFehler::Abgebrochen)) => (Befund::TcpFehler, "ABBRUCH (RST/aufgegeben)"),
-        Err(HttpFehler::Socket(_)) => (Befund::TcpFehler, "SOCKET-FEHLER"),
+        Err(KlientFehler::Socket(SocketFehler::Abgebrochen)) => (Befund::TcpFehler, "ABBRUCH (RST/aufgegeben)"),
+        Err(KlientFehler::Socket(_)) => (Befund::TcpFehler, "SOCKET-FEHLER"),
     }
 }
 

@@ -1,0 +1,240 @@
+=============================================================================
+ SpeedOS - Serie 7, Teil 4: DIE ERSTE VERSCHLUESSELTE VERBINDUNG
+ Mitschnitt von `cargo test --test netz_https` (9 Tests, alle bestanden)
+=============================================================================
+ Umgebung: QEMU/WHPX, slirp-NAT, Host mit Internet.
+ Vorbereitung (beides auf dem HOST):
+     python tools/tls_testserver.py                 # 10.0.2.2:8443, eigene CA
+     python -m http.server 8000                     # probe.txt + gross.pem
+
+ Was hier zu sehen ist:
+   * example.com ueber TLS 1.3 geladen, Kette geprueft, Inhalt angezeigt
+   * abgelaufenes / falsch benanntes / selbst ausgestelltes Zertifikat und
+     ein http-Server auf einem https-Port -> jeweils sauber ABGELEHNT
+   * derselbe HTTP-Parser wie im Kernel (Adressgleichheit geprueft)
+   * Messung: Handshake, Heap-Spitze, Durchsatz (mit und ohne TLS)
+
+ Vollstaendige Einordnung: docs/tls-verbindung.md
+=============================================================================
+
+   Compiling speed_os v0.1.0 (C:\Users\maxim\Programmieren\Programme\SpeedOs)
+    Finished `test` profile [optimized + debuginfo] target(s) in 12.58s
+     Running tests\netz_https.rs (target\x86_64-unknown-none\debug\deps\netz_https-6d1858f7fb0d53e9)
+BdsDxe: loading Boot0001 "UEFI QEMU HARDDISK QM00001 " from PciRoot(0x0)/Pci(0x1,0x1)/Ata(Primary,Master,0x0)
+BdsDxe: starting Boot0001 "UEFI QEMU HARDDISK QM00001 " from PciRoot(0x0)/Pci(0x1,0x1)/Ata(Primary,Master,0x0)
+[MEM] NX-Bit (EFER.NXE) aktiv — nicht ausfuehrbare Seiten sind moeglich.
+WARNUNG: Scancode-Queue noch nicht initialisiert
+[ZEIT] TSC kalibriert: 4192,861 MHz (Kontrollmessung weicht 5 Promille ab, Dauer 208 ms, invariant laut CPUID: ja)
+[ZEIT] RTC gelesen: 29.07.2026 21:32:02 (zunaechst als UTC gedeutet — die RTC-Zone kommt aus den Einstellungen)
+[ZUFALL] RDSEED: ja, RDRAND: ja — Start mit 134 von 256 Bit.
+[ZUFALL] Noch nicht gesaet — es fehlen 122 Bit aus Interrupt-Jitter. `zufall` zeigt den Stand.
+[ATA] Boot-Laufwerk (Primary Master): 'QEMU HARDDISK', 51328 Sektoren = 25 MiB [schreibgeschuetzt]
+[ATA] Primary Slave: kein Laufwerk (das Geraet ist nicht bereit)
+[ATA] FAT-Laufwerk (Secondary Master): 'QEMU HARDDISK', 67064 Sektoren = 32 MiB [schreibgeschuetzt]
+[PCI] 7 Geraet(e) gefunden.
+[PCI]   00:00.0 8086:1237 Host-Bridge
+[PCI]   00:01.0 8086:7000 ISA-Bridge
+[PCI]   00:01.1 8086:7010 Massenspeicher (IDE)
+[PCI]   00:01.3 8086:7113 Bridge
+[PCI]   00:02.0 1af4:1001 Massenspeicher
+[PCI]   00:03.0 1234:1111 Grafik
+[PCI]   00:04.0 1af4:1000 Netzwerk
+[virtio-blk] Bereit: 131072 Sektoren = 64 MiB, Queue-Groesse 256, Flush ja (I/O-Basis 0xc000).
+[virtio-net] Bereit: MAC 52:54:00:12:34:56, RX-Queue 256 (16 Puffer), TX-Queue 256, Header 10 Byte, IRQ 11 (I/O 0xc080).
+[PLATTE] SpeedFS auf /platte gemountet (61 MiB frei von 63 MiB).
+Daten-Platte eingehaengt: /platte (61 MiB frei von 63 MiB)
+[programme] /platte/programme/holes geschrieben (964056 Byte).
+[programme] 1 Programm(e) nach /platte/programme installiert.
+[ca] Vertrauensanker /platte/system/ca-bundle.pem ist aktuell (186446 Byte).
+[SCHED] Praemptiver Round-Robin aktiv: Zeitscheibe 5 Ticks (~20 ms), Kernel-Prozess ist PID 0.
+[dhcp] Lease bezogen: IP 10.0.2.15, Maske 255.255.255.0, Gateway 10.0.2.2, DNS 10.0.2.3, 86400 s.
+9 Test(s) werden ausgefuehrt
+netz_https::test_abgelaufenes_zertifikat...	[ZUFALL] gesaet: 1387 Bit Entropie beisammen (Schwelle 256).
+[SCHED] PID 1 'holes' eingeplant (Slot 1) — laeuft ab dem naechsten Tick.
+[elf] '/platte/programme/holes' geladen: PID 1, 339 Frames, 2 Argument(e).
+[holes] Tls(InvalidCertificate(ExpiredContext { time: UnixTime(1785360722), not_after: UnixTime(1428883199) }))
+[SCHED] PID 1 'holes' abgeraeumt: mit Fehlercode beendet (Code 4), 261576 us CPU, 0 Praemptionen, 371445 Syscalls.
+[handles] 1 Socket(s)/Pipe-Ende(n) beim Prozess-Ende automatisch geschlossen.
+  === FEHLERFALL: abgelaufenes Zertifikat ===
+  | holes: https://expired.badssl.com:443/
+  |   Vertrauensanker: 119 Wurzeln uebernommen (von 119 gelesen, 0 verworfen) aus /platte/system/ca-bundle.pem
+  |   IP: 104.154.89.105
+  | 
+  | VERBINDUNG ABGELEHNT (abgelaufen).
+  | ZERTIFIKAT ABGELAUFEN: Es galt nur bis UNIX-Sekunde 1428883199, jetzt ist es 1785360722. Abgebrochen.
+  | 
+  | Es gibt keinen Schalter, der diese Pruefung uebergeht.
+  === Ende (Prozess: Some(Beendet(4))) ===
+  OK: https://expired.badssl.com/ -> abgelehnt (abgelaufen).
+[ok]
+netz_https::test_ausgehandelte_parameter_sichtbar...	[SCHED] PID 2 'holes' eingeplant (Slot 1) — laeuft ab dem naechsten Tick.
+[elf] '/platte/programme/holes' geladen: PID 2, 339 Frames, 3 Argument(e).
+[SCHED] PID 2 'holes' abgeraeumt: erfolgreich beendet (Code 0), 76869 us CPU, 0 Praemptionen, 118917 Syscalls.
+[handles] 1 Socket(s)/Pipe-Ende(n) beim Prozess-Ende automatisch geschlossen.
+  BEWEIS> TLS: TLS 1.3 / TLS13_AES_128_GCM_SHA256 — Handshake in 28 ms (TCP 26 ms)
+  BEWEIS> [0] Server   example.com
+  BEWEIS> [1] Zwischen  Cloudflare TLS Issuing ECC CA 3
+[ok]
+netz_https::test_falscher_hostname...	[SCHED] PID 3 'holes' eingeplant (Slot 1) — laeuft ab dem naechsten Tick.
+[elf] '/platte/programme/holes' geladen: PID 3, 339 Frames, 2 Argument(e).
+[holes] Tls(InvalidCertificate(NotValidForNameContext { expected: DnsName("wrong.host.badssl.com"), presented: ["DnsName(\"*.badssl.com\")", "DnsName(\"badssl.com\")"] }))
+[SCHED] PID 3 'holes' abgeraeumt: mit Fehlercode beendet (Code 4), 272478 us CPU, 0 Praemptionen, 309126 Syscalls.
+[handles] 1 Socket(s)/Pipe-Ende(n) beim Prozess-Ende automatisch geschlossen.
+  === FEHLERFALL: falscher Hostname ===
+  | holes: https://wrong.host.badssl.com:443/
+  |   Vertrauensanker: 119 Wurzeln uebernommen (von 119 gelesen, 0 verworfen) aus /platte/system/ca-bundle.pem
+  |   IP: 104.154.89.105
+  | 
+  | VERBINDUNG ABGELEHNT (falscher-hostname).
+  | FALSCHER HOSTNAME: Das Zertifikat nennt diesen Servernamen nicht. Genau so sieht es aus, wenn jemand die Verbindung umleitet. Abgebrochen.
+  | 
+  | Es gibt keinen Schalter, der diese Pruefung uebergeht.
+  === Ende (Prozess: Some(Beendet(4))) ===
+  OK: https://wrong.host.badssl.com/ -> abgelehnt (falscher-hostname).
+[ok]
+netz_https::test_kein_tls_auf_der_gegenseite...	[SCHED] PID 4 'holes' eingeplant (Slot 1) — laeuft ab dem naechsten Tick.
+[elf] '/platte/programme/holes' geladen: PID 4, 339 Frames, 2 Argument(e).
+[holes] HandshakeAbgebrochen
+[SCHED] PID 4 'holes' abgeraeumt: mit Fehlercode beendet (Code 4), 6150 us CPU, 0 Praemptionen, 1076 Syscalls.
+[handles] 1 Socket(s)/Pipe-Ende(n) beim Prozess-Ende automatisch geschlossen.
+  === FEHLERFALL: https gegen einen http-Server ===
+  | holes: https://10.0.2.2:8000/
+  |   Vertrauensanker: 119 Wurzeln uebernommen (von 119 gelesen, 0 verworfen) aus /platte/system/ca-bundle.pem
+  |   IP: 10.0.2.2
+  | 
+  | VERBINDUNG ABGELEHNT (handshake-abgebrochen).
+  | Die Gegenstelle hat die Verbindung mitten im TLS-Handshake geschlossen. Typisch, wenn dort gar kein TLS lauscht (z. B. ein http-Server auf dem Port) oder eine Zwischenstelle dazwischenfunkt.
+  | 
+  | Es gibt keinen Schalter, der diese Pruefung uebergeht.
+  === Ende (Prozess: Some(Beendet(4))) ===
+[ok]
+netz_https::test_meilenstein_echte_https_seite...	[SCHED] PID 5 'holes' eingeplant (Slot 1) — laeuft ab dem naechsten Tick.
+[elf] '/platte/programme/holes' geladen: PID 5, 339 Frames, 3 Argument(e).
+[SCHED] PID 5 'holes' abgeraeumt: erfolgreich beendet (Code 0), 76211 us CPU, 0 Praemptionen, 120724 Syscalls.
+[handles] 1 Socket(s)/Pipe-Ende(n) beim Prozess-Ende automatisch geschlossen.
+  === MEILENSTEIN: holes https://example.com/ --info ===
+  | holes: https://example.com:443/
+  |   Vertrauensanker: 119 Wurzeln uebernommen (von 119 gelesen, 0 verworfen) aus /platte/system/ca-bundle.pem
+  |   IP: 104.20.23.154
+  |   TLS: TLS 1.3 / TLS13_AES_128_GCM_SHA256 — Handshake in 30 ms (TCP 25 ms)
+  | 
+  |   === Zertifikatskette (4 Glieder, geprueft und angenommen) ===
+  |   [0] Server   example.com
+  |       gueltig 1780263552 .. 1788039686 (UNIX-Sekunden)
+  |       1003 Byte DER
+  |   [1] Zwischen  Cloudflare TLS Issuing ECC CA 3
+  |       gueltig 1748548185 .. 2063908184 (UNIX-Sekunden)
+  |       742 Byte DER
+  |   [2] Zwischen  SSL.com TLS Transit ECC CA R2
+  |       gueltig 1666371743 .. 2139411742 (UNIX-Sekunden)
+  |       824 Byte DER
+  |   [3] Zwischen  SSL.com TLS ECC Root CA 2022
+  |       gueltig 1754006400 .. 1861919999 (UNIX-Sekunden)
+  |       1090 Byte DER
+  |   Die Wurzel selbst kommt aus dem Vertrauensanker und steht nicht in der Kette.
+  | 
+  | HTTP 200 OK
+  |   Date: Wed, 29 Jul 2026 21:32:04 GMT
+  |   Content-Type: text/html
+  |   Transfer-Encoding: chunked
+  |   Connection: close
+  |   Server: cloudflare
+  |   last-modified: Tue, 21 Jul 2026 07:16:00 GMT
+  |   allow: GET, HEAD
+  |   Accept-Ranges: bytes
+  |   Age: 7664
+  |   cf-cache-status: HIT
+  |   CF-RAY: a22f3bf12ea46ede-CDG
+  | --- Rumpf: 559 Byte (roh 868 Byte in 31 ms) ---
+  | <!doctype html><html lang="en"><head><title>Example Domain</title><link rel="icon" href="data:,"><meta name="viewport" content="width=device-width, initial-scale=1"><style>body{background:#eee;width:60vw;margin:15vh auto;font-family:system-ui,sans-serif}h1{font-size:1.5em}div{opacity:0.8}a:link,a:visited{color:#348}</style></head><body><div><h1>Example Domain</h1><p>This domain is for use in documentation examples without needing permission. Avoid use in operations.</p><p><a href="https://iana.org/domains/example">Learn more</a></p></div></body></html>
+  | 
+  | Heap: Spitze 121160 Byte, jetzt 121160 von 131072 Byte gemappt.
+  === Ende (Prozess: Some(Beendet(0))) ===
+  OK: example.com ueber TLS geladen und angezeigt.
+[ok]
+netz_https::test_messung_handshake_heap_durchsatz...	  === MESSUNG: TLS aus Ring 3 ===
+[SCHED] PID 6 'holes' eingeplant (Slot 1) — laeuft ab dem naechsten Tick.
+[elf] '/platte/programme/holes' geladen: PID 6, 339 Frames, 3 Argument(e).
+[SCHED] PID 6 'holes' abgeraeumt: erfolgreich beendet (Code 0), 78778 us CPU, 0 Praemptionen, 121990 Syscalls.
+[handles] 1 Socket(s)/Pipe-Ende(n) beim Prozess-Ende automatisch geschlossen.
+[SCHED] PID 7 'holes' eingeplant (Slot 1) — laeuft ab dem naechsten Tick.
+[elf] '/platte/programme/holes' geladen: PID 7, 339 Frames, 3 Argument(e).
+[SCHED] PID 7 'holes' abgeraeumt: erfolgreich beendet (Code 0), 76933 us CPU, 0 Praemptionen, 110516 Syscalls.
+[handles] 1 Socket(s)/Pipe-Ende(n) beim Prozess-Ende automatisch geschlossen.
+[SCHED] PID 8 'holes' eingeplant (Slot 1) — laeuft ab dem naechsten Tick.
+[elf] '/platte/programme/holes' geladen: PID 8, 339 Frames, 3 Argument(e).
+[SCHED] PID 8 'holes' abgeraeumt: erfolgreich beendet (Code 0), 76149 us CPU, 0 Praemptionen, 116064 Syscalls.
+[handles] 1 Socket(s)/Pipe-Ende(n) beim Prozess-Ende automatisch geschlossen.
+  klein (example.com):
+    tcp_ms=26 handshake_ms=29 uebertragung_ms=29 roh=868 rumpf=559 heap_spitze=121160 heap_belegt=121160 heap_gemappt=131072 protokoll=TLS 1.3 suite=TLS13_AES_128_GCM_SHA256
+    -> Durchsatz 18 KiB/s (559 Byte in 29 ms), Handshake 29 ms
+[SCHED] PID 9 'holes' eingeplant (Slot 1) — laeuft ab dem naechsten Tick.
+[elf] '/platte/programme/holes' geladen: PID 9, 339 Frames, 3 Argument(e).
+[SCHED] PID 9 'holes' abgeraeumt: erfolgreich beendet (Code 0), 65762 us CPU, 1 Praemptionen, 42076 Syscalls.
+[handles] 1 Socket(s)/Pipe-Ende(n) beim Prozess-Ende automatisch geschlossen.
+[SCHED] PID 10 'holes' eingeplant (Slot 1) — laeuft ab dem naechsten Tick.
+[elf] '/platte/programme/holes' geladen: PID 10, 339 Frames, 3 Argument(e).
+[SCHED] PID 10 'holes' abgeraeumt: erfolgreich beendet (Code 0), 52010 us CPU, 0 Praemptionen, 36683 Syscalls.
+[handles] 1 Socket(s)/Pipe-Ende(n) beim Prozess-Ende automatisch geschlossen.
+[SCHED] PID 11 'holes' eingeplant (Slot 1) — laeuft ab dem naechsten Tick.
+[elf] '/platte/programme/holes' geladen: PID 11, 339 Frames, 3 Argument(e).
+[SCHED] PID 11 'holes' abgeraeumt: erfolgreich beendet (Code 0), 49563 us CPU, 0 Praemptionen, 34328 Syscalls.
+[handles] 1 Socket(s)/Pipe-Ende(n) beim Prozess-Ende automatisch geschlossen.
+  gross (cacert.pem):
+    tcp_ms=9 handshake_ms=12 uebertragung_ms=32 roh=188407 rumpf=186446 heap_spitze=648616 heap_belegt=648616 heap_gemappt=830712 protokoll=TLS 1.3 suite=TLS13_AES_128_GCM_SHA256
+    -> Durchsatz 5689 KiB/s (186446 Byte in 32 ms), Handshake 12 ms
+  VERGLEICH ohne TLS (Kernel-Klient, LAN): 186446 Byte in 465 ms = 391 KiB/s
+[ok]
+netz_https::test_parser_ist_derselbe...	  Adressgleichheit geprueft: der Kernel ruft buchstaeblich die Funktion, die auch `holes` ruft.
+  Kernel-Transport (TCP): HTTP 200 , 21500 Byte Rumpf.
+[ok]
+netz_https::test_selbst_signiert_wird_abgelehnt...	[SCHED] PID 12 'holes' eingeplant (Slot 1) — laeuft ab dem naechsten Tick.
+[elf] '/platte/programme/holes' geladen: PID 12, 339 Frames, 2 Argument(e).
+[holes] Tls(InvalidCertificate(UnknownIssuer))
+[SCHED] PID 12 'holes' abgeraeumt: mit Fehlercode beendet (Code 4), 7702 us CPU, 0 Praemptionen, 430 Syscalls.
+[handles] 1 Socket(s)/Pipe-Ende(n) beim Prozess-Ende automatisch geschlossen.
+  === holes gegen den selbst signierten Testserver ===
+  | holes: https://10.0.2.2:8443/klein.txt
+  |   Vertrauensanker: 119 Wurzeln uebernommen (von 119 gelesen, 0 verworfen) aus /platte/system/ca-bundle.pem
+  |   IP: 10.0.2.2
+  | 
+  | VERBINDUNG ABGELEHNT (unbekannte-ca).
+  | UNBEKANNTE ZERTIFIZIERUNGSSTELLE: Die Kette endet nicht bei einer Wurzel aus /platte/system/ca-bundle.pem. Das ist der Normalfall bei einem selbst ausgestellten (self-signed) Zertifikat — und auch der Fall, in dem sich ein Angreifer selbst eines ausstellt. SpeedOS kann die beiden nicht unterscheiden und lehnt deshalb ab.
+  | 
+  | Es gibt keinen Schalter, der diese Pruefung uebergeht.
+  === Ende (Prozess: Some(Beendet(4))) ===
+  OK: selbst ausgestelltes Zertifikat abgelehnt, kein Byte Inhalt.
+[ok]
+netz_https::test_unbekannte_wurzel_internet...	[SCHED] PID 13 'holes' eingeplant (Slot 1) — laeuft ab dem naechsten Tick.
+[elf] '/platte/programme/holes' geladen: PID 13, 339 Frames, 2 Argument(e).
+[holes] Tls(InvalidCertificate(UnknownIssuer))
+[SCHED] PID 13 'holes' abgeraeumt: mit Fehlercode beendet (Code 4), 253839 us CPU, 0 Praemptionen, 300841 Syscalls.
+[handles] 1 Socket(s)/Pipe-Ende(n) beim Prozess-Ende automatisch geschlossen.
+  === FEHLERFALL: selbst ausgestellt (badssl) ===
+  | holes: https://self-signed.badssl.com:443/
+  |   Vertrauensanker: 119 Wurzeln uebernommen (von 119 gelesen, 0 verworfen) aus /platte/system/ca-bundle.pem
+  |   IP: 104.154.89.105
+  | 
+  | VERBINDUNG ABGELEHNT (unbekannte-ca).
+  | UNBEKANNTE ZERTIFIZIERUNGSSTELLE: Die Kette endet nicht bei einer Wurzel aus /platte/system/ca-bundle.pem. Das ist der Normalfall bei einem selbst ausgestellten (self-signed) Zertifikat — und auch der Fall, in dem sich ein Angreifer selbst eines ausstellt. SpeedOS kann die beiden nicht unterscheiden und lehnt deshalb ab.
+  | 
+  | Es gibt keinen Schalter, der diese Pruefung uebergeht.
+  === Ende (Prozess: Some(Beendet(4))) ===
+  OK: https://self-signed.badssl.com/ -> abgelehnt (unbekannte-ca).
+[SCHED] PID 14 'holes' eingeplant (Slot 1) — laeuft ab dem naechsten Tick.
+[elf] '/platte/programme/holes' geladen: PID 14, 339 Frames, 2 Argument(e).
+[holes] Tls(InvalidCertificate(UnknownIssuer))
+[SCHED] PID 14 'holes' abgeraeumt: mit Fehlercode beendet (Code 4), 248631 us CPU, 0 Praemptionen, 273311 Syscalls.
+[handles] 1 Socket(s)/Pipe-Ende(n) beim Prozess-Ende automatisch geschlossen.
+  === FEHLERFALL: nicht vertrauenswuerdige Wurzel (badssl) ===
+  | holes: https://untrusted-root.badssl.com:443/
+  |   Vertrauensanker: 119 Wurzeln uebernommen (von 119 gelesen, 0 verworfen) aus /platte/system/ca-bundle.pem
+  |   IP: 104.154.89.105
+  | 
+  | VERBINDUNG ABGELEHNT (unbekannte-ca).
+  | UNBEKANNTE ZERTIFIZIERUNGSSTELLE: Die Kette endet nicht bei einer Wurzel aus /platte/system/ca-bundle.pem. Das ist der Normalfall bei einem selbst ausgestellten (self-signed) Zertifikat — und auch der Fall, in dem sich ein Angreifer selbst eines ausstellt. SpeedOS kann die beiden nicht unterscheiden und lehnt deshalb ab.
+  | 
+  | Es gibt keinen Schalter, der diese Pruefung uebergeht.
+  === Ende (Prozess: Some(Beendet(4))) ===
+  OK: https://untrusted-root.badssl.com/ -> abgelehnt (unbekannte-ca).
+[ok]

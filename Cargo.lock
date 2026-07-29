@@ -165,11 +165,16 @@ dependencies = [
  "noto-sans-mono-bitmap",
  "pc-keyboard",
  "pic8259",
+ "speedhttp",
  "spin 0.5.2",
  "uart_16550",
  "volatile 0.2.7",
  "x86_64",
 ]
+
+[[package]]
+name = "speedhttp"
+version = "0.1.0"
 
 [[package]]
 name = "spin"

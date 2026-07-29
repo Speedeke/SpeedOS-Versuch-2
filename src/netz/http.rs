@@ -1,360 +1,93 @@
-// netz/http.rs — Ein einfacher HTTP/1.1-Client über die Socket-API
+// netz/http.rs — Der HTTP-Client des KERNELS: Transport über die Socket-API
 //
-// HTTP ist die erste echte ANWENDUNG auf unserem TCP: ein Textprotokoll aus
-// einer Anfragezeile, Kopfzeilen, einer Leerzeile und einem Rumpf.
+// ==========================================================================
+// SEIT SERIE 7, TEIL 4 STEHT DER PARSER NICHT MEHR HIER
 //
-//   GET /pfad HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n
-//   HTTP/1.1 200 OK\r\nContent-Length: 42\r\n\r\n<42 Bytes Rumpf>
+// Die reine Protokoll-Logik (URL zerlegen, Antwort in Kopf und Rumpf
+// zerlegen, chunked dekodieren, Anfrage bauen) ist in die eigene Kiste
+// `speedhttp/` umgezogen — ZEILE FUER ZEILE unveraendert. Was hier
+// zurueckgeblieben ist, ist genau das, was sie NICHT enthaelt: der
+// TRANSPORT. DNS auflösen, Socket öffnen, verbinden, pumpen, Bytes
+// einsammeln.
 //
-// Zwei Arten, die Rumpf-Länge zu bestimmen, beide beherrschen wir:
-//   * `Content-Length: N` — genau N Bytes.
-//   * `Transfer-Encoding: chunked` — eine Folge von Häppchen, jedes mit einer
-//     HEX-Längenzeile davor; ein Häppchen der Länge 0 beendet den Rumpf.
-//   * (Fehlt beides: bis zum Verbindungsende — der HTTP/1.0-Stil, den wir mit
-//     `Connection: close` ohnehin erzwingen.)
+// WARUM: Weil es einen zweiten Transport gibt. `userland/holes` fährt
+// denselben Parser über einen TLS-Strom in Ring 3 (Serie 7, Teil 4). Ein
+// Parser, der beides bedient, ohne angefasst zu werden, ist der Beweis, dass
+// die Schichtgrenze an der richtigen Stelle liegt.
 //
-// WEITERLEITUNGEN (3xx + `Location`) folgen wir bis zu einer kleinen Grenze;
-// die Auflösung relativer Ziele ist eine reine, getestete Funktion.
+// DER BELEG STEHT UNTEN: Die `#[test_case]`-Tests am Ende dieser Datei sind
+// dieselben wie in Serie 5. Sie prüfen jetzt den Code in `speedhttp` — über
+// das `pub use` gleich hier drunter, ohne eine einzige geänderte Zeile.
 //
-// NUR http:// — https/TLS ist BEWUSST VERTAGT (es braucht geprüfte Krypto,
-// siehe docs/serie5-netzwerk.md Abschnitt d). Eine https-URL wird deshalb
-// sauber mit `TlsNichtUnterstuetzt` abgelehnt, nie halbherzig versucht.
-//
+// ==========================================================================
 // Der Netz-Teil nutzt AUSSCHLIESSLICH die Socket-API (netz::socket) — kein
 // Griff in tcp::Verbindung. Genau dafür ist die Fassade da.
+//
+// NUR http:// — dieser Klient hier bekommt KEIN TLS, und das ist Absicht:
+// TLS lebt in Ring 3 (docs/tls-entscheidung.md), damit ein Fehler in 30k
+// Zeilen Fremdcode einen Prozess trifft und nicht den Kernel. Eine
+// https-URL wird deshalb sauber mit `TlsNichtUnterstuetzt` abgelehnt; die
+// Shell verweist dann auf `starte holes <url>`.
 
 use super::dns::{self, DnsFehler};
 use super::socket::{self, Handle, SocketFehler, SocketTyp, Verbindungszustand};
 use super::Ipv4;
-use alloc::format;
-use alloc::string::{String, ToString};
+use alloc::string::ToString;
 use alloc::vec::Vec;
 
-/// Obergrenze für eine Antwort (Schutz gegen endlose Downloads).
-pub const MAX_ANTWORT: usize = 1024 * 1024;
+/// DER PARSER — unveraendert, nur woanders zu Hause (siehe Kopfkommentar).
+///
+/// Das `pub use` haelt jede bisherige Verwendung am Leben:
+/// `http::Antwort`, `http::url_parsen`, `http::HttpFehler::KaputterKopf` …
+/// heissen weiterhin genau so.
+pub use speedhttp::*;
+
 /// Zeitlimit für Verbindungsaufbau + Transfer.
 const TIMEOUT_MS: u64 = 15_000;
-/// So vielen Weiterleitungen folgen wir höchstens.
-pub const MAX_WEITERLEITUNGEN: u32 = 5;
 
-/// Fehler des HTTP-Clients.
+/// Was beim HOLEN schiefgehen kann — Protokoll ODER Transport.
+///
+/// ==========================================================================
+/// WARUM DAS EIN ZWEITER TYP IST UND NICHT MEHR EINER
+///
+/// Bis Serie 5 hatte `HttpFehler` auch die Varianten `Dns(..)` und
+/// `Socket(..)`. Die konnten nicht mit in die Parser-Kiste umziehen: Sie
+/// tragen Kernel-Typen, und ein Parser, der einen Socket-Fehler kennt, ist
+/// kein transportfreier Parser mehr — dann haette `userland/holes` ihn nicht
+/// benutzen koennen.
+///
+/// Also die saubere Trennung: `HttpFehler` = was am PROTOKOLL scheitert
+/// (kommt aus `speedhttp`), `KlientFehler` = das plus, was am WEG scheitert.
+/// Ring 3 hat sein eigenes Gegenstueck dazu (`libspeed::Fehler`) — und genau
+/// so soll es sein, denn dort ist der Weg ein anderer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HttpFehler {
-    UngueltigeUrl,
-    /// https:// — bewusst (noch) nicht unterstützt.
-    TlsNichtUnterstuetzt,
+pub enum KlientFehler {
+    /// Das Protokoll selbst (URL, Kopf, Rumpf, Weiterleitungen).
+    Http(HttpFehler),
     Dns(DnsFehler),
     Socket(SocketFehler),
-    /// Die Antwort hat keinen brauchbaren Kopf.
-    KaputterKopf,
-    /// Der Rumpf kam kürzer an als angekündigt (Content-Length/chunked).
-    UnvollstaendigeAntwort,
-    ZuGross,
-    ZuVieleWeiterleitungen,
 }
 
-impl HttpFehler {
+impl KlientFehler {
     pub fn meldung(&self) -> &'static str {
         match self {
-            HttpFehler::UngueltigeUrl => "ungueltige URL",
-            HttpFehler::TlsNichtUnterstuetzt => {
-                "https/TLS wird noch nicht unterstuetzt — bitte eine http://-Adresse"
-            }
-            HttpFehler::Dns(f) => f.meldung(),
-            HttpFehler::Socket(f) => f.meldung(),
-            HttpFehler::KaputterKopf => "die Antwort hat keinen gueltigen HTTP-Kopf",
-            HttpFehler::UnvollstaendigeAntwort => "die Antwort kam unvollstaendig an",
-            HttpFehler::ZuGross => "die Antwort ist zu gross",
-            HttpFehler::ZuVieleWeiterleitungen => "zu viele Weiterleitungen",
+            KlientFehler::Http(f) => f.meldung(),
+            KlientFehler::Dns(f) => f.meldung(),
+            KlientFehler::Socket(f) => f.meldung(),
         }
     }
-}
 
-// ---------------------------------------------------------------------------
-// URL — parsen und zusammensetzen (reine Logik)
-// ---------------------------------------------------------------------------
-
-/// Eine zerlegte http-URL.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Url {
-    pub host: String,
-    pub port: u16,
-    pub pfad: String,
-}
-
-impl Url {
-    /// Die URL wieder als Text (für Anzeige und Weiterleitungs-Ketten).
-    pub fn als_text(&self) -> String {
-        if self.port == 80 {
-            format!("http://{}{}", self.host, self.pfad)
-        } else {
-            format!("http://{}:{}{}", self.host, self.port, self.pfad)
-        }
+    /// Ist das die https-Absage? Die Shell haengt daran ihren Hinweis auf
+    /// `holes` — der Parser selbst kennt `holes` nicht und soll es auch nicht.
+    pub fn ist_tls_absage(&self) -> bool {
+        matches!(self, KlientFehler::Http(HttpFehler::TlsNichtUnterstuetzt))
     }
 }
 
-/// Zerlegt eine URL. Ohne Schema wird http:// angenommen; https:// wird
-/// sauber abgelehnt.
-pub fn url_parsen(text: &str) -> Result<Url, HttpFehler> {
-    let t = text.trim();
-    if t.is_empty() {
-        return Err(HttpFehler::UngueltigeUrl);
+impl From<HttpFehler> for KlientFehler {
+    fn from(fehler: HttpFehler) -> KlientFehler {
+        KlientFehler::Http(fehler)
     }
-    let rest = if let Some(r) = t.strip_prefix("http://") {
-        r
-    } else if t.starts_with("https://") {
-        return Err(HttpFehler::TlsNichtUnterstuetzt);
-    } else if t.contains("://") {
-        return Err(HttpFehler::UngueltigeUrl); // fremdes Schema
-    } else {
-        t // ohne Schema: http annehmen
-    };
-    if rest.is_empty() {
-        return Err(HttpFehler::UngueltigeUrl);
-    }
-    let (hostteil, pfad) = match rest.find('/') {
-        Some(i) => (&rest[..i], &rest[i..]),
-        None => (rest, "/"),
-    };
-    if hostteil.is_empty() {
-        return Err(HttpFehler::UngueltigeUrl);
-    }
-    let (host, port) = match hostteil.rfind(':') {
-        Some(i) => {
-            let p = hostteil[i + 1..]
-                .parse::<u16>()
-                .map_err(|_| HttpFehler::UngueltigeUrl)?;
-            (&hostteil[..i], p)
-        }
-        None => (hostteil, 80),
-    };
-    if host.is_empty() {
-        return Err(HttpFehler::UngueltigeUrl);
-    }
-    Ok(Url {
-        host: host.to_string(),
-        port,
-        pfad: pfad.to_string(),
-    })
-}
-
-/// Löst das Ziel einer Weiterleitung gegen die aktuelle URL auf: absolute
-/// http-URL, absoluter Pfad (/…) oder relativer Pfad. Reine, getestete Logik.
-pub fn naechste_url(basis: &Url, location: &str) -> Result<Url, HttpFehler> {
-    let ort = location.trim();
-    if ort.is_empty() {
-        return Err(HttpFehler::UngueltigeUrl);
-    }
-    if ort.starts_with("https://") {
-        return Err(HttpFehler::TlsNichtUnterstuetzt);
-    }
-    if ort.starts_with("http://") {
-        return url_parsen(ort);
-    }
-    if ort.starts_with('/') {
-        return Ok(Url {
-            host: basis.host.clone(),
-            port: basis.port,
-            pfad: ort.to_string(),
-        });
-    }
-    // Relativ: gegen das VERZEICHNIS des Basispfads auflösen.
-    let verzeichnis = match basis.pfad.rfind('/') {
-        Some(i) => &basis.pfad[..=i],
-        None => "/",
-    };
-    Ok(Url {
-        host: basis.host.clone(),
-        port: basis.port,
-        pfad: format!("{}{}", verzeichnis, ort),
-    })
-}
-
-// ---------------------------------------------------------------------------
-// Antwort — Kopf und Rumpf parsen (reine Logik)
-// ---------------------------------------------------------------------------
-
-/// Eine geparste HTTP-Antwort.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Antwort {
-    pub status: u16,
-    pub grund: String,
-    pub header: Vec<(String, String)>,
-    pub rumpf: Vec<u8>,
-}
-
-impl Antwort {
-    /// Kopfzeilen-Wert, Name OHNE Rücksicht auf Groß-/Kleinschreibung.
-    pub fn header_wert(&self, name: &str) -> Option<&str> {
-        header_wert_in(&self.header, name)
-    }
-    /// Sieht der Inhalt nach Text aus (dann kann die Shell ihn anzeigen)?
-    pub fn ist_text(&self) -> bool {
-        match self.header_wert("content-type") {
-            Some(t) => {
-                let t = t.to_ascii_lowercase();
-                t.starts_with("text/") || t.contains("json") || t.contains("xml")
-            }
-            None => true, // ohne Angabe: als Text versuchen
-        }
-    }
-}
-
-fn header_wert_in<'a>(header: &'a [(String, String)], name: &str) -> Option<&'a str> {
-    header
-        .iter()
-        .find(|(n, _)| n.eq_ignore_ascii_case(name))
-        .map(|(_, w)| w.as_str())
-}
-
-/// Findet das Kopf-Ende: liefert (Kopflänge, Rumpf-Start). Toleriert sowohl
-/// CRLFCRLF als auch (unsauberes) LFLF.
-fn kopf_ende(roh: &[u8]) -> Option<(usize, usize)> {
-    if roh.len() >= 4 {
-        for i in 0..=roh.len() - 4 {
-            if &roh[i..i + 4] == b"\r\n\r\n" {
-                return Some((i, i + 4));
-            }
-        }
-    }
-    if roh.len() >= 2 {
-        for i in 0..=roh.len() - 2 {
-            if &roh[i..i + 2] == b"\n\n" {
-                return Some((i, i + 2));
-            }
-        }
-    }
-    None
-}
-
-/// Zerlegt die Statuszeile ("HTTP/1.1 200 OK") in (Code, Grund).
-fn statuszeile_parsen(zeile: &str) -> Option<(u16, String)> {
-    let mut teile = zeile.trim().splitn(3, ' ');
-    let version = teile.next()?;
-    if !version.starts_with("HTTP/") {
-        return None;
-    }
-    let code = teile.next()?.trim().parse::<u16>().ok()?;
-    let grund = teile.next().unwrap_or("").trim().to_string();
-    Some((code, grund))
-}
-
-/// Liest die Kopfzeilen (ohne die Statuszeile). Robust gegen "Wirrwarr":
-/// beliebige Leerzeichen, Groß-/Kleinschreibung, Zeilen ohne Doppelpunkt
-/// (werden übersprungen) und bloße LF-Zeilenenden.
-fn header_parsen(kopf_text: &str) -> Vec<(String, String)> {
-    kopf_text
-        .lines()
-        .skip(1) // Statuszeile
-        .filter_map(|z| {
-            let z = z.trim_end_matches('\r');
-            if z.trim().is_empty() {
-                return None;
-            }
-            let (name, wert) = z.split_once(':')?; // ohne ':' -> überspringen
-            let name = name.trim();
-            if name.is_empty() {
-                return None;
-            }
-            Some((name.to_string(), wert.trim().to_string()))
-        })
-        .collect()
-}
-
-/// Sucht ab `start` das nächste Zeilenende und liefert
-/// (Index HINTER dem letzten Zeichen der Zeile, Index der nächsten Zeile).
-fn zeilenende(daten: &[u8], start: usize) -> Option<(usize, usize)> {
-    let mut i = start;
-    while i < daten.len() {
-        if daten[i] == b'\n' {
-            let ende = if i > start && daten[i - 1] == b'\r' { i - 1 } else { i };
-            return Some((ende, i + 1));
-        }
-        i += 1;
-    }
-    None
-}
-
-/// Dekodiert einen `Transfer-Encoding: chunked`-Rumpf. None, wenn die Folge
-/// unvollständig oder kaputt ist (dann fehlt der abschließende 0-Chunk).
-pub fn chunked_dekodieren(daten: &[u8]) -> Option<Vec<u8>> {
-    let mut aus = Vec::new();
-    let mut i = 0usize;
-    loop {
-        let (zeilen_ende, naechste) = zeilenende(daten, i)?;
-        let zeile = core::str::from_utf8(&daten[i..zeilen_ende]).ok()?;
-        // Chunk-Erweiterungen ("1a; foo=bar") abschneiden.
-        let hex = zeile.split(';').next()?.trim();
-        if hex.is_empty() {
-            return None;
-        }
-        let laenge = usize::from_str_radix(hex, 16).ok()?;
-        i = naechste;
-        if laenge == 0 {
-            return Some(aus); // letzter Chunk — etwaige Trailer ignorieren wir
-        }
-        let ende = i.checked_add(laenge)?;
-        if ende > daten.len() {
-            return None; // abgeschnitten
-        }
-        aus.extend_from_slice(&daten[i..ende]);
-        i = ende;
-        // Das CRLF hinter den Chunk-Daten überspringen.
-        let (_, nach_crlf) = zeilenende(daten, i)?;
-        i = nach_crlf;
-    }
-}
-
-/// Zerlegt eine komplette rohe HTTP-Antwort in Kopf + Rumpf.
-pub fn antwort_parsen(roh: &[u8]) -> Result<Antwort, HttpFehler> {
-    let (kopf_len, rumpf_start) = kopf_ende(roh).ok_or(HttpFehler::KaputterKopf)?;
-    let kopf_text = String::from_utf8_lossy(&roh[..kopf_len]);
-    let statuszeile = kopf_text.lines().next().ok_or(HttpFehler::KaputterKopf)?;
-    let (status, grund) = statuszeile_parsen(statuszeile).ok_or(HttpFehler::KaputterKopf)?;
-    let header = header_parsen(&kopf_text);
-    let roh_rumpf = &roh[rumpf_start..];
-
-    let chunked = header_wert_in(&header, "transfer-encoding")
-        .map(|w| w.to_ascii_lowercase().contains("chunked"))
-        .unwrap_or(false);
-
-    let rumpf = if chunked {
-        chunked_dekodieren(roh_rumpf).ok_or(HttpFehler::UnvollstaendigeAntwort)?
-    } else if let Some(laenge_text) = header_wert_in(&header, "content-length") {
-        let laenge: usize = laenge_text
-            .trim()
-            .parse()
-            .map_err(|_| HttpFehler::KaputterKopf)?;
-        if roh_rumpf.len() < laenge {
-            return Err(HttpFehler::UnvollstaendigeAntwort);
-        }
-        roh_rumpf[..laenge].to_vec()
-    } else {
-        // Weder Content-Length noch chunked: bis zum Verbindungsende.
-        roh_rumpf.to_vec()
-    };
-
-    Ok(Antwort {
-        status,
-        grund,
-        header,
-        rumpf,
-    })
-}
-
-/// Baut die GET-Anfrage (Host-Header ist in HTTP/1.1 Pflicht; `Connection:
-/// close` sagt dem Server, dass er nach der Antwort schließen soll — dann
-/// wissen wir sicher, wann der Rumpf zu Ende ist).
-pub fn anfrage_bauen(url: &Url) -> String {
-    let host = if url.port == 80 {
-        url.host.clone()
-    } else {
-        format!("{}:{}", url.host, url.port)
-    };
-    format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: SpeedOS/0.1\r\nAccept: */*\r\nConnection: close\r\n\r\n",
-        url.pfad, host
-    )
 }
 
 // ---------------------------------------------------------------------------
@@ -363,29 +96,29 @@ pub fn anfrage_bauen(url: &Url) -> String {
 
 /// Führt EINE Anfrage über einen frischen TCP-Socket aus und liefert die
 /// rohen Antwort-Bytes.
-fn roh_ueber_socket(h: Handle, url: &Url, ip: Ipv4) -> Result<Vec<u8>, HttpFehler> {
-    socket::verbinden(h, ip, url.port).map_err(HttpFehler::Socket)?;
+fn roh_ueber_socket(h: Handle, url: &Url, ip: Ipv4) -> Result<Vec<u8>, KlientFehler> {
+    socket::verbinden(h, ip, url.port).map_err(KlientFehler::Socket)?;
     let frist = crate::zeit::ms_seit_boot() + TIMEOUT_MS;
 
     // 1. Auf den Handshake warten (der Stack wird dabei gepumpt).
     loop {
         super::pumpen();
-        match socket::zustand(h).map_err(HttpFehler::Socket)? {
+        match socket::zustand(h).map_err(KlientFehler::Socket)? {
             Verbindungszustand::Verbunden => break,
             Verbindungszustand::Geschlossen => {
-                return Err(HttpFehler::Socket(SocketFehler::Abgebrochen))
+                return Err(KlientFehler::Socket(SocketFehler::Abgebrochen))
             }
             _ => {}
         }
         if crate::zeit::ms_seit_boot() >= frist {
-            return Err(HttpFehler::Socket(SocketFehler::Zeitueberschreitung));
+            return Err(KlientFehler::Socket(SocketFehler::Zeitueberschreitung));
         }
         crate::zeit::warte_auf_interrupt();
     }
 
     // 2. Anfrage senden.
     let anfrage = anfrage_bauen(url);
-    socket::senden(h, anfrage.as_bytes()).map_err(HttpFehler::Socket)?;
+    socket::senden(h, anfrage.as_bytes()).map_err(KlientFehler::Socket)?;
 
     // 3. Antwort lesen, bis die Gegenstelle schließt.
     let mut roh = Vec::new();
@@ -393,23 +126,23 @@ fn roh_ueber_socket(h: Handle, url: &Url, ip: Ipv4) -> Result<Vec<u8>, HttpFehle
     loop {
         super::pumpen();
         loop {
-            let n = socket::empfangen(h, &mut puffer).map_err(HttpFehler::Socket)?;
+            let n = socket::empfangen(h, &mut puffer).map_err(KlientFehler::Socket)?;
             if n == 0 {
                 break;
             }
             if roh.len() + n > MAX_ANTWORT {
-                return Err(HttpFehler::ZuGross);
+                return Err(KlientFehler::Http(HttpFehler::ZuGross));
             }
             roh.extend_from_slice(&puffer[..n]);
         }
         let fertig = matches!(
-            socket::zustand(h).map_err(HttpFehler::Socket)?,
+            socket::zustand(h).map_err(KlientFehler::Socket)?,
             Verbindungszustand::PeerHatGeschlossen | Verbindungszustand::Geschlossen
         );
         if fertig {
             // Den Rest aus dem Empfangspuffer nachholen.
             loop {
-                let n = socket::empfangen(h, &mut puffer).map_err(HttpFehler::Socket)?;
+                let n = socket::empfangen(h, &mut puffer).map_err(KlientFehler::Socket)?;
                 if n == 0 {
                     break;
                 }
@@ -426,9 +159,9 @@ fn roh_ueber_socket(h: Handle, url: &Url, ip: Ipv4) -> Result<Vec<u8>, HttpFehle
 }
 
 /// Holt die rohen Antwort-Bytes für eine URL (DNS + Socket + Abbau).
-fn roh_holen(url: &Url) -> Result<Vec<u8>, HttpFehler> {
-    let ip = dns::aufloesen(&url.host).map_err(HttpFehler::Dns)?;
-    let h = socket::oeffnen(SocketTyp::Tcp).map_err(HttpFehler::Socket)?;
+fn roh_holen(url: &Url) -> Result<Vec<u8>, KlientFehler> {
+    let ip = dns::aufloesen(&url.host).map_err(KlientFehler::Dns)?;
+    let h = socket::oeffnen(SocketTyp::Tcp).map_err(KlientFehler::Socket)?;
     let ergebnis = roh_ueber_socket(h, url, ip);
     // Immer sauber schließen — auch im Fehlerfall.
     let _ = socket::schliessen(h);
@@ -442,7 +175,7 @@ fn roh_holen(url: &Url) -> Result<Vec<u8>, HttpFehler> {
 
 /// DER Einstieg: holt eine http-URL und folgt dabei Weiterleitungen (bis
 /// `MAX_WEITERLEITUNGEN`). Liefert die ENDGÜLTIGE URL samt Antwort.
-pub fn holen(url_text: &str) -> Result<(Url, Antwort), HttpFehler> {
+pub fn holen(url_text: &str) -> Result<(Url, Antwort), KlientFehler> {
     let mut url = url_parsen(url_text)?;
     let mut verbleibend = MAX_WEITERLEITUNGEN;
     loop {
@@ -452,7 +185,7 @@ pub fn holen(url_text: &str) -> Result<(Url, Antwort), HttpFehler> {
         if (300..400).contains(&antwort.status) {
             if let Some(ort) = antwort.header_wert("location") {
                 if verbleibend == 0 {
-                    return Err(HttpFehler::ZuVieleWeiterleitungen);
+                    return Err(KlientFehler::Http(HttpFehler::ZuVieleWeiterleitungen));
                 }
                 let ort = ort.to_string();
                 url = naechste_url(&url, &ort)?;
@@ -467,6 +200,21 @@ pub fn holen(url_text: &str) -> Result<(Url, Antwort), HttpFehler> {
 // ---------------------------------------------------------------------------
 // Tests — laufen in QEMU über unser eigenes Test-Framework (cargo test)
 // ---------------------------------------------------------------------------
+//
+// ===========================================================================
+// DIESE TESTS SIND DER BEWEIS AUS SERIE 7, TEIL 4 — NICHT ANFASSEN
+//
+// Sie stammen unveraendert aus Serie 5, aus der Zeit, als der Parser noch in
+// dieser Datei stand. Heute pruefen sie den Code in `speedhttp/` (ueber das
+// `pub use speedhttp::*` oben), und zwar OHNE dass eine Zeile an ihnen
+// geaendert werden musste. Genau das ist die Aussage: Derselbe Parser
+// bedient den Kernel-Transport (TCP-Socket) und den Ring-3-Transport (TLS,
+// `userland/holes`).
+//
+// Wer sie anpasst, weil "die Kiste ja jetzt woanders liegt", loescht damit
+// den Beleg. Sie gehoeren bewusst hier her und nicht nach speedhttp/: Nur an
+// dieser Stelle sind sie der Nachweis, dass ein UMZUG stattgefunden hat.
+// ===========================================================================
 
 #[cfg(test)]
 mod tests {

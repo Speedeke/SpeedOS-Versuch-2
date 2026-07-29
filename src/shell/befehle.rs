@@ -1689,6 +1689,15 @@ impl Befehl for Hole {
                 konsole::set_color(Color::LightRed, Color::Black);
                 println!("Fehler: {}", fehler.meldung());
                 konsole::set_color(Color::LightGray, Color::Black);
+                // TLS gibt es in SpeedOS, aber in RING 3 und nicht im Kernel
+                // (docs/tls-entscheidung.md). Der Hinweis steht hier in der
+                // Bedienoberflaeche — der Parser kennt `holes` nicht.
+                if fehler.ist_tls_absage() {
+                    println!("Fuer https gibt es das Ring-3-Programm:");
+                    konsole::set_color(Color::LightCyan, Color::Black);
+                    println!("  starte holes {}", url_text);
+                    konsole::set_color(Color::LightGray, Color::Black);
+                }
                 return;
             }
         };

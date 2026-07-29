@@ -1,0 +1,26 @@
+# speedhttp — Der HTTP/1.1-Parser von SpeedOS, ohne jeden Transport
+#
+# Diese Kiste ist der PARSER aus Serie 5, aus `src/netz/http.rs` herausgeloest
+# und sonst nicht angefasst. Sie hat KEINE Abhaengigkeiten — weder auf den
+# Kernel noch auf libspeed, weder auf Sockets noch auf TLS. Sie kennt Bytes
+# und `&str`, mehr nicht.
+#
+# WARUM ES SIE GIBT (Serie 7, Teil 4): Derselbe Parser soll ueber ZWEI
+# Transporte laufen — im Kernel ueber einen nackten TCP-Socket (`hole`), in
+# Ring 3 ueber einen TLS-Strom (`holes`). Ein Parser, der das kann, ohne
+# angefasst zu werden, ist der Beweis, dass die Schichtung stimmt.
+#
+# Sie ist BEWUSST keine Verletzung der User-Space-Regel aus
+# userland/Cargo.toml ("kein `use speed_os::...`"): Verboten ist die
+# Abhaengigkeit vom KERNEL, nicht die von einer Protokoll-Bibliothek. `rustls`
+# benutzen beide Seiten schliesslich auch.
+
+[package]
+name = "speedhttp"
+version = "0.1.0"
+edition = "2021"
+description = "HTTP/1.1 parsen und bauen — transportfrei, no_std"
+
+# Absichtlich leer. Wer hier etwas eintraegt, sollte sich fragen, ob es
+# wirklich zum Zerlegen einer HTTP-Antwort noetig ist.
+[dependencies]

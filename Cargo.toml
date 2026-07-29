@@ -16,6 +16,12 @@ edition = "2021"
 exclude = ["boot", "userland"]
 
 [dependencies]
+# DER HTTP-PARSER (Serie 7, Teil 4) — herausgeloest aus src/netz/http.rs,
+# damit BEIDE Seiten ihn benutzen koennen: der Kernel ueber einen
+# TCP-Socket (`hole`) und `userland/holes` ueber einen TLS-Strom in Ring 3.
+# Die Kiste hat selbst keine Abhaengigkeiten und kennt keinen Transport.
+speedhttp = { path = "speedhttp" }
+
 # Die Kernel-Seite des Bootloaders (seit 0.11 aufgeteilt):
 # bootloader_api liefert entry_point!, BootInfo und die Config —
 # das Disk-Image baut das separate Host-Programm in boot/.

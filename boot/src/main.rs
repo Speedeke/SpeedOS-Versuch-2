@@ -277,6 +277,24 @@ fn main() {
         }
     }
 
+    // SPEEDOS_QMP=<port>: QEMUs Fernsteuerung auf 127.0.0.1:<port>.
+    //
+    // WOZU: Screenshots fuer den Devlog. Ein Bildschirmfoto von SpeedOS laesst
+    // sich sonst nur von Hand machen — mit QMP kann ein Skript Tasten
+    // schicken (`sendkey`) und den Bildschirm abziehen (`screendump`), und
+    // damit ist ein Meilenstein-Bild reproduzierbar statt einmalig.
+    // Standardmaessig AUS: ein offener Steuerport gehoert nicht in einen
+    // Testlauf. tools/live_qemu.ps1 hat denselben Schalter (-Qmp).
+    if let Ok(port) = std::env::var("SPEEDOS_QMP") {
+        if port.parse::<u16>().is_ok() {
+            qemu.arg("-qmp")
+                .arg(format!("tcp:127.0.0.1:{port},server,nowait"));
+            if !test_modus {
+                eprintln!("[Runner] SPEEDOS_QMP={port} — QEMU-Fernsteuerung offen.");
+            }
+        }
+    }
+
     // Die serielle Schnittstelle ist unser Debug-Lebensnerv:
     // immer ins Terminal spiegeln.
     qemu.arg("-serial").arg("stdio");

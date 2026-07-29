@@ -27,3 +27,11 @@ speedos-fat.img
 speedos-live.img
 # Die beschreibbare NVRAM-Kopie, die tools/live_qemu.ps1 pro QEMU-Lauf anlegt:
 speedos-live.vars.fd
+
+# Das selbst ausgestellte Testzertifikat von tools/tls_testserver.py.
+# Ein privater Schluessel gehoert nicht ins Repository — auch kein wertloser,
+# denn sonst gewoehnt man sich daran. Das Skript erzeugt ihn beim ersten Start.
+/tools/testcert/
+
+# Pythons Bytecode-Cache der Werkzeuge in tools/.
+/tools/__pycache__/

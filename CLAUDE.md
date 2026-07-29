@@ -283,6 +283,79 @@
   eigenen Allocator: Der `MutexGuard` aus einer `if let`-BEDINGUNG lebt bis
   zum ENDE DES BLOCKS — ein zweites `lock()` darin dreht sich fuer immer.
 
+## TLS-VERBINDUNG + EIN PARSER, ZWEI TRANSPORTE (Serie 7, Teil 4)
+- **MEILENSTEIN: `starte holes https://example.com/ --info` laeuft.** TLS 1.3
+  (`TLS13_AES_128_GCM_SHA256`) ueber die Socket-Syscalls, Kette gegen
+  /platte/system/ca-bundle.pem geprueft (119/119 Wurzeln), Hostname
+  abgeglichen, HTTP/1.1 darueber — aus Ring 3, eigener Adressraum.
+  Vollstaendig in docs/tls-verbindung.md.
+- **DER PARSER LIEGT JETZT IN `speedhttp/` UND HAT EINEN LEEREN
+  `[dependencies]`-BLOCK.** Die reine Protokoll-Logik aus `src/netz/http.rs`
+  (Url/Antwort/url_parsen/naechste_url/anfrage_bauen/antwort_parsen/
+  chunked_dekodieren) ist ZEILE FUER ZEILE dorthin umgezogen; der Kernel
+  re-exportiert sie mit `pub use speedhttp::*` und behaelt nur den TRANSPORT.
+  **REGEL: Die `#[test_case]`-Tests am Ende von src/netz/http.rs sind
+  unveraendert aus Serie 5 und duerfen NICHT angepasst werden** — sie sind der
+  Beweis, dass der Parser fuer TLS nicht angefasst werden musste. Zweiter
+  Beleg: `tests/netz_https.rs::test_parser_ist_derselbe` vergleicht die
+  FUNKTIONSADRESSEN. Wer `speedhttp` eine Abhaengigkeit gibt, zerstoert die
+  Aussage — das ist der Punkt der Kiste.
+- **`HttpFehler` (Protokoll) vs. `http::KlientFehler` (Protokoll + Weg):**
+  Die alten Varianten `Dns(..)`/`Socket(..)` konnten nicht mitziehen (sie
+  tragen Kernel-Typen, ein Parser mit Socket-Fehler waere kein transportfreier
+  Parser). Ring 3 hat sein eigenes Gegenstueck `libspeed::tls::TlsFehler`.
+  EINZIGE Ergaenzung am Parser: `anfrage_bauen_mit_host` — sie ruft das
+  ORIGINAL mit einer passend gefuellten `Url` (bei https gehoert `:443` nicht
+  in den Host-Kopf), baut also nichts nach.
+- **`libspeed::tls::TlsStrom` treibt `UnbufferedClientConnection` selbst.**
+  Nach aussen sieht er aus wie der `TcpStrom` darunter (`lesen`/`schreiben`,
+  blockierend) — nur deshalb merkt der HTTP-Parser nicht, worauf er sitzt.
+  BORROW-FALLE: `process_tls_records` LEIHT SICH den Eingangspuffer aus, und
+  der geliehene Zustand lebt bis zum ENDE DES `match`. Im
+  `BlockedHandshake`-Zweig direkt in denselben Puffer nachzulesen geht nicht;
+  `takt()` merkt sich deshalb nur eine `Aktion` und handelt danach.
+- **KEIN UMGEHUNGS-SCHALTER, und das ist eine Entscheidung.** Kein
+  `--unsicher`, kein `--zertifikat-egal`, kein „trotzdem fortfahren". Jeder
+  Pruefungsfehler beendet `holes` mit Exit 4 und einem deutschen Satz
+  (`TlsFehler::text()`); `kurz()` liefert das maschinenlesbare Schlagwort
+  (`unbekannte-ca`, `abgelaufen`, `falscher-hostname`, `uhr-unplausibel`,
+  `protokoll`, …). Ein Schalter wird benutzt, sobald es ihn gibt.
+- **ZWEI LEKTIONEN, die den Test fast wertlos gemacht haetten:**
+  **(1) `tls12` MUSS im `rustls-rustcrypto`-Feature stehen.** Ohne es gibt es
+  nur die drei TLS-1.3-Suiten (daher „3 Ciphersuites" in Teil 3), und jeder
+  Server ohne TLS 1.3 — u. a. SAEMTLICHE badssl.com-Endpunkte — antwortet mit
+  `HandshakeFailure`, BEVOR er ein Zertifikat schickt. Man haelt einen
+  Aushandlungs-Fehlschlag dann fuer eine bestandene Pruefung. Mit `tls12`
+  sind es neun. **(2) `openssl req -x509` erzeugt keinen tauglichen
+  Testfall:** Ein einzelnes selbst signierendes Zertifikat hat `CA:TRUE` und
+  kein `extendedKeyUsage=serverAuth`, ist also formal gar kein
+  Serverzertifikat; webpki lehnt es aus FORMGRUENDEN ab
+  (`InvalidCertificate(Other(..))`). `tools/tls_testserver.py` legt deshalb
+  eine echte Kette vor (eigene Mini-CA -> einwandfreies Serverzertifikat) —
+  erst dann lautet der Befund `UnknownIssuer` und der Test prueft die
+  VERTRAUENSKETTE statt der Formalien.
+- **TESTMETHODIK wie bei TCP:** Das HARTE Gate liegt auf dem lokalen
+  `tools/tls_testserver.py` (10.0.2.2:8443, muss IMMER abgelehnt werden); die
+  badssl.com-Laeufe (expired/wrong.host/self-signed/untrusted-root) sind
+  BERICHT und werden sauber uebersprungen, wenn kein Internet da ist.
+- **ZAHLEN:** Handshake 34–36 ms (example.com) bzw. 12–13 ms (curl.se);
+  Heap-SPITZE 121 160 B (kleine Seite) / 648 552 B (186-KiB-Datei; das
+  CA-Buendel liegt bewusst in `.bss`, nicht auf dem Heap, sonst misst die
+  Spitze eine Dateigroesse); Durchsatz 186 446 B in 29 ms = **6 278 KiB/s**.
+  **DIE WICHTIGE ZAHL: dieselbe Datei ohne TLS ueber den KERNEL-Klienten im
+  LAN schafft nur 406 KiB/s — TLS aus Ring 3 ist 15x SCHNELLER.**
+  Verschluesselung ist nicht der Engpass, das WARTEN war es: Der
+  Kernel-Klient wartet mit `zeit::warte_auf_interrupt()` (~ein Segment je
+  Tick), `holes` mit `abgeben()`. Der Wecken-Fix aus Serie 7, Teil 0 schlaegt
+  hier voll durch. ELF `holes` 949 984 B.
+- **NEUE LUECKE, ausdruecklich notiert: `close_notify` wird NICHT erzwungen.**
+  Schliesst die Gegenstelle die TCP-Verbindung ohne Abschiedsgruss, gilt der
+  Strom als beendet — von einem Truncation-Angriff nicht zu unterscheiden.
+  Erzwaenge man es, waere die halbe Welt unerreichbar (viele Server schliessen
+  bei `Connection: close` einfach). Was schuetzt, liegt eine Schicht hoeher:
+  Der HTTP-Parser prueft gegen `Content-Length` bzw. den 0-Chunk. Die
+  Luecken aus Teil 2 (keine Sperrlisten, kein CT, kein Pinning) bleiben.
+
 ## Platten-Sicherheits-Regel (Juli 2026)
 - Der ATA-Treiber weigert sich PER KONSTRUKTION, auf das Boot-Laufwerk
   zu schreiben: Das Feld `beschreibbar` ist privat, Laufwerke entstehen

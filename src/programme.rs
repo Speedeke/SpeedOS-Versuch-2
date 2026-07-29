@@ -96,6 +96,11 @@ pub static PROGRAMME: &[Programm] = &[
         elf: include_bytes!(concat!(env!("OUT_DIR"), "/tlsspike")),
     },
     Programm {
+        name: "holes",
+        beschreibung: "holes <url> [--info] [datei] — HTTPS: TLS-Handshake, gepruefte Kette, HTTP",
+        elf: include_bytes!(concat!(env!("OUT_DIR"), "/holes")),
+    },
+    Programm {
         name: "elternprobe",
         beschreibung: "elternprobe [ms] — startet ein Kind und wartet auf es (Ring 3)",
         elf: include_bytes!(concat!(env!("OUT_DIR"), "/elternprobe")),
@@ -292,11 +297,11 @@ mod tests {
     /// userland-Crate nicht — und zwar BEVOR jemand versucht, sie zu starten.
     #[test_case]
     fn test_eingebettete_programme_sind_gueltig() {
-        // Neun seit Serie 7, Teil 2 (`zertifikate` kam dazu). Die feste Zahl
-        // ist Absicht: Wer ein Programm ergaenzt, muss es an DREI Stellen tun
+        // Elf seit Serie 7, Teil 4 (`holes` kam dazu). Die feste Zahl ist
+        // Absicht: Wer ein Programm ergaenzt, muss es an DREI Stellen tun
         // (userland/Cargo.toml, build.rs, PROGRAMME) — dieser Test faengt
         // die vergessene dritte.
-        assert_eq!(PROGRAMME.len(), 10, "es sollen zehn Programme mitkommen");
+        assert_eq!(PROGRAMME.len(), 11, "es sollen elf Programme mitkommen");
         for programm in PROGRAMME {
             // Mit SPEEDOS_OHNE_USERLAND=1 gebaut? Dann gibt es nichts zu
             // pruefen — aber das ist der Notfall-Pfad, nicht der Normalfall.

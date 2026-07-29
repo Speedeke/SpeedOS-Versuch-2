@@ -5,6 +5,156 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### Serie 7, Teil 4: DIE ERSTE VERSCHLÜSSELTE VERBINDUNG
+
+```
+starte holes https://example.com/ --info
+
+  Vertrauensanker: 119 Wurzeln uebernommen (von 119 gelesen, 0 verworfen)
+  IP: 172.66.147.243
+  TLS: TLS 1.3 / TLS13_AES_128_GCM_SHA256 — Handshake in 36 ms (TCP 31 ms)
+
+  === Zertifikatskette (4 Glieder, geprueft und angenommen) ===
+  [0] Server   example.com
+  [1] Zwischen Cloudflare TLS Issuing ECC CA 3
+  [2] Zwischen SSL.com TLS Transit ECC CA R2
+  [3] Zwischen SSL.com TLS ECC Root CA 2022
+
+HTTP 200 OK
+<!doctype html>…<h1>Example Domain</h1>…
+```
+
+**Eigener Kernel, eigener TCP/IP-Stack, eigener Prozess in Ring 3 — und eine
+verschlüsselte Verbindung ins echte Internet.** Vollständig in
+`docs/tls-verbindung.md`.
+
+#### Der HTTP-Parser wurde nicht angefasst — strukturell, nicht behauptet
+
+Die reine Protokoll-Logik aus `src/netz/http.rs` (Serie 5) ist Zeile für Zeile
+in die neue Kiste **`speedhttp/`** umgezogen. Sie hat einen **leeren
+`[dependencies]`-Block**: kein `speed_os`, kein `libspeed`, kein Socket, kein
+TLS. Der Kernel benutzt sie über `pub use speedhttp::*` und behält nur den
+Transport; `holes` benutzt sie über einen TLS-Strom.
+
+Drei Belege statt einer Behauptung:
+
+1. **Die `#[test_case]`-Tests am Ende von `src/netz/http.rs` sind unverändert
+   aus Serie 5.** Sie prüfen heute den Code in `speedhttp` — ohne dass eine
+   Zeile an ihnen geändert werden musste. Ein Kommentar über dem Testmodul
+   sagt, dass sie deshalb nicht angefasst werden dürfen.
+2. `tests/netz_https.rs::test_parser_ist_derselbe` vergleicht die
+   **Funktionsadressen**: `http::antwort_parsen` **ist**
+   `speedhttp::antwort_parsen`, keine Kopie. Und dass
+   `assert_eq!(ueber_kernel, ueber_kiste)` überhaupt übersetzt, heißt, dass
+   `http::Antwort` und `speedhttp::Antwort` derselbe Typ sind.
+3. Angepasst wurde nur die **Transport-Schicht**: `HttpFehler` trug bis
+   Serie 5 auch `Dns(..)`/`Socket(..)` — Kernel-Typen, die nicht mitziehen
+   konnten. Daraus wurde `http::KlientFehler` (Protokoll **plus** Weg); Ring 3
+   hat mit `libspeed::tls::TlsFehler` sein eigenes Gegenstück, denn dort *ist*
+   der Weg ein anderer.
+
+Eine einzige Ergänzung: `anfrage_bauen_mit_host` (bei https gehört `:443`
+nicht in den Host-Kopf). Sie baut nichts nach, sondern ruft das Original mit
+einer passend gefüllten `Url` — kein Risiko, dass zwei Fassungen auseinander
+laufen.
+
+#### `libspeed::tls::TlsStrom` — die unbuffered-Zustandsmaschine
+
+Ohne `std` gibt es in rustls nur `UnbufferedClientConnection`: eine
+Zustandsmaschine, die man selbst dreht (`EncodeTlsData` → `TransmitTlsData` →
+`BlockedHandshake` → `WriteTraffic`/`ReadTraffic`). Nach außen sieht der
+`TlsStrom` aus wie der `TcpStrom` darunter — `lesen`/`schreiben`, blockierend.
+Genau deshalb merkt der HTTP-Parser nicht, worauf er sitzt.
+
+**Die Borrow-Falle:** `process_tls_records` *leiht sich den Eingangspuffer
+aus*, und der geliehene Zustand lebt bis zum Ende des `match`. Wer im
+`BlockedHandshake`-Zweig direkt in denselben Puffer nachliest, kommt am
+Borrow-Checker nicht vorbei. `takt()` merkt sich deshalb nur eine `Aktion`
+und handelt erst, wenn die Leihe vorbei ist.
+
+#### Fehler laut machen — und kein Umgehungs-Schalter
+
+| Fall | Gegenstelle | unsere Meldung |
+|---|---|---|
+| unbekannte CA (**hartes Gate**) | `10.0.2.2:8443`, eigene Test-CA | „UNBEKANNTE ZERTIFIZIERUNGSSTELLE …" |
+| abgelaufen | `expired.badssl.com` | „ZERTIFIKAT ABGELAUFEN: Es galt nur bis …" |
+| falscher Hostname | `wrong.host.badssl.com` | „FALSCHER HOSTNAME …" |
+| self-signed / fremde Wurzel | `self-signed.` / `untrusted-root.badssl.com` | „UNBEKANNTE ZERTIFIZIERUNGSSTELLE …" |
+| kein TLS dahinter | `10.0.2.2:8000` (http) | „PROTOKOLLFEHLER … spricht dort gar kein TLS." |
+| Uhr nachweislich falsch | — | „DIE UHR IST NACHWEISLICH FALSCH — deshalb wurde NICHT verbunden." |
+
+Jeder Fall endet mit Exit-Code 4 und einem vollständigen deutschen Satz.
+**Es gibt kein `--unsicher`, kein `--zertifikat-egal`, keinen „trotzdem
+fortfahren"-Dialog** — ein solcher Schalter wird benutzt, sobald es ihn gibt,
+und dann schützt TLS vor genau dem Angreifer nicht, der einen dazu bringt.
+
+#### Zwei Lektionen, die den Test fast wertlos gemacht hätten
+
+1. **Ohne `tls12` sieht man die Zertifikate nie.** `rustls-rustcrypto` liefert
+   ohne dieses Feature nur die drei TLS-1.3-Suiten (daher „3 Ciphersuites" in
+   Teil 3). Sämtliche badssl-Endpunkte können **kein** TLS 1.3 und antworten
+   mit `HandshakeFailure`, *bevor* sie ein Zertifikat schicken — man hält den
+   Aushandlungs-Fehlschlag dann für eine bestandene Prüfung. Mit `tls12` sind
+   es neun Suiten, und die Befunde werden aussagekräftig.
+2. **`openssl req -x509` erzeugt keinen tauglichen Testfall.** Ein einzelnes
+   selbst signierendes Zertifikat hat `CA:TRUE` und kein
+   `extendedKeyUsage=serverAuth`, ist also formal gar kein Serverzertifikat;
+   webpki lehnt es aus **Formgründen** ab (`InvalidCertificate(Other(..))`).
+   `tools/tls_testserver.py` legt deshalb jetzt eine echte Kette vor: eigene
+   Mini-CA → formal einwandfreies Serverzertifikat. Erst damit lautet der
+   Befund `UnknownIssuer`, und erst dann prüft der Test die Vertrauenskette
+   statt der Formalien.
+
+#### Zahlen (QEMU/WHPX, TLS 1.3, `TLS13_AES_128_GCM_SHA256`)
+
+| Messgröße | Wert |
+|---|---|
+| TLS-Handshake, example.com | **34–36 ms** (TCP allein 31–33 ms) |
+| TLS-Handshake, curl.se | **12–13 ms** (TCP allein 8–10 ms) |
+| Heap-Spitze, 559-Byte-Seite | **121 160 Byte** |
+| Heap-Spitze, 186-KiB-Datei | **648 552 Byte** |
+| Durchsatz, 186 446 Byte über TLS | **6 278 KiB/s** (29 ms) |
+| dieselbe Datei **ohne** TLS, Kernel-Klient, LAN | **406 KiB/s** (448 ms) |
+| ELF `holes` | 949 984 Byte |
+| Wurzeln | 119 von 119 |
+
+**Die vorletzte Zeile ist die interessante: TLS aus Ring 3 ist 15× schneller
+als plain TCP aus dem Kernel** — bei derselben Datei, und der lokale Server
+ist der nähere. Verschlüsselung ist nicht der Engpass; das *Warten* war es.
+Der Kernel-Klient wartet mit `zeit::warte_auf_interrupt()` und holt im
+Wesentlichen ein Segment je Tick; `holes` wartet mit `abgeben()` und bekommt
+die CPU zurück, sobald Daten da sind. **Der Wecken-Fix aus Serie 7, Teil 0
+schlägt hier voll durch** — dieselben 4 ms Weck-Latenz, die den
+Pipe-Durchsatz auf 199 KiB/s gedrückt hatten.
+
+Ehrlich dazu: Die TLS-Zahl misst eine Internet-Verbindung durch slirp, die
+Vergleichszahl einen lokalen Server. Der Vergleich taugt trotzdem, weil die
+Verzerrung in die *andere* Richtung geht.
+
+#### Was NICHT dabei ist (unverändert aus `docs/tls-vertrauen.md`)
+
+Keine Sperrlisten (weder OCSP noch CRL), keine Certificate Transparency, kein
+Pinning, keine Benutzer-CAs. Neu dazu: **`close_notify` wird nicht
+erzwungen** — schließt die Gegenstelle ohne Abschiedsgruß, gilt der Strom als
+beendet, und das ist von einem Truncation-Angriff nicht zu unterscheiden. Was
+davor schützt, liegt eine Schicht höher: Der HTTP-Parser prüft gegen
+`Content-Length` bzw. den 0-Chunk. Der Anbieter ist weiterhin **0.0.2-alpha**.
+
+#### Neu / geändert
+
+* **`speedhttp/`** — neue Kiste, der Parser aus Serie 5, ohne Abhängigkeiten.
+* **`userland/holes`** — `holes <url> [--info] [--still] [zieldatei]`,
+  elftes mitgeliefertes Programm.
+* **`libspeed::tls`** — `TlsStrom`, `TlsFehler` (deutsche Meldungen),
+  `SpeedUhr`, `wurzeln_laden`, `konfig_bauen`.
+* **`tests/netz_https.rs`** — 9 Tests: Meilenstein, ausgehandelte Parameter,
+  fünf Fehlerfälle, Parser-Beweis, Messung.
+* **`tools/tls_testserver.py`** — HTTPS-Server mit eigener Mini-CA; das harte
+  Gate, das nicht vom Internet abhängt.
+* **`hole`** (Shell) verweist bei https jetzt auf `starte holes <url>`.
+* `tests/netz_stress.rs` auf `KlientFehler` umgestellt (Einteilung
+  unverändert; 4/4 Tests, Phase 1 weiterhin 100 %).
+
 ### Serie 7, Teil 3: TLS-MACHBARKEIT — der Spike läuft
 
 Ein Prompt, der mit „geht nicht" hätte enden dürfen. **Es geht.**

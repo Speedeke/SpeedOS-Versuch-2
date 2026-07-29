@@ -21,6 +21,16 @@ description = "Die Standard-Bibliothek der SpeedOS-Programme (no_std)"
 [workspace]
 
 [dependencies]
+# DER HTTP-PARSER (Serie 7, Teil 4). Das ist DERSELBE Code, den der Kernel
+# in `src/netz/http.rs` benutzt — herausgeloest, damit `holes` ihn ueber TLS
+# fahren kann, ohne dass an ihm etwas geaendert werden musste.
+#
+# Und nein, das bricht die Regel oben nicht: Verboten ist die Abhaengigkeit
+# vom KERNEL (`speed_os`), nicht die von einer Protokoll-Bibliothek.
+# `speedhttp` hat selbst keine Abhaengigkeiten, kennt keinen Syscall und
+# keinen Socket — es zerlegt Bytes.
+speedhttp = { path = "../speedhttp" }
+
 # Der Heap-Allocator des User-Space (Serie 7, Teil 3) — dieselbe Kiste, die
 # auch der Kernel benutzt (src/allocator.rs). Sie ist no_std und kann
 # `extend`, und genau das braucht ein Heap, der auf Anforderung waechst.
@@ -34,7 +44,15 @@ spin = { version = "0.9", default-features = false, features = ["spin_mutex"] }
 # aws-lc-rs/ring-Anbieter ab (beide bringen C-Code mit). Der Anbieter kommt
 # aus RustCrypto — reines Rust, no_std.
 rustls = { version = "0.23", default-features = false, features = ["custom-provider", "tls12"] }
-rustls-rustcrypto = { version = "0.0.2-alpha", default-features = false, features = ["alloc"] }
+# `tls12` GEHOERT DAZU, und das ist eine in Teil 4 teuer gelernte Lektion:
+# Ohne dieses Feature liefert der Anbieter NUR die drei TLS-1.3-Suiten (so
+# war es in Teil 3, daher die Zahl 3 in der Bestandsaufnahme). Ein Server,
+# der kein TLS 1.3 kann — und davon gibt es reichlich, u. a. saemtliche
+# badssl.com-Testendpunkte — antwortet dann mit `HandshakeFailure`, BEVOR er
+# ueberhaupt ein Zertifikat schickt. Man bekommt also nie zu sehen, was mit
+# dem Zertifikat los ist, und haelt einen Aushandlungs-Fehlschlag faelschlich
+# fuer eine bestandene Pruefung. Mit `tls12` sind es neun Suiten.
+rustls-rustcrypto = { version = "0.0.2-alpha", default-features = false, features = ["alloc", "tls12"] }
 # getrandom kennt x86_64-unknown-none nicht (und kann es nicht — es weiss
 # nichts von SpeedOS). Das `custom`-Backend ist genau dafuer da: Wir liefern
 # die Implementierung (libspeed::tls, ueber Syscall 12).
@@ -94,6 +112,14 @@ path = "src/bin/zertifikate.rs"
 [[bin]]
 name = "tlsspike"
 path = "src/bin/tlsspike.rs"
+
+# DER MEILENSTEIN VON SERIE 7 (Teil 4): eine echte verschluesselte
+# Verbindung. TLS-Handshake ueber die Socket-Syscalls, Kette gegen den
+# Vertrauensanker geprueft, Hostname abgeglichen, dann HTTP/1.1 mit dem
+# UNVERAENDERTEN Parser aus Serie 5 darueber.
+[[bin]]
+name = "holes"
+path = "src/bin/holes.rs"
 
 # panic = "abort" ist Pflicht: Abwickeln (unwinding) bräuchte eine
 # Personality-Funktion und Landing Pads — beides gibt es ohne std nicht.
