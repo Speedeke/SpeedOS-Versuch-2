@@ -353,7 +353,7 @@ fn einspeisen_wert(quelle: Quelle, wert: u64) {
     }
     // Anrechnungs-Takt (der PIT nur jede 8. Probe).
     let takt = quelle.anrechnung_jede();
-    if takt > 1 && proben % takt != 0 {
+    if takt > 1 && !proben.is_multiple_of(takt) {
         return;
     }
     bits_gutschreiben(quelle.bits_je_probe());
@@ -649,8 +649,8 @@ impl Drbg {
     /// bestehenden Zustand nicht verschlechtern. Sie traegt dann eben nichts
     /// bei, statt etwas kaputtzumachen.
     fn saeen(&mut self, material: &[u8; 32]) {
-        for i in 0..32 {
-            self.schluessel[i] ^= material[i];
+        for (byte, frisch) in self.schluessel.iter_mut().zip(material.iter()) {
+            *byte ^= *frisch;
         }
         // Ein Key-Erasure-Schritt zum Diffundieren: Danach haengt jedes Bit
         // des Schluessels von jedem Bit des Materials ab.
@@ -1114,13 +1114,16 @@ mod tests {
         // Der Hardware-Deckel ist die HALBE Schwelle: Es muessen immer
         // mindestens 128 Bit aus Interrupt-Jitter dazukommen.
         assert_eq!(SCHWELLE_BITS / 2, 128);
-        assert!(
-            SCHWELLE_BITS / 2 < SCHWELLE_BITS,
-            "die Hardware koennte allein saeen — Regel 1 verletzt"
-        );
+        // Der Deckel MUSS echt kleiner als die Schwelle sein — sonst
+        // koennte die Hardware allein saeen (Regel 1 verletzt). Ueber eine
+        // Laufzeit-Variable, damit der Vergleich nicht zur Compilezeit
+        // wegfaellt und der Test etwas prueft statt nur dazustehen.
+        let deckel = core::hint::black_box(SCHWELLE_BITS / 2);
+        assert!(deckel < SCHWELLE_BITS, "die Hardware koennte allein saeen");
         // Und die Wiederholungsgrenze der Hardware-Instruktionen ist gesetzt
         // (ohne sie waere eine haengende Quelle ein Kernel-Haenger).
-        assert!(HARDWARE_VERSUCHE > 0 && HARDWARE_VERSUCHE <= 64);
+        let versuche = core::hint::black_box(HARDWARE_VERSUCHE);
+        assert!(versuche > 0 && versuche <= 64);
     }
 
     /// Was die Hardware in DIESER Umgebung hergibt — ein BERICHTS-Test.

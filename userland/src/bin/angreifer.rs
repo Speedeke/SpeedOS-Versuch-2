@@ -234,11 +234,11 @@ fn fremde_handles() -> i32 {
 fn ungueltige_nummern() -> i32 {
     println!("angreifer: ungueltige Syscall-Nummern ...");
     let mut fehler_gesamt = 0;
-    // 12 ist seit Serie 7, Teil 1 vergeben (`zufall`) und deshalb hier
-    // ausgetragen — eine belegte Nummer in dieser Liste wuerde nicht den
-    // Kernel, sondern den Angreifer widerlegen.
+    // 12 (`zufall`) und 13 (`zeit_geprueft`) sind seit Serie 7 vergeben und
+    // deshalb hier ausgetragen — eine belegte Nummer in dieser Liste wuerde
+    // nicht den Kernel widerlegen, sondern den Angreifer.
     for nummer in [
-        13u64, 14, 15, 25, 26, 31, 38, 39, 64, 100, 200, 239, 241, 255, 256,
+        14u64, 15, 25, 26, 31, 38, 39, 64, 100, 200, 239, 241, 255, 256,
         1 << 16, 1 << 32, u64::MAX - 1, u64::MAX,
     ] {
         // Sicherheit: Ein unbekannter Syscall darf hoechstens einen

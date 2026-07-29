@@ -181,6 +181,9 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     //    Unterschied zu selbst abgelegten Programmen.
     speed_os::diagnose::schritt(format_args!("[5/5] User-Programme installieren ..."));
     speed_os::programme::installieren();
+    // Der Vertrauensanker für TLS (Serie 7, Teil 2). Fehlt er, wird das
+    // deutlich gemeldet und SpeedOS läuft ohne — siehe docs/tls-vertrauen.md.
+    speed_os::programme::ca_buendel_installieren();
 
     serial_println!("[BOOT] GDT/IDT/PIC, Speicher, Heap, Grafik und RamFs initialisiert.");
 

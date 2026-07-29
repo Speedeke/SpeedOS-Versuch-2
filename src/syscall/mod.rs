@@ -102,6 +102,10 @@ pub const SYS_STARTE: u64 = 11;
 /// BLOCKIEREND, bis der Entropie-Pool gesät ist (Frist: `ZUFALL_FRIST_MS`,
 /// danach `NichtGesaet`). Siehe docs/zufall.md.
 pub const SYS_ZUFALL: u64 = 12;
+/// `zeit_geprueft()` -> UNIX-Sekunden (UTC) — **nur wenn die Uhr plausibel
+/// ist**, sonst `ZeitUnplausibel`. Das ist die Zeitquelle für die
+/// Zertifikatsprüfung (Serie 7, Teil 2; siehe docs/zeit.md).
+pub const SYS_ZEIT_GEPRUEFT: u64 = 13;
 
 // ----- Gruppe 1: Dateien über das VFS (16..31) -----
 /// `oeffne(pfad_ptr, pfad_len, modus)` -> Handle.
@@ -218,6 +222,15 @@ pub enum Fehler {
     /// „warte auf Entropie — oder verzichte auf Kryptographie". Es gibt in
     /// diesem Zustand KEINE schwachen Bytes (docs/zufall.md §4).
     NichtGesaet = 25,
+    /// Die Wanduhr ist nachweislich falsch (vor dem Bau-Datum des Kernels
+    /// oder absurd weit in der Zukunft) — Serie 7, Teil 2.
+    ///
+    /// **Ein eigener Code, weil die Konsequenz eine andere ist:** Wer
+    /// Zertifikate prüfen will, darf jetzt NICHT weitermachen. Die
+    /// Versuchung „Zeit stimmt nicht, prüfen wir die Gültigkeit halt nicht"
+    /// ist genau der Punkt, an dem TLS aufhört, etwas wert zu sein
+    /// (docs/tls-vertrauen.md).
+    ZeitUnplausibel = 26,
 }
 
 impl Fehler {
@@ -255,7 +268,18 @@ impl Fehler {
             Fehler::NichtUnterstuetzt => "nicht unterstuetzt",
             Fehler::Belegt => "Ressource belegt, spaeter erneut versuchen",
             Fehler::NichtGesaet => "Zufallsgenerator noch nicht ausreichend gesaet",
+            Fehler::ZeitUnplausibel => "die Uhr ist nachweislich falsch gestellt",
         }
+    }
+
+    /// Zeit-Plausibilitätsfehler -> User-Space.
+    pub fn von_zeit(fehler: crate::zeit::ZeitFehler) -> Fehler {
+        // Bewusst EIN Code für alle drei Fälle: Ob die Uhr zu früh, zu spät
+        // oder gar nicht da ist, ändert für den Aufrufer nichts — er hat
+        // keine Zeitbasis. Der GRUND steht im Kernel-Log und in den
+        // Einstellungen, wo ein Mensch ihn lesen kann.
+        let _ = fehler;
+        Fehler::ZeitUnplausibel
     }
 
     // --- DIE ABBILDUNGEN: Kernel-Typen werden zu User-Space-Fehlern ---
@@ -604,6 +628,11 @@ pub fn ausfuehren(nummer: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> SysErgebni
         SYS_PIPE => prozess::sys_pipe(),
         SYS_STARTE => prozess::sys_starte(a0, a1, a2, a3),
         SYS_ZUFALL => sys_zufall(a0, a1),
+        // Die GEPRÜFTE Uhrzeit. `zeit_epoche` (6) bleibt unverändert und
+        // ungeprüft — es füttert Anzeigen, und eine Uhr im Taskleisten-Feld
+        // darf falsch gehen. Wer PRÜFT, nimmt diesen hier und bekommt bei
+        // einer kaputten Uhr einen Fehler statt einer Zahl.
+        SYS_ZEIT_GEPRUEFT => crate::zeit::zertifikatszeit().map_err(Fehler::von_zeit),
 
         // ----- Gruppe 1: Dateien -----
         SYS_OEFFNE => datei::sys_oeffne(a0, a1, a2),
@@ -835,6 +864,7 @@ mod tests {
         assert_eq!(SYS_PIPE, 10);
         assert_eq!(SYS_STARTE, 11);
         assert_eq!(SYS_ZUFALL, 12);
+        assert_eq!(SYS_ZEIT_GEPRUEFT, 13);
         assert_eq!(SYS_OEFFNE, 16);
         assert_eq!(SYS_LESE_AT, 17);
         assert_eq!(SYS_SCHREIBE_AT, 18);
@@ -858,13 +888,14 @@ mod tests {
         assert_eq!(Fehler::NichtGefunden.code(), 8);
         assert_eq!(Fehler::Belegt.code(), 24);
         assert_eq!(Fehler::NichtGesaet.code(), 25);
+        assert_eq!(Fehler::ZeitUnplausibel.code(), 26);
     }
 
     /// Unbekannte Nummern liefern IMMER einen Fehler und panicken nie —
     /// auch die Lücken zwischen den Gruppen und u64::MAX.
     #[test_case]
     fn test_unbekannte_nummern() {
-        for nummer in [13u64, 15, 25, 31, 38, 100, 239, 241, u64::MAX] {
+        for nummer in [14u64, 15, 25, 31, 38, 100, 239, 241, u64::MAX] {
             assert_eq!(
                 ausfuehren(nummer, 0, 0, 0, 0),
                 Err(Fehler::UnbekannterSyscall),

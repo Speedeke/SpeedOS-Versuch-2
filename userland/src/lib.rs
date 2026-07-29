@@ -55,6 +55,7 @@ pub const SYS_BEENDE: u64 = 9;
 pub const SYS_PIPE: u64 = 10;
 pub const SYS_STARTE: u64 = 11;
 pub const SYS_ZUFALL: u64 = 12;
+pub const SYS_ZEIT_GEPRUEFT: u64 = 13;
 
 pub const SYS_OEFFNE: u64 = 16;
 pub const SYS_LESE_AT: u64 = 17;
@@ -104,6 +105,8 @@ pub const STAT_BYTES: usize = 32;
 // Fehler
 // ---------------------------------------------------------------------------
 
+pub mod pem;
+
 /// Ein Fehlercode des Kernels. Die Zahlen sind ABI (docs/syscalls.md).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Fehler(pub u64);
@@ -124,6 +127,7 @@ impl Fehler {
     pub const NICHT_KONFIGURIERT: Fehler = Fehler(18);
     pub const ABGEBROCHEN: Fehler = Fehler(22);
     pub const NICHT_GESAET: Fehler = Fehler(25);
+    pub const ZEIT_UNPLAUSIBEL: Fehler = Fehler(26);
 
     /// Deutsche Klartext-Meldung. Bewusst hier und nicht im Kernel: Der
     /// Kernel liefert eine ZAHL ueber die Grenze, die Uebersetzung in Text
@@ -157,6 +161,7 @@ impl Fehler {
             23 => "nicht unterstuetzt",
             24 => "Ressource belegt",
             25 => "Zufallsgenerator noch nicht ausreichend gesaet",
+            26 => "die Uhr ist nachweislich falsch gestellt",
             _ => "unbekannter Fehlercode",
         }
     }
@@ -244,6 +249,21 @@ pub fn zeit_jetzt() -> u64 {
 /// Sekunden seit dem 1.1.2000 (echte Uhr).
 pub fn zeit_epoche() -> u64 {
     unsafe { syscall(SYS_ZEIT_EPOCHE, 0, 0, 0, 0).unwrap_or(0) }
+}
+
+/// DIE GEPRUEFTE UHRZEIT als UNIX-Sekunden (UTC) — Serie 7, Teil 2.
+///
+/// Liefert `Fehler::ZEIT_UNPLAUSIBEL`, wenn die Wanduhr nachweislich falsch
+/// geht (vor dem Bau-Datum des Kernels oder absurd weit in der Zukunft).
+///
+/// **Wer Zertifikate pruefen will, nimmt DIESE Funktion — und wenn sie
+/// scheitert, wird nicht geprueft und nicht verbunden.** Die Versuchung
+/// „die Uhr stimmt nicht, pruefen wir die Gueltigkeit halt nicht" ist genau
+/// der Punkt, an dem TLS aufhoert, etwas wert zu sein
+/// (docs/tls-vertrauen.md §3e). `zeit_epoche` bleibt fuer Anzeigen —
+/// eine Uhr im Taskleisten-Feld darf falsch gehen.
+pub fn zeit_geprueft() -> Ergebnis {
+    unsafe { syscall(SYS_ZEIT_GEPRUEFT, 0, 0, 0, 0) }
 }
 
 /// Schreibt Bytes auf ein Handle. Liefert die uebernommene Anzahl.

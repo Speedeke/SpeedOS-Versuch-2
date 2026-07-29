@@ -39,7 +39,7 @@ use std::process::Command;
 /// in src/programme.rs in die Liste eintragen.
 const PROGRAMME: &[&str] = &[
     "hallo", "kopiere", "netzhole", "zaehle", "filter", "elternprobe",
-    "angreifer", "messung",
+    "angreifer", "messung", "zertifikate",
 ];
 
 fn main() {
@@ -58,6 +58,10 @@ fn main() {
     // fremden Umgebung Probleme macht: SPEEDOS_OHNE_USERLAND=1 baut den
     // Kernel mit LEEREN Programmen (er bootet dann ohne /platte/programme).
     println!("cargo:rerun-if-env-changed=SPEEDOS_OHNE_USERLAND");
+
+    // Serie 7, Teil 2: das Bau-Datum und das CA-Buendel.
+    bau_datum_setzen();
+    ca_buendel_einbetten(&wurzel, &out_dir);
 
     let ueberspringen = std::env::var("SPEEDOS_OHNE_USERLAND")
         .map(|wert| wert == "1")
@@ -156,5 +160,84 @@ fn userland_bauen(userland: &Path) {
              Fehler als ein SpeedOS ohne Programme.",
             ausgabe.status.code()
         );
+    }
+}
+
+// ===========================================================================
+// DAS BAU-DATUM (Serie 7, Teil 2 — die Zeit-Plausibilitaet)
+// ===========================================================================
+
+/// Sekunden zwischen dem 1.1.1970 und dem 1.1.2000 — SpeedOS rechnet in der
+/// 2000er-Epoche (`zeit::sekunden_seit_2000`), die Bauumgebung in der
+/// UNIX-Epoche.
+const EPOCHE_1970_BIS_2000: u64 = 946_684_800;
+
+/// Legt das BAU-DATUM des Kernels als Umgebungsvariable fuer den Compiler ab.
+///
+/// WOZU: Eine Uhr, die VOR dem Bau des laufenden Kernels steht, ist
+/// nachweislich falsch — dieser Kernel kann zu diesem Zeitpunkt nicht
+/// existiert haben. Das ist die einzige Plausibilitaetsgrenze, die ein
+/// System OHNE Netz und ohne zweite Zeitquelle ueberhaupt kennen kann, und
+/// sie ist erstaunlich wirksam: Der klassische Ausfall (leere
+/// Pufferbatterie) setzt die Uhr auf 1.1.2000 oder 1.1.1980 zurueck, also
+/// weit VOR jedes Bau-Datum.
+///
+/// Sie erkennt NICHT: eine Uhr, die um Stunden oder Tage falsch geht, und
+/// eine absichtlich vorgestellte Uhr. Dafuer braeuchte es NTP (docs/zeit.md).
+fn bau_datum_setzen() {
+    // Reproduzierbare Baue: Wer SOURCE_DATE_EPOCH setzt (der uebliche
+    // Standard dafuer), bestimmt das Datum selbst.
+    let unix_s = std::env::var("SOURCE_DATE_EPOCH")
+        .ok()
+        .and_then(|wert| wert.trim().parse::<u64>().ok())
+        .unwrap_or_else(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                // Geht selbst DAS schief, ist 0 der ehrlichste Wert: Der
+                // Kernel meldet dann "kein Bau-Datum" und prueft nicht,
+                // statt eine erfundene Grenze zu benutzen.
+                .unwrap_or(0)
+        });
+    println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
+    let seit_2000 = unix_s.saturating_sub(EPOCHE_1970_BIS_2000);
+    println!("cargo:rustc-env=SPEEDOS_BAU_EPOCHE_S={}", seit_2000);
+}
+
+// ===========================================================================
+// DAS CA-BUENDEL (Serie 7, Teil 2 — der Vertrauensanker)
+// ===========================================================================
+
+/// Bettet `assets/ca-bundle.pem` ein, falls es da ist.
+///
+/// FEHLT DIE DATEI, wird der Kernel trotzdem gebaut — mit einem LEEREN
+/// Buendel und einer deutlichen Meldung. Das ist Absicht und keine
+/// Nachlaessigkeit: Wurzelzertifikate sind der Vertrauensanker des ganzen
+/// Systems. Sie gehoeren aus einer nachvollziehbaren Quelle geholt und mit
+/// Herkunft und Datum vermerkt (`docs/tls-vertrauen.md`), nicht von einem
+/// Build-Skript stillschweigend irgendwo besorgt. Ein Buendel, das
+/// unbemerkt entsteht, ist genau das, wogegen ein Vertrauensanker schuetzen
+/// soll.
+fn ca_buendel_einbetten(wurzel: &Path, out_dir: &Path) {
+    let quelle = wurzel.join("assets").join("ca-bundle.pem");
+    println!("cargo:rerun-if-changed=assets/ca-bundle.pem");
+    let ziel = out_dir.join("ca-bundle.pem");
+    match std::fs::read(&quelle) {
+        Ok(inhalt) => {
+            eprintln!(
+                "[build] CA-Buendel eingebettet: {} ({} Byte)",
+                quelle.display(),
+                inhalt.len()
+            );
+            std::fs::write(&ziel, inhalt).expect("CA-Buendel nach OUT_DIR kopieren");
+        }
+        Err(_) => {
+            eprintln!(
+                "[build] KEIN CA-Buendel unter assets/ca-bundle.pem — SpeedOS bootet \
+                 ohne Vertrauensanker. Holen mit: tools/ca_bundle_holen.ps1 \
+                 (siehe docs/tls-vertrauen.md)."
+            );
+            std::fs::write(&ziel, []).expect("leeres CA-Buendel anlegen");
+        }
     }
 }

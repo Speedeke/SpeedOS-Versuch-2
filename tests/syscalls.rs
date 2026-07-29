@@ -311,11 +311,12 @@ fn test_b_gruppe0_boesartig() {
     let ptr = p.hinlegen(0, text);
 
     // UNBEKANNTE NUMMERN — inklusive der Lücken zwischen den Gruppen.
-    // (7..11 sind seit Serie 6, Teil 6 vergeben: lese/warte/beende/pipe/
-    //  starte; 12 seit Serie 7, Teil 1: zufall. Wer hier eine Nummer
+    // Vergeben sind inzwischen 0..13 (7..11 Serie 6 Teil 6: lese/warte/
+    //  beende/pipe/starte, 12 zufall, 13 zeit_geprueft). Wer eine Nummer
     //  ergänzt, muss sie hier austragen — genau dafür ist diese Liste da,
-    //  und genau so ist sie beim Hinzufügen von `zufall` auch angeschlagen.)
-    for nummer in [13u64, 14, 15, 25, 31, 38, 99, 239, 241, u64::MAX] {
+    //  und genau so hat sie beim Hinzufügen von `zufall` UND von
+    //  `zeit_geprueft` angeschlagen.
+    for nummer in [14u64, 15, 25, 31, 38, 99, 239, 241, u64::MAX] {
         p.fehler("unbekannte Nummer", p.ruf0(nummer), Fehler::UnbekannterSyscall);
     }
 

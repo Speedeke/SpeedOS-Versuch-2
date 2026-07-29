@@ -147,6 +147,86 @@
   gebaut werden, WENN es offizielle Testvektoren gibt und die
   Implementierung datenunabhaengig laeuft — ein PROTOKOLL nie.
 
+## ZEIT-DAUERREGEL (Serie 7, Teil 2 — ab Juli 2026, gilt ueberall)
+- **DREI EBENEN, die NIE miteinander verrechnet werden** (Kopfkommentar in
+  `src/zeit.rs`):
+  **(1) DIE RTC-ZONE** — eine Eigenschaft der HARDWARE: Laeuft die CMOS-Uhr
+  in UTC oder Lokalzeit? Wird EINMAL beim Anker-Setzen angewandt
+  (`zeit::rtc_zone_setzen`, Einstellung `zeit.rtc_zone_min`, Standard 0 =
+  UTC). **(2) UTC** — die Wahrheit. `zeit::jetzt()` liefert **IMMER UTC**;
+  alles, was rechnet oder prueft, benutzt ausschliesslich das.
+  **(3) DIE ANZEIGE-ZONE** — reine Kosmetik (`einstellungen::jetzt_lokal`,
+  `zeit.utc_offset_min`). Sie darf NIE in eine Berechnung geraten.
+  Bis Serie 3 war (1) mit (3) vermischt: `jetzt()` lieferte, was die RTC
+  sagte (in QEMU Lokalzeit), und der Offset kam obendrauf — ein Nutzer in
+  UTC+2 bekam zwei Stunden zu viel. Fuer eine Taskleiste egal, fuer ein
+  Zertifikats-Ablaufdatum nicht. QEMU laeuft deshalb jetzt mit
+  `-rtc base=utc` (vorher localtime).
+- **PLAUSIBILITAET STATT VERTRAUEN:** `build.rs` legt das Bau-Datum als
+  `SPEEDOS_BAU_EPOCHE_S` ins Image; `zeit::zeit_pruefen` lehnt jede Uhr VOR
+  dem Bau-Datum ab (ein Kernel kann nicht vor seinem Bau gelaufen sein — das
+  faengt den haeufigsten Fall, die leere Pufferbatterie) und alles ueber
+  `PLAUSIBEL_JAHRE` (30) danach. Beim Boot und nach jeder Korrektur laeuft
+  die Pruefung, ein Fehlschlag wird LAUT gemeldet (beide Daten
+  gegenuebergestellt). EHRLICHE GRENZE: Sie findet KEINE Uhr, die um Stunden
+  falsch geht, und keine absichtlich vorgestellte — dafuer braucht es NTP
+  (noch offen, docs/tls-vertrauen.md §5).
+- **DIE KONSEQUENZ, sonst waere es nur eine Logzeile:**
+  `zeit::zertifikatszeit()` und der Syscall `zeit_geprueft` (Nr. 13) liefern
+  bei unplausibler Uhr `Fehler::ZeitUnplausibel` (26) statt einer Zahl.
+  `zeit_epoche` (6) bleibt unveraendert und ungeprueft — eine ANZEIGE darf
+  falsch gehen, eine PRUEFUNG nicht. **Die Gueltigkeitspruefung wird NIE
+  stillschweigend uebersprungen**; „Zeit stimmt nicht, pruefen wir halt
+  nicht" ist der Punkt, an dem TLS aufhoert, etwas wert zu sein.
+- **UHR VON HAND:** `einstellungen::zeit_setzen_lokal` (Eingabe Lokalzeit,
+  gespeichert als UTC in `zeit.manuell_utc_s`, persistiert auf /platte, bei
+  jedem Boot neu angewandt). Auf Hardware ohne RTC-Batterie der einzige Weg.
+  Die CMOS-Uhr wird NICHT geschrieben.
+- **HARDWARE-PRUEFUNG:** Der Diagnose-Schirm (Taste D) zeigt „RTC roh",
+  „UTC", „Kernel-Bau" und das CA-Buendel — auf echter Hardware die einzige
+  Stelle, an der sich nachsehen laesst, was die CMOS-Uhr liefert (dort gibt
+  es keine serielle Ausgabe). Verfahren und OFFENER Status:
+  docs/hardware-log.md.
+
+## TLS-VERTRAUENSANKER-REGEL (Serie 7, Teil 2)
+- **DAS BUENDEL WIRD BEWUSST GEHOLT, NIE NEBENBEI.** Quelle, Datum,
+  SHA-256 und Zertifikatszahl stehen in `assets/ca-bundle.herkunft.txt`
+  (geschrieben von `tools/ca_bundle_holen.ps1`, Quelle
+  `https://curl.se/ca/cacert.pem`). Ein `build.rs`, das im Hintergrund
+  Wurzelzertifikate aus dem Netz zieht, waere genau das, wogegen ein
+  Vertrauensanker schuetzt. FEHLT die Datei, baut SpeedOS trotzdem — mit
+  leerem Buendel und deutlicher Meldung.
+- **WEG INS SYSTEM:** `assets/ca-bundle.pem` -> `build.rs` (include_bytes)
+  -> `programme::ca_buendel_installieren()` beim Boot ->
+  `/platte/system/ca-bundle.pem`. Dasselbe Muster wie die User-Programme,
+  aus demselben Grund (kein Host-Werkzeug fuer SpeedFS) — und es reist mit
+  `cargo run`, `cargo test` UND `cargo image` mit.
+- **AKTUALISIERUNG: VON HAND**, Skript erneut ausfuehren. Ehrlich notiert
+  inklusive der gefaehrlichen Richtung: Ein zu altes Buendel lehnt nicht zu
+  viel ab, es VERTRAUT zu viel. Automatisch ginge nur mit einem eingebauten
+  Signaturschluessel (sonst Henne-Ei: sicherer Abruf braucht TLS braucht
+  Wurzeln) — eigenes Vorhaben.
+- **BEKANNTE LUECKE, ausdruecklich dokumentiert und nicht verschwiegen:
+  KEINE Sperrlisten-Pruefung (weder OCSP noch CRL).** Ein gestohlenes, noch
+  nicht abgelaufenes Zertifikat wird akzeptiert. Begruendung in
+  docs/tls-vertrauen.md §3a: Klassisches OCSP verraet dem Aussteller das
+  Surfverhalten und scheitert in der Praxis WEICH (Responder weg ->
+  trotzdem verbinden), ist also eine Anzeige und kein Mechanismus. Der
+  richtige Weg waere OCSP-Stapling. Ebenfalls NICHT dabei: Certificate
+  Transparency, Pinning, Benutzer-CAs, „trotzdem fortfahren"-Dialoge.
+- **PARSER IM USER-SPACE** (`userland/src/pem.rs`): PEM->DER, bewusst simpel
+  (nur Base64-Bloecke zwischen BEGIN/END CERTIFICATE), plus ein
+  DER-Laeufer, der NUR fuer die Anzeige Subject-CN und Gueltigkeit
+  herausholt — **kein X.509-Parser**, es wird nichts validiert. Krypto-nahes
+  lebt in Ring 3: Ein Parser-Fehler soll einen Prozess treffen, nicht den
+  Kernel. WICHTIGSTE ENTSCHEIDUNG: **Ein kaputter Block macht nur DIESEN
+  Block ungueltig, nicht die Datei** — ein Anker mit 118 von 119 Wurzeln ist
+  brauchbar, einer, der bei einem Zeilenumbruch auf 0 faellt, ist eine
+  Ausfallquelle. Panickt nie, feste Obergrenzen.
+- **Programm `zertifikate`** zeigt Anzahl, Stichprobe der Namen und die
+  Ablaufdaten-Spanne. Es holt die Zeit ueber `zeit_geprueft` — bei kaputter
+  Uhr zeigt es Daten AN, bewertet sie aber NICHT.
+
 ## Platten-Sicherheits-Regel (Juli 2026)
 - Der ATA-Treiber weigert sich PER KONSTRUKTION, auf das Boot-Laufwerk
   zu schreiben: Das Feld `beschreibbar` ist privat, Laufwerke entstehen

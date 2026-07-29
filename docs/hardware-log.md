@@ -113,6 +113,63 @@ _Foto vom Diagnose-Schirm liegt vor; als `docs/screenshots/hw-acer-a515-diagnose
 
 ---
 
+## OFFEN: Die RTC-Zone auf echter Hardware (Serie 7, Teil 2)
+
+**Status: NICHT VERIFIZIERT.** Diese Prüfung braucht einen Menschen vor dem
+Gerät und ist von der Entwicklungsmaschine aus nicht durchführbar — sie steht
+hier als Auftrag, nicht als Ergebnis.
+
+### Warum es geprüft werden muss
+
+Seit Serie 7, Teil 2 liefert `zeit::jetzt()` **UTC**, und
+Zertifikats-Gültigkeitszeiträume hängen daran. Was die CMOS-Uhr einer
+konkreten Maschine liefert, ist aber **nicht festgelegt**:
+
+* Ein Windows-PC führt die RTC üblicherweise in **Lokalzeit**.
+* Ein Linux-System führt sie in **UTC**.
+* Der Acer A515-51 kam mit Windows — die Erwartung ist also **Lokalzeit**,
+  in Deutschland also UTC+1 bzw. UTC+2 (Sommerzeit).
+
+SpeedOS' Voreinstellung ist `zeit.rtc_zone_min = 0`, also „die RTC läuft in
+UTC" (das ist auch das, was unser QEMU-Runner mit `-rtc base=utc`
+herstellt). Trifft das auf einer Maschine nicht zu, geht die Uhr um den
+Zonenversatz falsch — bei Zertifikaten mit Monats-Laufzeiten harmlos, aber
+es ist eine Unwahrheit im Kern, und sie gehört gemessen statt vermutet.
+
+### Wie es geprüft wird
+
+1. Live-Stick bauen und schreiben (`cargo image`, `tools/usb_schreiben.ps1`).
+2. Beim Bootscreen **D** drücken (Diagnose-Modus).
+3. Im Abschnitt „Erkannte Hardware" stehen jetzt drei neue Zeilen:
+   ```
+   RTC roh    : TT.MM.JJJJ HH:MM:SS  (RTC-Zone +0 min)
+   UTC        : TT.MM.JJJJ HH:MM:SS  (plausibel)
+   Kernel-Bau : TT.MM.JJJJ
+   ```
+4. **„RTC roh" mit der Uhr an der Wand vergleichen:**
+   * Stimmt sie mit der **Ortszeit** überein → die RTC läuft in Lokalzeit.
+     Dann in *Einstellungen → Zeit* die **Zone der HARDWARE-Uhr** auf den
+     eigenen Versatz setzen (Sommer: UTC+02:00). Danach muss „UTC" die
+     Weltzeit zeigen.
+   * Stimmt sie mit der **UTC** überein → alles richtig, nichts zu tun.
+5. Das Ergebnis hier eintragen (Datum, Gerät, welcher Fall).
+
+### Was dabei ausserdem zu sehen ist
+
+* `Kernel-Bau` — die Grenze der Plausibilitätsprüfung. Zeigt „UTC" ein Datum
+  **davor**, meldet SpeedOS `UNPLAUSIBEL!` und verweigert die
+  Zertifikatsprüfung. Genau das ist auf einem Gerät mit leerer
+  Pufferbatterie zu erwarten und der eigentliche Zweck der Prüfung.
+* `CA-Buendel` — ob ein Vertrauensanker im Image steckt.
+
+### Ergebnis
+
+| Datum | Gerät | RTC läuft in | RTC-Zone gesetzt auf | Bemerkung |
+|---|---|---|---|---|
+| — | Acer Aspire A515-51 | *offen* | — | zu prüfen |
+
+---
+
 > Als Referenz, wie ein voller Erfolg in der Emulation aussieht, dienen
 > die QEMU-Screendumps der Generalprobe:
 > [Desktop](screenshots/live-desktop.png) ·

@@ -1,0 +1,11 @@
+﻿SpeedOS CA-Buendel - Herkunft
+=============================
+URL:        https://curl.se/ca/cacert.pem
+Abgerufen:  2026-07-29 14:51:07 UTC
+Groesse:    186446 Byte
+SHA-256:    3FF344E30B9B1ED2971044EABB438A08F2E2245DDB5F8AB1A3AD8B63AB4EAF91
+Zertifikate: 119
+
+Geholt mit tools/ca_bundle_holen.ps1. Aktualisierung erfolgt VON HAND -
+siehe docs/tls-vertrauen.md, Abschnitt 2 (inklusive der Begruendung,
+warum es keine automatische Aktualisierung gibt).

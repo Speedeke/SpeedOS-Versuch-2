@@ -64,6 +64,11 @@ path = "src/bin/angreifer.rs"
 name = "messung"
 path = "src/bin/messung.rs"
 
+# Der Vertrauensanker, sichtbar gemacht (Serie 7, Teil 2).
+[[bin]]
+name = "zertifikate"
+path = "src/bin/zertifikate.rs"
+
 # panic = "abort" ist Pflicht: Abwickeln (unwinding) bräuchte eine
 # Personality-Funktion und Landing Pads — beides gibt es ohne std nicht.
 # Ein panickendes SpeedOS-Programm beendet sich per exit(101).

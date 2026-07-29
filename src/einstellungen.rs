@@ -59,7 +59,18 @@ pub const S_HINTERGRUND: &str = "desktop.hintergrund";
 pub const S_SKALA: &str = "ui.skala";
 pub const S_BLINK_MS: &str = "cursor.blink_ms";
 pub const S_FORMAT24: &str = "zeit.format24";
+/// **ANZEIGE-Zone** in Minuten gegen UTC. Reine Kosmetik — sie darf NIE in
+/// eine Berechnung geraten (Ebene 3 der Zeit-Trennung, siehe src/zeit.rs).
 pub const S_UTC_OFFSET: &str = "zeit.utc_offset_min";
+/// **RTC-Zone** in Minuten: Wie viel die CMOS-Uhr der UTC VORAUS läuft.
+/// 0 = die Hardware-Uhr läuft in UTC (die richtige Einstellung, und die,
+/// die unser QEMU-Runner mit `-rtc base=utc` herstellt). Wer neben einem
+/// Windows bootet, das die Uhr auf Lokalzeit stellt, trägt hier seine Zone
+/// ein — Ebene 1 der Zeit-Trennung, hat mit der Anzeige NICHTS zu tun.
+pub const S_RTC_ZONE: &str = "zeit.rtc_zone_min";
+/// Von Hand gestellte UTC-Zeit (Sekunden seit 2000). 0 = nie gestellt.
+/// Auf Hardware mit leerer Pufferbatterie der einzige Weg zu einer Uhr.
+pub const S_ZEIT_MANUELL: &str = "zeit.manuell_utc_s";
 
 // ---------------------------------------------------------------------------
 // Der Speicher: BTreeMap hinter einem Blatt-Lock
@@ -165,6 +176,21 @@ fn anwenden() {
     crate::theme::hell_setzen(hole_bool(S_THEME_HELL, false));
     crate::theme::akzent_setzen(hole_zahl(S_AKZENT, 0).max(0) as usize);
     crate::theme::hintergrund_setzen(hole_zahl(S_HINTERGRUND, 0).max(0) as usize);
+    zeit_anwenden();
+}
+
+/// Setzt die ZEIT-Ebenen aus den Einstellungen (Serie 7, Teil 2).
+///
+/// REIHENFOLGE IST WESENTLICH: erst die RTC-Zone (sie deutet den beim Boot
+/// gelesenen Rohwert um), DANN eine etwaige Hand-Korrektur (sie überstimmt
+/// die RTC vollständig). Andersherum würde die Zonen-Umrechnung eine von
+/// Hand gestellte Uhr wieder verschieben.
+pub fn zeit_anwenden() {
+    zeit::rtc_zone_setzen(rtc_zone_min());
+    let manuell = hole_zahl(S_ZEIT_MANUELL, 0);
+    if manuell > 0 {
+        zeit::zeit_setzen(&zeit::datum_von_sekunden_seit_2000(manuell as u64));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -227,15 +253,38 @@ pub fn cursor_blink_us() -> u64 {
     cursor_blink_ms() * 1000
 }
 
-/// Der Anzeige-Offset zur RTC-Zeit in Minuten (siehe Kopfkommentar:
-/// die RTC liefert bereits Lokalzeit, Standard ist deshalb 0).
+/// Die **ANZEIGE-Zone** in Minuten gegen UTC.
+///
+/// Seit Serie 7, Teil 2 heisst das wirklich, was es sagt: `zeit::jetzt()`
+/// liefert UTC, und dieser Wert verschiebt AUSSCHLIESSLICH die Anzeige.
+/// Vorher war es ein Offset auf „was die RTC gerade sagte" — bei einer
+/// RTC in Lokalzeit also eine doppelte Verschiebung. Wer hier rechnet
+/// statt anzuzeigen, baut genau diesen Fehler wieder ein.
 pub fn utc_offset_min() -> i64 {
     hole_zahl(S_UTC_OFFSET, 0).clamp(-12 * 60, 14 * 60)
 }
 
-/// Die anzuzeigende Zeit: RTC/TSC-Zeit plus Offset.
+/// Die **RTC-Zone** in Minuten: Wie viel die Hardware-Uhr der UTC voraus
+/// läuft. 0 = sie läuft in UTC (Standard und Normalfall).
+pub fn rtc_zone_min() -> i64 {
+    hole_zahl(S_RTC_ZONE, 0).clamp(-12 * 60, 14 * 60)
+}
+
+/// Die anzuzeigende Zeit: UTC plus Anzeige-Zone.
 pub fn jetzt_lokal() -> DatumUhrzeit {
     zeit_verschieben(&zeit::jetzt(), utc_offset_min())
+}
+
+/// STELLT DIE UHR VON HAND — Eingabe in **Lokalzeit** (so, wie sie auf der
+/// Uhr an der Wand steht), gespeichert und weitergegeben als **UTC**.
+///
+/// Genau hier gehört die Umrechnung hin und nirgendwo sonst: an der
+/// Grenze zwischen Mensch und System. Alles dahinter rechnet in UTC.
+pub fn zeit_setzen_lokal(lokal: &DatumUhrzeit) {
+    let utc = zeit_verschieben(lokal, -utc_offset_min());
+    let sekunden = zeit::sekunden_seit_2000(&utc);
+    setze_zahl(S_ZEIT_MANUELL, sekunden as i64);
+    zeit::zeit_setzen(&utc);
 }
 
 /// Verschiebt einen Zeitpunkt um Minuten (reine Funktion — über die
@@ -303,6 +352,21 @@ const N_BLINK_BASIS: u32 = 20; // +0/+1/+2 -> langsam/normal/schnell
 const N_OFFSET_MINUS: u32 = 30;
 const N_OFFSET_PLUS: u32 = 31;
 const N_FORMAT24: u32 = 32;
+// Serie 7, Teil 2: RTC-Zone und Uhr von Hand stellen.
+// AB 50, nicht ab 33: Die Speicher-Seite belegt 40..43, und die erste
+// Fassung dieses Blocks lief genau hinein (der Compiler hat es als
+// „unreachable pattern" gemeldet, sonst waeren zwei Knoepfe stumm
+// geblieben). Genau davor warnt die Toolkit-Konvention „Basen weit
+// auseinander legen" in CLAUDE.md.
+const N_RTC_ZONE_MINUS: u32 = 50;
+const N_RTC_ZONE_PLUS: u32 = 51;
+const N_ZEIT_TAG_MINUS: u32 = 52;
+const N_ZEIT_TAG_PLUS: u32 = 53;
+const N_ZEIT_STD_MINUS: u32 = 54;
+const N_ZEIT_STD_PLUS: u32 = 55;
+const N_ZEIT_MIN_MINUS: u32 = 56;
+const N_ZEIT_MIN_PLUS: u32 = 57;
+const N_ZEIT_ZURUECK: u32 = 58;
 const N_SYNC: u32 = 40; // Speicher-Seite: alles aufs Medium
 const N_PRUEFEN: u32 = 41; // pruefe.speedfs (nur melden)
 const N_PRUEFEN_REPARIEREN: u32 = 42; // pruefe.speedfs --repariere
@@ -451,35 +515,99 @@ impl EinstellungenApp {
     }
 
     fn seite_zeit(&self) -> Vec<Box<dyn Widget>> {
-        let jetzt = jetzt_lokal();
+        let lokal = jetzt_lokal();
+        let utc = zeit::jetzt();
         let offset = utc_offset_min();
+        let rtc_zone = rtc_zone_min();
         let format24 = hole_bool(S_FORMAT24, true);
+        let plausibel = zeit::plausibel();
+        let bau = zeit::datum_von_sekunden_seit_2000(zeit::BAU_EPOCHE_S);
 
-        vec![
-            Box::new(Label::neu("Aktuelle Zeit")) as Box<dyn Widget>,
+        let mut seite: Vec<Box<dyn Widget>> = vec![
+            // DIE DREI EBENEN, UNTEREINANDER SICHTBAR — wer die Trennung
+            // einmal gesehen hat, verwechselt sie nicht mehr.
+            Box::new(Label::neu("Aktuelle Zeit (Anzeige-Zone)")) as Box<dyn Widget>,
             Box::new(Label::neu(&format!(
                 "{}   {:02}.{:02}.{}",
-                uhrzeit_formatieren(&jetzt, format24),
-                jetzt.tag,
-                jetzt.monat,
-                jetzt.jahr
+                uhrzeit_formatieren(&lokal, format24),
+                lokal.tag,
+                lokal.monat,
+                lokal.jahr
             ))),
-            Box::new(Trennlinie),
-            Box::new(Label::neu("Zeitzone (Anzeige-Offset)")),
-            Box::new(hbox(vec![
-                Box::new(Button::neu("-", N_OFFSET_MINUS)) as Box<dyn Widget>,
-                Box::new(Button::neu(&offset_text(offset), N_NICHTS)),
-                Box::new(Button::neu("+", N_OFFSET_PLUS)),
-                Box::new(Fueller),
-            ])),
-            Box::new(Label::sekundaer(
-                "Annahme: Die RTC liefert in QEMU bereits die Host-\n\
-                 LOKALZEIT (Runner: -rtc base=localtime). Der Offset\n\
-                 verschiebt nur die ANZEIGE - 00:00 = RTC-Zeit pur.",
-            )),
-            Box::new(Trennlinie),
-            Box::new(Checkbox::neu("24-Stunden-Format (Systray-Uhr)", format24, N_FORMAT24)),
-        ]
+            Box::new(Label::sekundaer(&format!(
+                "UTC (das, womit gerechnet wird): {:02}:{:02}:{:02}  {:02}.{:02}.{}",
+                utc.stunde, utc.minute, utc.sekunde, utc.tag, utc.monat, utc.jahr
+            ))),
+        ];
+
+        // DIE PLAUSIBILITÄT — und zwar oben, nicht versteckt: Wenn die Uhr
+        // falsch ist, ist das die wichtigste Information auf dieser Seite.
+        if !plausibel {
+            seite.push(Box::new(Trennlinie));
+            seite.push(Box::new(Label::neu("!!! UHR UNPLAUSIBEL !!!")));
+            seite.push(Box::new(Label::sekundaer(&format!(
+                "Die Uhr steht ausserhalb des moeglichen Bereichs.\n\
+                 Dieser Kernel wurde am {:02}.{:02}.{} gebaut - eine Uhr\n\
+                 davor kann nicht stimmen (leere Pufferbatterie?).\n\
+                 Zertifikatspruefung wird verweigert, bis sie steht.",
+                bau.tag, bau.monat, bau.jahr
+            ))));
+        }
+
+        seite.push(Box::new(Trennlinie));
+        seite.push(Box::new(Label::neu("Uhr stellen (Anzeige-Zone)")));
+        seite.push(Box::new(hbox(vec![
+            Box::new(Label::neu("Datum")) as Box<dyn Widget>,
+            Box::new(Button::neu("-1 Tag", N_ZEIT_TAG_MINUS)),
+            Box::new(Button::neu("+1 Tag", N_ZEIT_TAG_PLUS)),
+            Box::new(Button::neu("-1 Std", N_ZEIT_STD_MINUS)),
+            Box::new(Button::neu("+1 Std", N_ZEIT_STD_PLUS)),
+            Box::new(Fueller),
+        ])));
+        seite.push(Box::new(hbox(vec![
+            Box::new(Button::neu("-10 Min", N_ZEIT_MIN_MINUS)) as Box<dyn Widget>,
+            Box::new(Button::neu("+10 Min", N_ZEIT_MIN_PLUS)),
+            Box::new(Button::neu("Hand-Korrektur verwerfen", N_ZEIT_ZURUECK)),
+            Box::new(Fueller),
+        ])));
+        seite.push(Box::new(Label::sekundaer(
+            "Auf Hardware mit leerer RTC-Batterie ist das der einzige\n\
+             Weg zu einer brauchbaren Uhr. Die Korrektur wird auf\n\
+             /platte gespeichert und bei jedem Boot neu angewandt.\n\
+             (Ein NTP-Client waere die richtige Loesung - noch offen.)",
+        )));
+
+        seite.push(Box::new(Trennlinie));
+        seite.push(Box::new(Label::neu("Anzeige-Zone (nur Kosmetik)")));
+        seite.push(Box::new(hbox(vec![
+            Box::new(Button::neu("-", N_OFFSET_MINUS)) as Box<dyn Widget>,
+            Box::new(Button::neu(&offset_text(offset), N_NICHTS)),
+            Box::new(Button::neu("+", N_OFFSET_PLUS)),
+            Box::new(Fueller),
+        ])));
+
+        seite.push(Box::new(Trennlinie));
+        seite.push(Box::new(Label::neu("Zone der HARDWARE-Uhr")));
+        seite.push(Box::new(hbox(vec![
+            Box::new(Button::neu("-", N_RTC_ZONE_MINUS)) as Box<dyn Widget>,
+            Box::new(Button::neu(&offset_text(rtc_zone), N_NICHTS)),
+            Box::new(Button::neu("+", N_RTC_ZONE_PLUS)),
+            Box::new(Fueller),
+        ])));
+        seite.push(Box::new(Label::sekundaer(
+            "UTC+00:00 = die CMOS-Uhr laeuft in UTC (Normalfall, und\n\
+             das, was unser QEMU-Runner einstellt). Wer neben einem\n\
+             Windows bootet, das die Uhr auf Lokalzeit stellt, traegt\n\
+             hier seine Zone ein. Das ist NICHT die Anzeige-Zone.",
+        )));
+
+        seite.push(Box::new(Trennlinie));
+        seite.push(Box::new(Checkbox::neu(
+            "24-Stunden-Format (Systray-Uhr)",
+            format24,
+            N_FORMAT24,
+        )));
+        seite
     }
 
     fn seite_speicher(&self) -> Vec<Box<dyn Widget>> {
@@ -694,6 +822,38 @@ impl App for EinstellungenApp {
             }
             N_FORMAT24 => {
                 setze_bool(S_FORMAT24, !hole_bool(S_FORMAT24, true));
+            }
+            // Die Zone der HARDWARE-Uhr: deutet den Rohwert der RTC um.
+            // Das ist eine ANDERE Ebene als der Anzeige-Offset darüber —
+            // deshalb ein eigener Schalter und ein eigener Schlüssel.
+            N_RTC_ZONE_MINUS | N_RTC_ZONE_PLUS => {
+                let schritt = if id == N_RTC_ZONE_PLUS { 30 } else { -30 };
+                let neu = (rtc_zone_min() + schritt).clamp(-12 * 60, 14 * 60);
+                setze_zahl(S_RTC_ZONE, neu);
+                // Sofort anwenden: Der Boot-Rohwert wird neu gedeutet.
+                zeit::rtc_zone_setzen(neu);
+            }
+            // Uhr von Hand stellen: relativ zur JETZIGEN Anzeige-Zeit, in
+            // groben Schritten. Kein Textfeld — ein Datums-Eingabefeld
+            // müsste Schaltjahre und Monatslängen prüfen, und die
+            // Sekunden-Arithmetik kann beides schon.
+            N_ZEIT_TAG_MINUS | N_ZEIT_TAG_PLUS | N_ZEIT_STD_MINUS | N_ZEIT_STD_PLUS
+            | N_ZEIT_MIN_MINUS | N_ZEIT_MIN_PLUS => {
+                let minuten: i64 = match id {
+                    N_ZEIT_TAG_MINUS => -24 * 60,
+                    N_ZEIT_TAG_PLUS => 24 * 60,
+                    N_ZEIT_STD_MINUS => -60,
+                    N_ZEIT_STD_PLUS => 60,
+                    N_ZEIT_MIN_MINUS => -10,
+                    _ => 10,
+                };
+                let neu_lokal = zeit_verschieben(&jetzt_lokal(), minuten);
+                zeit_setzen_lokal(&neu_lokal);
+            }
+            N_ZEIT_ZURUECK => {
+                // Hand-Korrektur verwerfen und wieder der RTC glauben.
+                setze_zahl(S_ZEIT_MANUELL, 0);
+                zeit::rtc_zone_setzen(rtc_zone_min());
             }
             // --- Speicher ---
             N_SYNC => {

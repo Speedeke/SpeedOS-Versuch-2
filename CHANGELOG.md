@@ -5,6 +5,157 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### Serie 7, Teil 2: ZEIT UND VERTRAUEN — die zwei Dinge, die TLS von der Plattform verlangt
+
+TLS-Bibliotheken brauchen zwei Sachen, die nichts mit Kryptographie zu tun
+haben und trotzdem über Sicherheit entscheiden: eine **verlässliche
+Wanduhr** (Zertifikate haben Ablaufdaten, in UTC) und einen
+**Vertrauensanker** (sonst kann TLS verschlüsseln, aber nicht prüfen, mit
+wem es spricht — und das ist die Hälfte, auf die es ankommt).
+
+**Entwurf zuerst: `docs/tls-vertrauen.md`.**
+
+#### Die Uhr: eine Unschärfe aus Serie 3, aufgelöst
+
+- **`zeit::jetzt()` liefert ab jetzt IMMER UTC.** Bis hierhin hiess es „das
+  echte Datum" und lieferte, was die RTC gerade sagte — in QEMU also
+  **Host-Lokalzeit**, denn der Runner lief mit `-rtc base=localtime`. Der
+  Anzeige-Offset kam obendrauf: Ein Nutzer in UTC+2 mit Offset +120 bekam
+  local+2, also **zwei Stunden zu viel**. Für eine Taskleiste gleichgültig,
+  für ein Zertifikats-Ablaufdatum nicht.
+- **DREI EBENEN, sauber geschieden** (Kopfkommentar in `src/zeit.rs`):
+  **(1) die RTC-Zone** — eine Eigenschaft der *Hardware* („läuft die
+  CMOS-Uhr in UTC oder Lokalzeit?"), einmal beim Anker-Setzen angewandt;
+  **(2) UTC** — die Wahrheit, alles was rechnet oder prüft benutzt nur das;
+  **(3) die Anzeige-Zone** — reine Kosmetik, lebt in den Einstellungen und
+  darf nie in eine Berechnung geraten. Der Runner läuft jetzt mit
+  **`-rtc base=utc`**, damit die Voreinstellung „RTC = UTC" auch stimmt.
+  *Folge für die Anzeige:* Die Taskleisten-Uhr zeigt UTC, bis die
+  Anzeige-Zone gesetzt ist — genau die Frage, die jedes echte
+  Betriebssystem bei der Installation stellt.
+- **HENNE-EI GELÖST OHNE ZWEITES LESEN:** Die RTC-Zone steht in einer Datei
+  auf `/platte`, das Dateisystem gibt es beim Lesen der RTC noch nicht.
+  Deshalb bewahrt `zeit::init()` den **Rohwert** auf; `rtc_zone_setzen`
+  rechnet den Anker später um. Die RTC ein zweites Mal zu lesen wäre
+  schlechter — zwischen beiden Lesungen liegt eine unbekannte Zeitspanne.
+- **PLAUSIBILITÄTS-CHECK gegen das BAU-DATUM.** `build.rs` legt es als
+  `SPEEDOS_BAU_EPOCHE_S` ins Image (respektiert `SOURCE_DATE_EPOCH`); eine
+  Uhr **vor** dem Bau des laufenden Kernels ist nachweislich falsch — der
+  Kernel kann zu dem Zeitpunkt nicht existiert haben. Das klingt trivial und
+  fängt genau den häufigsten Fall: die **leere Pufferbatterie**, die die Uhr
+  auf 1.1.2000 zurücksetzt. Obergrenze 30 Jahre (ein Register voller 0xFF).
+  Schlägt die Prüfung fehl, wird sie **laut** gemeldet, mit beiden Daten
+  gegenübergestellt.
+  *Ehrliche Grenze, ausgesprochen:* Sie findet **keine** Uhr, die um Stunden
+  oder Tage falsch geht, und keine absichtlich vorgestellte. Das ist ein
+  Plausibilitäts-Filter, kein Sicherheitsmechanismus — dafür braucht es NTP.
+- **DIE KONSEQUENZ, sonst wäre es nur eine Logzeile:** neuer Syscall
+  **`zeit_geprueft` (13)** und Fehlercode **`ZeitUnplausibel` (26)**. Er
+  liefert UNIX-Sekunden in UTC — oder einen Fehler. `zeit_epoche` (6) bleibt
+  unverändert und ungeprüft: Eine **Anzeige** darf falsch gehen, eine
+  **Prüfung** nicht. Die Versuchung „die Uhr stimmt nicht, prüfen wir die
+  Gültigkeit halt nicht" ist der Punkt, an dem TLS aufhört, etwas wert zu
+  sein — diesen Weg gibt es nicht.
+- **UHR VON HAND STELLEN** (Einstellungen → Zeit): Tage/Stunden/Minuten in
+  groben Schritten, Eingabe in Lokalzeit, gespeichert als UTC auf
+  `/platte`, bei jedem Boot neu angewandt. Auf Hardware mit leerer
+  RTC-Batterie der einzige Weg zu einer brauchbaren Uhr. Die Zeit-Seite
+  zeigt jetzt beide Ebenen untereinander (Anzeige *und* UTC) und die
+  Warnung, wenn die Uhr unplausibel ist. **NTP ist notiert, nicht gebaut**
+  (`docs/tls-vertrauen.md` §5).
+- **HARDWARE-PRÜFUNG VORBEREITET, NICHT DURCHGEFÜHRT:** Der Diagnose-Schirm
+  (Taste D) zeigt jetzt „RTC roh", „UTC", „Kernel-Bau" und das CA-Bündel —
+  auf echter Hardware die einzige Stelle, an der sich nachsehen lässt, was
+  die CMOS-Uhr liefert (dort gibt es keine serielle Ausgabe). Das Verfahren
+  steht in `docs/hardware-log.md`; **der Lauf auf dem Acer steht aus** und
+  ist dort als offen eingetragen, nicht als erledigt.
+
+#### Der Vertrauensanker
+
+- **QUELLE, DATUM, PRÜFSUMME — dokumentiert statt vorausgesetzt.**
+  `tools/ca_bundle_holen.ps1` holt `https://curl.se/ca/cacert.pem` (der von
+  curl gepflegte Export von Mozillas NSS-Speicher), prüft die Plausibilität
+  (> 50 Blöcke, BEGIN/END paarweise — eine Proxy-Fehlerseite ist auch eine
+  Datei, nur keine Zertifikate) und schreibt `assets/ca-bundle.herkunft.txt`
+  mit URL, Abrufdatum, Größe und SHA-256. **Geholt: 186 446 Byte,
+  119 Wurzeln.**
+- **BEWUSST VON HAND, nicht vom Build-Skript.** Ein `build.rs`, das im
+  Hintergrund Wurzelzertifikate aus dem Netz zieht, ist genau das, wogegen
+  ein Vertrauensanker schützen soll. Fehlt die Datei, **baut SpeedOS
+  trotzdem** — mit leerem Bündel und deutlicher Meldung.
+- **WEG INS SYSTEM:** `assets/` → `build.rs` (`include_bytes!`) →
+  `programme::ca_buendel_installieren()` beim Boot →
+  `/platte/system/ca-bundle.pem`. Dasselbe Muster wie die User-Programme
+  und aus demselben Grund (es gibt kein Host-Werkzeug für SpeedFS) — es
+  reist mit `cargo run`, `cargo test` **und** `cargo image` mit.
+- **AKTUALISIERUNG: VON HAND**, ehrlich notiert samt der gefährlichen
+  Richtung: Ein zu altes Bündel lehnt nicht zu viel ab, es **vertraut** zu
+  viel. Automatisch ginge nur mit einem eingebauten Signaturschlüssel —
+  sonst Henne-Ei (sicherer Abruf braucht TLS braucht Wurzeln).
+- **DIE BEKANNTE LÜCKE, ausdrücklich dokumentiert: KEINE Sperrlisten-Prüfung
+  (weder OCSP noch CRL).** Ein gestohlenes, noch nicht abgelaufenes
+  Zertifikat wird akzeptiert — bei 90-Tage-Laufzeiten ein Fenster von bis zu
+  drei Monaten. Nicht aus Bequemlichkeit weggelassen: Klassisches OCSP
+  verrät dem Aussteller das Surfverhalten und scheitert in der Praxis
+  **weich** (Responder weg → trotzdem verbinden), ist also eine Anzeige und
+  kein Mechanismus; ein Angreifer in der Leitung blockiert einfach die
+  Abfrage. Der richtige Weg wäre **OCSP-Stapling**. Ebenfalls nicht dabei:
+  Certificate Transparency, Pinning, Benutzer-CAs und
+  „trotzdem fortfahren"-Dialoge. Steht auch im `zertifikate`-Ausgabetext.
+
+#### Der Parser und das Programm
+
+- **`userland/src/pem.rs` — im USER-SPACE**, weil er eine Datei liest, die
+  von aussen kommt: Ein Parser-Fehler soll einen *Prozess* treffen, nicht den
+  Kernel. Bewusst simpel: Base64-Blöcke zwischen BEGIN/END CERTIFICATE, alles
+  ausserhalb ist Kommentar, andere Block-Typen werden **übersprungen** statt
+  abgelehnt. **Die wichtigste Entscheidung: Ein kaputter Block macht nur
+  DIESEN Block ungültig, nicht die Datei** — ein Anker mit 118 von 119
+  Wurzeln ist brauchbar, einer, der bei einem Zeilenumbruch auf 0 fällt, ist
+  eine Ausfallquelle. Panickt nie, feste Obergrenzen.
+- Dazu ein **DER-Läufer**, der genau drei Dinge für die *Anzeige* herausholt
+  (Subject-CN, notBefore, notAfter). Ausdrücklich **kein X.509-Parser**: Es
+  wird nichts validiert und nichts geglaubt; die echte Zerlegung macht später
+  `rustls-webpki`. Inklusive der UTCTime-Zweistelligkeit (50..99 → 19xx).
+- **Programm `zertifikate`** zeigt Anzahl, eine Stichprobe der Namen und die
+  Ablaufdaten-Spanne. Es holt die Zeit über `zeit_geprueft` — **bei kaputter
+  Uhr zeigt es Daten an, bewertet sie aber nicht.** Echter Lauf aus Ring 3:
+  ```
+  Vertrauensanker: /platte/system/ca-bundle.pem   186446 Byte gelesen
+    COMODO ECC Certification Authority  (bis 18.01.2038)
+    GlobalSign  (bis 18.03.2029)      Izenpe.com  (bis 13.12.2037)
+  Geladene Wurzeln: 119
+  Ablaufdaten-Spanne:  frueheste 06.12.2028 · spaeteste 24.05.2048
+                       jetzt (UTC) 29.07.2026 — alle gueltig
+  ```
+
+#### Tests (`tests/zeit_vertrauen.rs`, 10 Stück)
+
+- **UTC/Anzeige-Trennung**: Anzeige-Zone +120 verschiebt die *Anzeige* um
+  7200 s und die *UTC-Zeit* um 0 s. Und die RTC-Zone ist eine dritte,
+  eigene Ebene (sie verschiebt UTC, die Anzeige-Zone nie).
+- **Plausibilität** in allen Richtungen — inklusive „ohne Bau-Datum wird
+  nicht geprüft" (lieber keine Grenze als eine erfundene) und der
+  Konsequenz: unplausible Uhr → `ZeitUnplausibel` über die ABI, während
+  `zeit_epoche` weiter eine Zahl liefert.
+- **PEM gegen kaputte Eingaben**: 15 Fälle (leer, BEGIN ohne END, ungültiges
+  Base64, Länge geht nicht auf, fremder Block-Typ, kaputt+gut, gut+kaputt,
+  Windows-Zeilenenden …), dazu **jedes Präfix** der Datei (278 Abschnitte)
+  und **jedes einzelne Byte verbogen** (139 Bit-Dreher). Keine Panik, und
+  nie mehr gemeldete Zertifikate als wirklich lesbar.
+- **DER-Läufer** gegen erlogene Längen (`0x84 FF FF FF FF`), BER-unbestimmte
+  Länge und Müll.
+- **Der echte Bestand**: 119 Wurzeln aus der installierten Datei, 115 mit
+  Common Name, 0 unlesbar — plus ein echter `zertifikate`-Lauf aus Ring 3.
+
+**Wieder in die eigene Falle gelaufen** (und beide Male hat der Test sie
+gefangen): Die neuen Nachricht-IDs der Einstellungs-App landeten auf 40/41 —
+mitten im Block der Speicher-Seite; der Compiler meldete `unreachable
+pattern`, sonst wären zwei Knöpfe stumm geblieben. Und die Listen
+„unbekannter" Syscall-Nummern in `tests/syscalls.rs` und `angreifer`
+enthielten die 13, die jetzt `zeit_geprueft` ist — genau wie beim `zufall`
+im Teil davor.
+
 ### Serie 7, Teil 1: ZUFALL — SpeedOS bekommt einen Generator
 
 Der erste Schritt der Serie, und ausdrücklich **nicht** TLS: Bis hierhin gab

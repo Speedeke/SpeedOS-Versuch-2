@@ -150,6 +150,44 @@ pub fn hardware_zusammenfassung() {
             ));
         }
     }
+    // DIE UHR (Serie 7, Teil 2) — auf ECHTER Hardware die einzige Stelle,
+    // an der sich nachsehen laesst, was die CMOS-Uhr wirklich liefert:
+    // Es gibt dort keine serielle Ausgabe, nur diesen Bildschirm.
+    //
+    // WAS MAN DAMIT PRUEFT: Steht unter "RTC roh" die UTC-Zeit oder die
+    // Ortszeit? Ist es die Ortszeit, gehoert die RTC-Zone in den
+    // Einstellungen auf den eigenen Versatz (Windows stellt die Uhr auf
+    // Lokalzeit, Linux auf UTC). Erst dann stimmt "UTC" darunter — und
+    // erst dann taugt die Uhr fuer Zertifikate.
+    let utc = crate::zeit::jetzt();
+    let roh = crate::zeit::datum_von_sekunden_seit_2000(
+        crate::zeit::sekunden_seit_2000(&utc)
+            .saturating_add((crate::zeit::rtc_zone_min().max(0) as u64) * 60),
+    );
+    schritt(format_args!(
+        "  RTC roh    : {:02}.{:02}.{} {:02}:{:02}:{:02}  (RTC-Zone {:+} min)",
+        roh.tag, roh.monat, roh.jahr, roh.stunde, roh.minute, roh.sekunde,
+        crate::zeit::rtc_zone_min()
+    ));
+    schritt(format_args!(
+        "  UTC        : {:02}.{:02}.{} {:02}:{:02}:{:02}  ({})",
+        utc.tag, utc.monat, utc.jahr, utc.stunde, utc.minute, utc.sekunde,
+        if crate::zeit::plausibel() { "plausibel" } else { "UNPLAUSIBEL!" }
+    ));
+    let bau = crate::zeit::datum_von_sekunden_seit_2000(crate::zeit::BAU_EPOCHE_S);
+    schritt(format_args!(
+        "  Kernel-Bau : {:02}.{:02}.{}  (Uhren davor sind nachweislich falsch)",
+        bau.tag, bau.monat, bau.jahr
+    ));
+    schritt(format_args!(
+        "  CA-Buendel : {}",
+        if crate::programme::CA_BUENDEL.is_empty() {
+            alloc::string::String::from("KEINES (TLS haette keinen Vertrauensanker)")
+        } else {
+            alloc::format!("{} Byte eingebettet", crate::programme::CA_BUENDEL.len())
+        }
+    ));
+
     schritt(format_args!("========================"));
     schritt(format_args!(""));
 }

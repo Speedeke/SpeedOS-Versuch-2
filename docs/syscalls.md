@@ -119,6 +119,7 @@ welcher Treiber unter ihm liegt.
 | 23 | `NichtUnterstuetzt` | Operation gibt es (noch) nicht |
 | 24 | `Belegt` | Kernel-Ressource belegt, erneuter Versuch kann gelingen |
 | 25 | `NichtGesaet` | Zufallsgenerator nicht ausreichend gesät (Serie 7, Teil 1) |
+| 26 | `ZeitUnplausibel` | die Wanduhr ist nachweislich falsch (Serie 7, Teil 2) |
 
 **Warum `NichtGesaet` (25) und nicht `Belegt` (24):** Der Aufrufer muss etwas
 völlig anderes tun. `Belegt` heisst „gleich nochmal"; `NichtGesaet` heisst
@@ -174,6 +175,7 @@ inklusive geordnetem TCP-Abbau).
 | 5 | `zeit_jetzt` | — | Millisekunden seit dem Boot (monoton) | — |
 | 6 | `zeit_epoche` | — | Sekunden seit 1.1.2000 (echte Uhr) | — |
 | 12 | `zufall` | `ptr`, `len` | gefüllte Bytes | 3, 4, **25** |
+| 13 | `zeit_geprueft` | — | UNIX-Sekunden (UTC) | **26** |
 
 *(7–11 sind Ströme und Prozesse — siehe §8b.)*
 
@@ -197,8 +199,20 @@ inklusive geordnetem TCP-Abbau).
   **Er gibt unter keinen Umständen schwache Bytes heraus** — und im
   Fehlerfall bleibt der Puffer unverändert, damit ein Programm nicht
   versehentlich Nullen für Zufall hält. `len == 0` ist `Ok(0)`, `len` über
-  `MAX_PUFFER` ist `ZuGross`. Das ist der einzige Syscall, den Serie 7 für
-  TLS hinzufügt (`docs/serie7-bestandsaufnahme.md` §b).
+  `MAX_PUFFER` ist `ZuGross`.
+- **`zeit_geprueft` gegen `zeit_epoche`** — der Unterschied ist die
+  KONSEQUENZ, nicht die Zahl:
+  * `zeit_epoche` (6) liefert **immer** etwas. Es füttert Anzeigen, und eine
+    Uhr im Taskleisten-Feld darf falsch gehen.
+  * `zeit_geprueft` (13) liefert **UNIX-Sekunden in UTC** — oder
+    `ZeitUnplausibel` (26), wenn die Uhr vor dem Bau-Datum des Kernels steht
+    oder absurd weit in der Zukunft. **Wer Zertifikate prüft, nimmt diesen
+    hier**, und wenn er scheitert, wird nicht geprüft und nicht verbunden.
+    Die Versuchung „die Uhr stimmt nicht, prüfen wir die Gültigkeit halt
+    nicht" ist der Punkt, an dem TLS aufhört, etwas wert zu sein
+    (`docs/tls-vertrauen.md` §3e).
+  * Beide liefern **UTC**. Die Anzeige-Zeitzone ist reine Kosmetik und lebt
+    in den Einstellungen, nicht in der ABI (`src/zeit.rs`).
 
 ---
 

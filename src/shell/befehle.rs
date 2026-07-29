@@ -2754,7 +2754,7 @@ impl Befehl for ZufallBefehl {
                 match quelle.bits_je_probe() {
                     // Salz wird ausdruecklich als solches ausgewiesen — wer
                     // die Zahl sieht, soll nicht denken, sie zaehle mit.
-                    0 => alloc::format!("0 Bit/Probe (SALZ, keine Entropie)"),
+                    0 => alloc::string::String::from("0 Bit/Probe (SALZ, keine Entropie)"),
                     bits => alloc::format!("{} Bit/Probe", bits),
                 }
             );

@@ -19,7 +19,7 @@
 // Dazu die ECHTE Uhrzeit: rtc.rs liest beim Boot einmal die
 // CMOS-Uhr; zeit::jetzt() = RTC-Anker + verstrichene TSC-Zeit.
 
-use core::sync::atomic::AtomicU64;
+use core::sync::atomic::{AtomicBool, AtomicI64, AtomicU64};
 
 /// Die Basisfrequenz des PIT-Chips in Hz (Quarz seit dem Ur-PC 1981).
 pub(crate) const PIT_BASIS_HZ: u64 = 1_193_182;
@@ -140,12 +140,20 @@ pub fn init() {
     );
 
     // Echte Uhrzeit: RTC einmal lesen und als Anker merken.
+    //
+    // Die RTC-ZONE ist hier noch NICHT bekannt (sie steht in den
+    // Einstellungen, und die brauchen das Dateisystem). Deshalb wird der
+    // Rohwert zusätzlich aufbewahrt; `rtc_zone_setzen` rechnet den Anker
+    // später um, ohne die Uhr ein zweites Mal zu lesen.
     match crate::rtc::lesen() {
         Some(datum) => {
-            EPOCH_ANKER_S.store(sekunden_seit_2000(&datum), Ordering::Relaxed);
+            let roh = sekunden_seit_2000(&datum);
+            ROH_RTC_S.store(roh, Ordering::Relaxed);
+            EPOCH_ANKER_S.store(roh, Ordering::Relaxed);
             EPOCH_ANKER_US.store(us_seit_boot(), Ordering::Relaxed);
             crate::serial_println!(
-                "[ZEIT] RTC gelesen: {:02}.{:02}.{} {:02}:{:02}:{:02}",
+                "[ZEIT] RTC gelesen: {:02}.{:02}.{} {:02}:{:02}:{:02} \
+                 (zunaechst als UTC gedeutet — die RTC-Zone kommt aus den Einstellungen)",
                 datum.tag, datum.monat, datum.jahr,
                 datum.stunde, datum.minute, datum.sekunde
             );
@@ -154,6 +162,210 @@ pub fn init() {
             "[ZEIT] WARNUNG: RTC nicht lesbar — Uhrzeit startet am Platzhalter-Datum."
         ),
     }
+    plausibilitaet_pruefen();
+}
+
+// ---------------------------------------------------------------------------
+// (1) DIE RTC-ZONE — wie der Rohwert der Hardware-Uhr zu deuten ist
+// ---------------------------------------------------------------------------
+
+/// Deutet die beim Boot gelesene RTC-Zeit und setzt den UTC-Anker neu.
+///
+/// `zone_min` sind die Minuten, die der ROHWERT der UTC VORAUS ist
+/// (Mitteleuropa im Sommer: +120). `0` heisst „die RTC läuft in UTC".
+///
+/// WANN AUFRUFEN: nachdem die Einstellungen geladen sind. Vorher gilt die
+/// Annahme „RTC = UTC", was für die Boot-Meldungen genügt und für nichts
+/// anderes benutzt wird.
+///
+/// WARUM NACHTRÄGLICH UND NICHT GLEICH RICHTIG: Die Zone steht in einer
+/// Datei auf `/platte`, und das Dateisystem gibt es beim Lesen der RTC noch
+/// nicht. Die Alternative — die RTC später ein zweites Mal lesen — wäre
+/// schlechter: Zwischen beiden Lesungen liegt eine unbekannte Zeitspanne,
+/// und der TSC-Anker müsste mit umgesetzt werden.
+pub fn rtc_zone_setzen(zone_min: i64) {
+    use core::sync::atomic::Ordering;
+    let roh = ROH_RTC_S.load(Ordering::Relaxed);
+    RTC_ZONE_MIN.store(zone_min, Ordering::Relaxed);
+    if roh == 0 {
+        return; // keine RTC gelesen — es gibt nichts umzudeuten
+    }
+    let utc = (roh as i64 - zone_min * 60).max(0) as u64;
+    EPOCH_ANKER_S.store(utc, Ordering::Relaxed);
+    if zone_min != 0 {
+        crate::serial_println!(
+            "[ZEIT] RTC laeuft in Lokalzeit ({:+} min) — UTC-Anker um {} s korrigiert.",
+            zone_min,
+            zone_min * 60
+        );
+    }
+    plausibilitaet_pruefen();
+}
+
+/// Die aktuell angenommene RTC-Zone in Minuten (0 = die RTC läuft in UTC).
+pub fn rtc_zone_min() -> i64 {
+    RTC_ZONE_MIN.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// STELLT DIE UHR VON HAND (Einstellungen).
+///
+/// Auf Hardware mit leerer Pufferbatterie ist das der einzige Weg zu einer
+/// brauchbaren Zeit — und ohne brauchbare Zeit gibt es keine
+/// Zertifikatsprüfung. `datum` ist **UTC**, nicht Lokalzeit: Die
+/// Einstellungs-App rechnet die Anzeige-Zone vorher heraus (Ebene (3)
+/// bleibt Ebene (3)).
+///
+/// Die CMOS-Uhr selbst wird NICHT geschrieben. Das wäre ein Schreibzugriff
+/// auf Firmware-Zustand, den ein Lernsystem nicht braucht — die Korrektur
+/// lebt in den Einstellungen und wird bei jedem Boot neu angewandt.
+pub fn zeit_setzen(datum: &DatumUhrzeit) {
+    use core::sync::atomic::Ordering;
+    EPOCH_ANKER_S.store(sekunden_seit_2000(datum), Ordering::Relaxed);
+    EPOCH_ANKER_US.store(us_seit_boot(), Ordering::Relaxed);
+    crate::serial_println!(
+        "[ZEIT] Uhr von Hand gestellt: {:02}.{:02}.{} {:02}:{:02}:{:02} UTC",
+        datum.tag, datum.monat, datum.jahr, datum.stunde, datum.minute, datum.sekunde
+    );
+    plausibilitaet_pruefen();
+}
+
+// ---------------------------------------------------------------------------
+// (2) DIE PLAUSIBILITÄT — was eine Uhr ohne zweite Quelle wissen kann
+// ---------------------------------------------------------------------------
+
+/// Das Bau-Datum dieses Kernels (Sekunden seit 2000), vom build.rs gesetzt.
+///
+/// 0 heisst „kein Bau-Datum bekannt" — dann wird nicht geprüft, statt eine
+/// erfundene Grenze zu benutzen.
+pub const BAU_EPOCHE_S: u64 = match u64::from_str_radix(env!("SPEEDOS_BAU_EPOCHE_S"), 10) {
+    Ok(wert) => wert,
+    Err(_) => 0,
+};
+
+/// Wie weit die Uhr NACH dem Bau-Datum liegen darf, bevor wir sie für
+/// unplausibel halten: 30 Jahre.
+///
+/// Die Obergrenze ist die schwächere der beiden Grenzen und bewusst weit:
+/// Ein Kernel, der zehn Jahre später noch läuft, soll nicht plötzlich seine
+/// Uhr für kaputt erklären. Sie fängt trotzdem den zweiten klassischen
+/// RTC-Ausfall — ein Register voller 0xFF wird zu einem Datum weit jenseits
+/// jeder Nutzungsdauer.
+pub const PLAUSIBEL_JAHRE: u64 = 30;
+
+/// Ist die Uhr unplausibel? (Wird beim Boot und nach jeder Korrektur gesetzt.)
+static ZEIT_UNPLAUSIBEL: AtomicBool = AtomicBool::new(false);
+
+/// Warum eine Zeit nicht für Zertifikate taugt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZeitFehler {
+    /// Die Uhr steht VOR dem Bau-Datum dieses Kernels — nachweislich falsch.
+    VorBauDatum,
+    /// Die Uhr steht absurd weit in der Zukunft.
+    ZuWeitInDerZukunft,
+    /// Es wurde nie eine Uhr gelesen (RTC fehlt/defekt, nichts gestellt).
+    KeineUhr,
+}
+
+impl ZeitFehler {
+    pub fn meldung(self) -> &'static str {
+        match self {
+            ZeitFehler::VorBauDatum => {
+                "die Uhr steht vor dem Bau-Datum dieses Kernels — sie ist nachweislich falsch"
+            }
+            ZeitFehler::ZuWeitInDerZukunft => "die Uhr steht absurd weit in der Zukunft",
+            ZeitFehler::KeineUhr => "es konnte keine Uhrzeit ermittelt werden",
+        }
+    }
+}
+
+/// PRÜFT EINE ZEITANGABE gegen das Bau-Datum — reine Funktion.
+///
+/// DIE EINZIGE GRENZE, DIE EIN SYSTEM OHNE NETZ KENNEN KANN: Ein Kernel
+/// kann nicht vor seinem eigenen Bau gelaufen sein. Das klingt trivial und
+/// fängt genau den häufigsten Fall — die leere Pufferbatterie, die die Uhr
+/// auf den 1.1.2000 (oder 1.1.1980) zurücksetzt, also weit vor jedes
+/// Bau-Datum.
+///
+/// WAS SIE NICHT FINDET, und das gehört ausgesprochen: eine Uhr, die um
+/// Stunden oder Tage falsch geht, und eine absichtlich VORGESTELLTE Uhr.
+/// Gegen die zweite hilft nur eine unabhängige Quelle (NTP, docs/zeit.md).
+/// Diese Prüfung ist ein Plausibilitäts-Filter, kein Sicherheitsmechanismus.
+pub fn zeit_pruefen(sekunden_seit_2000: u64, bau_epoche: u64) -> Result<(), ZeitFehler> {
+    if sekunden_seit_2000 == 0 {
+        return Err(ZeitFehler::KeineUhr);
+    }
+    if bau_epoche == 0 {
+        return Ok(()); // kein Bau-Datum bekannt -> nicht prüfbar, nicht ablehnen
+    }
+    if sekunden_seit_2000 < bau_epoche {
+        return Err(ZeitFehler::VorBauDatum);
+    }
+    let obergrenze = bau_epoche.saturating_add(PLAUSIBEL_JAHRE * 365 * 24 * 60 * 60);
+    if sekunden_seit_2000 > obergrenze {
+        return Err(ZeitFehler::ZuWeitInDerZukunft);
+    }
+    Ok(())
+}
+
+/// Prüft die aktuelle Uhr und meldet das Ergebnis laut, wenn es schlecht ist.
+fn plausibilitaet_pruefen() {
+    use core::sync::atomic::Ordering;
+    let jetzt_s = EPOCH_ANKER_S.load(Ordering::Relaxed);
+    match zeit_pruefen(jetzt_s, BAU_EPOCHE_S) {
+        Ok(()) => ZEIT_UNPLAUSIBEL.store(false, Ordering::Relaxed),
+        Err(fehler) => {
+            ZEIT_UNPLAUSIBEL.store(true, Ordering::Relaxed);
+            let bau = datum_von_sekunden_seit_2000(BAU_EPOCHE_S);
+            let ist = datum_von_sekunden_seit_2000(jetzt_s);
+            // LAUT, und mit beiden Zahlen — wer das liest, soll sofort
+            // sehen, was gegen was steht.
+            crate::serial_println!(
+                "[ZEIT] *** UHR UNPLAUSIBEL: {} ***",
+                fehler.meldung()
+            );
+            crate::serial_println!(
+                "[ZEIT] *** Uhr sagt {:02}.{:02}.{} {:02}:{:02} UTC, \
+                 dieser Kernel wurde am {:02}.{:02}.{} gebaut. ***",
+                ist.tag, ist.monat, ist.jahr, ist.stunde, ist.minute,
+                bau.tag, bau.monat, bau.jahr
+            );
+            crate::serial_println!(
+                "[ZEIT] *** Zertifikatspruefung wird VERWEIGERT, bis die Uhr \
+                 gestellt ist (Einstellungen -> Zeit). ***"
+            );
+        }
+    }
+}
+
+/// Ist die Uhr plausibel?
+pub fn plausibel() -> bool {
+    !ZEIT_UNPLAUSIBEL.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// DIE ZEIT FÜR ZERTIFIKATE: UNIX-Sekunden, aber nur, wenn wir ihr trauen.
+///
+/// Das ist der Punkt, an dem aus „wir wissen, dass die Uhr falsch ist" eine
+/// KONSEQUENZ wird. Ein TLS-Client, der hier einen Fehler bekommt, darf
+/// nicht weiterprüfen und schon gar nicht ungeprüft verbinden — er hat
+/// schlicht keine Zeitbasis.
+///
+/// Die Alternative wäre, die Gültigkeitsprüfung „ausnahmsweise" zu
+/// überspringen. Das ist der Punkt, an dem TLS aufhört, etwas wert zu sein
+/// (docs/serie7-bestandsaufnahme.md §c) — deshalb gibt es diesen Weg nicht.
+pub fn zertifikatszeit() -> Result<u64, ZeitFehler> {
+    let jetzt_s = sekunden_seit_2000(&jetzt());
+    zeit_pruefen(jetzt_s, BAU_EPOCHE_S)?;
+    Ok(jetzt_s + SEKUNDEN_1970_BIS_2000)
+}
+
+/// Sekunden zwischen dem 1.1.1970 und dem 1.1.2000 — die Brücke zwischen
+/// unserer Epoche und der, in der X.509 und der Rest der Welt rechnen.
+pub const SEKUNDEN_1970_BIS_2000: u64 = 946_684_800;
+
+/// Die aktuelle UTC-Zeit als UNIX-Sekunden (ohne Plausibilitätsprüfung —
+/// für Anzeige und Protokoll; wer prüft, nimmt `zertifikatszeit`).
+pub fn unix_zeit() -> u64 {
+    sekunden_seit_2000(&jetzt()) + SEKUNDEN_1970_BIS_2000
 }
 
 /// Mikrosekunden seit dem Boot — über den kalibrierten TSC, läuft
@@ -260,11 +472,54 @@ pub fn warte_auf_interrupt() {
 // verstrichene TSC-Zeit — die RTC wird nie wieder angefasst.
 // ---------------------------------------------------------------------------
 
-/// RTC-Anker: Sekunden seit dem 1.1.2000 00:00:00 zum Lese-Zeitpunkt
+// ===========================================================================
+// DIE EINE REGEL DIESER DATEI (Serie 7, Teil 2):
+//
+//   **`zeit::jetzt()` LIEFERT IMMER UTC.**
+//
+// Bis Serie 3 hiess es nur „das echte Datum" — und das war eine Unschärfe,
+// die man erst bemerkt, wenn sie weh tut. Was die RTC liefert, ist nämlich
+// NICHT festgelegt: Ein Windows-PC führt sie in LOKALZEIT, ein
+// Linux-System in UTC, und QEMU tat, was der Runner ihm sagte
+// (`-rtc base=localtime`). „Das echte Datum" war also je nach Maschine um
+// bis zu 14 Stunden verschoben.
+//
+// Solange die Uhr nur die Taskleiste füllt, ist das gleichgültig. Sobald
+// ZERTIFIKATE geprüft werden, ist es das nicht mehr: Gültigkeitszeiträume
+// sind in UTC angegeben, und eine um Stunden verschobene Uhr macht die
+// Prüfung entweder grundlos streng oder — schlimmer — zu lax.
+//
+// DESHALB DIE TRENNUNG IN DREI SAUBER GESCHIEDENE BEGRIFFE:
+//
+//   (1) DIE RTC-ZONE — eine Eigenschaft der HARDWARE: „Läuft die
+//       CMOS-Uhr in UTC oder in Lokalzeit, und wenn Lokalzeit, in
+//       welcher?" Sie wird EINMAL beim Anker-Setzen angewandt und
+//       danach nie wieder (`rtc_zone_setzen`).
+//   (2) UTC — die Wahrheit. `jetzt()`, `unix_zeit()`, alles, was rechnet
+//       oder prüft, benutzt ausschliesslich das.
+//   (3) DIE ANZEIGE-ZONE — reine Kosmetik, lebt in `einstellungen`
+//       (`jetzt_lokal`, `utc_offset_min`). Sie darf NIE in eine
+//       Berechnung geraten, nur in eine Ausgabe.
+//
+// Wer eine dieser drei Ebenen mit einer anderen verrechnet, baut genau den
+// Fehler wieder ein, den dieser Abschnitt beseitigt hat.
+// ===========================================================================
+
+/// UTC-Anker: Sekunden seit dem 1.1.2000 00:00:00 **UTC** zum Lese-Zeitpunkt
 /// (0 = keine RTC gelesen -> Platzhalter-Datum).
 static EPOCH_ANKER_S: AtomicU64 = AtomicU64::new(0);
 /// us_seit_boot zum RTC-Lese-Zeitpunkt.
 static EPOCH_ANKER_US: AtomicU64 = AtomicU64::new(0);
+/// Was die RTC WÖRTLICH gesagt hat (Sekunden seit 2000, uninterpretiert).
+///
+/// Getrennt vom Anker aufbewahrt, weil die RTC-Zone erst später bekannt ist:
+/// `zeit::init()` läuft weit vor `einstellungen::laden()` (die braucht das
+/// Dateisystem). Ohne diesen Rohwert müsste die RTC ein zweites Mal gelesen
+/// werden — und die zweite Lesung wäre eine andere Sekunde.
+static ROH_RTC_S: AtomicU64 = AtomicU64::new(0);
+/// Minuten, die vom Rohwert ABGEZOGEN werden, um UTC zu erhalten.
+/// 0 = die RTC läuft in UTC.
+static RTC_ZONE_MIN: AtomicI64 = AtomicI64::new(0);
 
 /// Platzhalter, falls die RTC nicht lesbar ist (11.07.2026 09:00) —
 /// dann läuft die Uhr wenigstens korrekt WEITER, nur der Startpunkt
@@ -282,7 +537,11 @@ pub struct DatumUhrzeit {
     pub sekunde: u64,
 }
 
-/// Das ECHTE aktuelle Datum samt Uhrzeit (RTC-Anker + TSC-Zeit).
+/// Das aktuelle Datum samt Uhrzeit **in UTC** (UTC-Anker + TSC-Zeit).
+///
+/// **IMMER UTC** — siehe die Regel am Anfang dieses Abschnitts. Wer
+/// Lokalzeit anzeigen will, nimmt `einstellungen::jetzt_lokal()`; wer
+/// rechnet oder prüft, nimmt das hier.
 pub fn jetzt() -> DatumUhrzeit {
     use core::sync::atomic::Ordering;
 
@@ -384,7 +643,7 @@ pub fn sekunden_seit_2000(datum: &DatumUhrzeit) -> u64 {
 
 use core::future::Future;
 use core::pin::Pin;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::Ordering;
 use core::task::{Context, Poll};
 use futures_util::task::AtomicWaker;
 

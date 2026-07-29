@@ -359,9 +359,8 @@ fn test_statistik_keine_wiederholung() {
     // Das findet den Fall „Zustand steht still" sicher, ohne O(n²).
     let mut ring: [[u8; 16]; 256] = [[0; 16]; 256];
     let mut treffer = 0usize;
-    for (i, brocken) in daten.chunks_exact(16).enumerate() {
-        let mut block = [0u8; 16];
-        block.copy_from_slice(brocken);
+    for (i, brocken) in daten.as_chunks::<16>().0.iter().enumerate() {
+        let block = *brocken;
         if i >= 256 && ring.contains(&block) {
             treffer += 1;
         }
@@ -371,9 +370,11 @@ fn test_statistik_keine_wiederholung() {
     // Monotonie: ein Zähler wäre streng steigend (oder fallend).
     let mut steigend = 0usize;
     let werte: Vec<u64> = daten
-        .chunks_exact(8)
+        .as_chunks::<8>()
+        .0
+        .iter()
         .take(4096)
-        .map(|b| u64::from_le_bytes(b.try_into().unwrap()))
+        .map(|b| u64::from_le_bytes(*b))
         .collect();
     for paar in werte.windows(2) {
         if paar[1] > paar[0] {

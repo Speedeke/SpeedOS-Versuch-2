@@ -86,6 +86,11 @@ pub static PROGRAMME: &[Programm] = &[
         elf: include_bytes!(concat!(env!("OUT_DIR"), "/messung")),
     },
     Programm {
+        name: "zertifikate",
+        beschreibung: "zertifikate [datei] — zeigt den TLS-Vertrauensanker (Wurzeln, Ablaufdaten)",
+        elf: include_bytes!(concat!(env!("OUT_DIR"), "/zertifikate")),
+    },
+    Programm {
         name: "elternprobe",
         beschreibung: "elternprobe [ms] — startet ein Kind und wartet auf es (Ring 3)",
         elf: include_bytes!(concat!(env!("OUT_DIR"), "/elternprobe")),
@@ -211,6 +216,68 @@ pub fn uebersicht() -> alloc::vec::Vec<String> {
         .collect()
 }
 
+// ===========================================================================
+// DAS CA-BUENDEL (Serie 7, Teil 2 — der Vertrauensanker)
+// ===========================================================================
+//
+// Denselben Weg wie die Programme, aus demselben Grund: Ein Host-Werkzeug,
+// das SpeedFS beschreiben kann, gibt es nicht. Eingebettet reist die Datei
+// mit `cargo run`, `cargo test` UND `cargo image` — also auch auf den
+// USB-Stick, ohne eine Zeile Extra-Logik im Runner.
+//
+// WOHER die Bytes stammen und WAS sie nicht leisten (keine Sperrlisten-
+// Pruefung!), steht vollstaendig in docs/tls-vertrauen.md. Geholt wird von
+// Hand mit tools/ca_bundle_holen.ps1 — ein Vertrauensanker, der unbemerkt
+// entsteht, ist wertlos.
+
+/// Das eingebettete CA-Buendel (leer, wenn assets/ca-bundle.pem fehlt).
+pub static CA_BUENDEL: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ca-bundle.pem"));
+
+/// Wo das Buendel im Dateisystem liegt.
+pub fn ca_buendel_pfad() -> &'static str {
+    // Ohne Platte landet es im RAM-VFS — dann ist es nach dem Neustart weg,
+    // was fuer einen Vertrauensanker ehrlicher ist als ein halber Zustand.
+    fs::persistenter_pfad("/platte/system/ca-bundle.pem", "/system/ca-bundle.pem")
+}
+
+/// Schreibt das CA-Buendel aufs Dateisystem (wie `installieren`, nur fuer
+/// diese eine Datei). Liefert `true`, wenn geschrieben wurde.
+///
+/// FEHLT DAS BUENDEL, passiert NICHTS und es wird deutlich gemeldet. Eine
+/// leere Datei anzulegen waere schlechter als keine: `zertifikate` koennte
+/// „0 Wurzeln" nicht mehr von „nie geholt" unterscheiden.
+pub fn ca_buendel_installieren() -> bool {
+    if CA_BUENDEL.is_empty() {
+        crate::serial_println!(
+            "[ca] KEIN CA-Buendel eingebettet — TLS haette keinen Vertrauensanker. \
+             Holen mit tools/ca_bundle_holen.ps1 (siehe docs/tls-vertrauen.md)."
+        );
+        return false;
+    }
+    let ziel = String::from(ca_buendel_pfad());
+    if ist_aktuell(&ziel, CA_BUENDEL) {
+        crate::serial_println!(
+            "[ca] Vertrauensanker {} ist aktuell ({} Byte).",
+            ziel,
+            CA_BUENDEL.len()
+        );
+        return false;
+    }
+    match fs::mit_fs(|dateisystem| dateisystem.schreiben(&ziel, CA_BUENDEL)) {
+        Ok(()) => {
+            crate::serial_println!("[ca] {} geschrieben ({} Byte).", ziel, CA_BUENDEL.len());
+            if let Err(fehler) = fs::sync() {
+                crate::serial_println!("[ca] sync fehlgeschlagen: {:?}", fehler);
+            }
+            true
+        }
+        Err(fehler) => {
+            crate::serial_println!("[ca] {} liess sich NICHT schreiben: {:?}", ziel, fehler);
+            false
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,7 +287,11 @@ mod tests {
     /// userland-Crate nicht — und zwar BEVOR jemand versucht, sie zu starten.
     #[test_case]
     fn test_eingebettete_programme_sind_gueltig() {
-        assert_eq!(PROGRAMME.len(), 8, "es sollen acht Programme mitkommen");
+        // Neun seit Serie 7, Teil 2 (`zertifikate` kam dazu). Die feste Zahl
+        // ist Absicht: Wer ein Programm ergaenzt, muss es an DREI Stellen tun
+        // (userland/Cargo.toml, build.rs, PROGRAMME) — dieser Test faengt
+        // die vergessene dritte.
+        assert_eq!(PROGRAMME.len(), 9, "es sollen neun Programme mitkommen");
         for programm in PROGRAMME {
             // Mit SPEEDOS_OHNE_USERLAND=1 gebaut? Dann gibt es nichts zu
             // pruefen — aber das ist der Notfall-Pfad, nicht der Normalfall.
@@ -284,3 +355,4 @@ mod tests {
         );
     }
 }
+

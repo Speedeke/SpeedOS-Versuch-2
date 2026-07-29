@@ -214,10 +214,25 @@ fn main() {
     }
     // Arbeitsspeicher passend zur Auflösung (siehe Rechnung oben):
     qemu.arg("-m").arg(format!("{ram_mb}M"));
-    // Die emulierte RTC läuft auf der LOKALEN Host-Uhr — die
-    // Taskleisten-Uhr von SpeedOS zeigt damit dieselbe Zeit wie die
-    // Windows-Uhr daneben (Standard wäre UTC).
-    qemu.arg("-rtc").arg("base=localtime");
+    // DIE EMULIERTE RTC LÄUFT IN UTC (Serie 7, Teil 2 — vorher: localtime).
+    //
+    // Der frühere Grund für `localtime` war Bequemlichkeit: Die
+    // Taskleisten-Uhr zeigte ohne jede Einstellung dieselbe Zeit wie die
+    // Windows-Uhr daneben. Der Preis war eine Unwahrheit im Kern —
+    // `zeit::jetzt()` hiess „das echte Datum" und lieferte in Wirklichkeit
+    // Lokalzeit, je nach Host um bis zu 14 Stunden gegen UTC verschoben.
+    //
+    // Für Zertifikats-Gültigkeitszeiträume (die sind in UTC angegeben) ist
+    // das nicht hinnehmbar. Seit Serie 7, Teil 2 gilt: `zeit::jetzt()` ist
+    // UTC, und die Anzeige-Zone (`zeit.utc_offset_min` in den
+    // Einstellungen) verschiebt AUSSCHLIESSLICH die Anzeige. Damit die
+    // Voreinstellung „RTC läuft in UTC" hier auch stimmt, bekommt QEMU
+    // jetzt `base=utc`.
+    //
+    // FOLGE FÜR DIE ANZEIGE: Die Taskleisten-Uhr zeigt UTC, bis die
+    // Anzeige-Zone gesetzt ist (Einstellungen -> Zeit). Das ist genau die
+    // Frage, die jedes echte Betriebssystem bei der Installation stellt.
+    qemu.arg("-rtc").arg("base=utc");
     // Grafikkarte: Das VRAM (vgamem_mb) ist der eigentliche
     // Auflösungs-Wähler — der EDID-Wunsch allein wird von OVMF
     // ignoriert (es nähme sonst immer den größten Modus überhaupt).
