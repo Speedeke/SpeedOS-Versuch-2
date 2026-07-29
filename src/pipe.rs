@@ -60,9 +60,32 @@
 // LOCK: `PIPES` ist ein BLATT-Lock (nimmt keine weiteren Locks). Der
 // Timer-Interrupt fragt ihn mit `try_lock` ab (nie warten!), Syscalls mit
 // ausgeschalteten Interrupts — dann haelt ihn garantiert niemand.
+//
+// ==========================================================================
+// SOFORTIGES WECKEN (Serie 7, Teil 0 — der Weck-Latenz-Pass)
+//
+// Bis hierher galt „NACHSEHEN STATT ANSTOSSEN": Der Timer fragte jeden Tick
+// nach, ob ein wartender Prozess weiterkann. Das kostete bis zu 4 ms je
+// Weckruf — und weil der Leser danach noch seine ganze Zeitscheibe zu Ende
+// laufen durfte, in der Praxis eine volle Scheduling-Runde (20 ms). Bei
+// 4 KiB Puffer waren das die gemessenen 199 KiB/s.
+//
+// JETZT STOESST DIE PIPE SELBST AN: Wer Bytes hineinlegt, weckt die Leser;
+// wer Bytes herausnimmt, weckt die Schreiber; wer ein Ende schliesst, weckt
+// die Gegenseite (Dateiende bzw. EPIPE). Der Timer BLEIBT als
+// SICHERHEITSNETZ — das sofortige Wecken ist die schnelle Spur, nicht die
+// einzige (siehe `scheduler::wecken`).
+//
+// DIE LOCK-FALLE DABEI, an der die erste Fassung gescheitert waere: Der
+// Timer haelt TABELLE und fragt dann `pipe::lesbar` (try_lock PIPES) — also
+// TABELLE -> PIPES. Wuerden wir hier aus `mit_pipes` HERAUS wecken, waere das
+// PIPES -> TABELLE, und damit ein klassisches ABBA. Deshalb wird der Weckruf
+// INNERHALB des Locks nur ERMITTELT und AUSSERHALB ausgeloest.
 // ==========================================================================
 
 use crate::netz::puffer::Ringpuffer;
+use crate::prozess::Warteauf;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::Mutex;
 
 /// Die Nummer einer Pipe (Index in der Tabelle, nur kernel-intern —
@@ -72,10 +95,66 @@ pub type PipeId = u32;
 /// Wie viele Pipes es gleichzeitig geben kann.
 pub const MAX_PIPES: usize = 16;
 
-/// Fassungsvermoegen einer Pipe. 4 KiB ist die klassische Wahl (eine Seite):
-/// gross genug, dass ein Schreiber nicht bei jeder Zeile blockiert, klein
-/// genug, dass der Gegendruck wirkt, bevor Megabytes im Kernel liegen.
-pub const KAPAZITAET: usize = 4096;
+// ---------------------------------------------------------------------------
+// DAS FASSUNGSVERMOEGEN — und warum 4 KiB zu klein waren
+// ---------------------------------------------------------------------------
+//
+// Die alte Wahl war eine Seite (4 KiB) mit der Begruendung „gross genug, dass
+// ein Schreiber nicht bei jeder Zeile blockiert". Das stimmt fuer Zeilen und
+// ist falsch fuer Datenstroeme, denn die Puffergroesse ist die STUECKGROESSE
+// JE WECKRUF: Ein Schreiber legt hoechstens `kapazitaet()` Bytes ab, bevor er
+// blockiert und der Leser geweckt werden muss. Der Durchsatz ist damit
+// hoechstens
+//
+//      Kapazitaet / Weck-Latenz
+//
+// — bei 4 KiB und einer 20-ms-Runde exakt die gemessenen 199 KiB/s. Das
+// sofortige Wecken drueckt die Latenz auf einen Kontext-Wechsel (~450 ns);
+// dann begrenzt nur noch, wie oft gewechselt werden MUSS, und das haengt
+// wieder an der Kapazitaet.
+//
+// 64 KiB, weil:
+//  * Es ist genau `syscall::MAX_PUFFER`. Damit kann EIN `schreibe`-Syscall
+//    eine leere Pipe fuellen und EIN `lese`-Syscall sie leeren — die
+//    Untergrenze von einem Kontext-Wechsel je 64 KiB ist erreichbar, ohne
+//    dass ein Programm etwas anders machen muesste.
+//  * Der Gegendruck wirkt weiterhin: 64 KiB sind gemessen ~0,3 ms
+//    Ringpuffer-Zeit, nicht „Megabytes liegen im Kernel".
+//  * SPEICHER-OBERGRENZE, ehrlich ausgerechnet: MAX_PIPES (16) x 64 KiB
+//    = 1 MiB Heap im schlimmsten Fall. Der Heap wird beim Boot um 1 MiB
+//    erweitert und beim Desktop-Start nach Aufloesung weiter — und in der
+//    Praxis existieren ein bis zwei Pipes gleichzeitig (je Pipeline-Stufe
+//    eine). Der Puffer wird erst beim `anlegen` alloziert, nicht auf Vorrat.
+//
+// KONFIGURIERBAR ist es, weil genau diese Zahl der Hebel zwischen Durchsatz
+// und Kernel-Speicher ist — und weil der ALT/NEU-Vergleich im Messtest sie
+// zur Laufzeit zurueckdrehen koennen muss (tests/wecken.rs).
+
+/// Voreinstellung des Fassungsvermoegens (Begruendung siehe oben).
+pub const STANDARD_KAPAZITAET: usize = 64 * 1024;
+/// Kleinstes erlaubtes Fassungsvermoegen. Darunter wird der Gegendruck zum
+/// Dauer-Blockieren; 512 Byte sind eine Zeile mit Reserve.
+pub const MIN_KAPAZITAET: usize = 512;
+/// Groesstes erlaubtes Fassungsvermoegen (16 x 256 KiB = 4 MiB Worst Case).
+pub const MAX_KAPAZITAET: usize = 256 * 1024;
+
+/// Das Fassungsvermoegen, das `anlegen()` benutzt. Zur Laufzeit aenderbar
+/// (`kapazitaet_setzen`); bestehende Pipes behalten ihres.
+static KAPAZITAET_STANDARD: AtomicUsize = AtomicUsize::new(STANDARD_KAPAZITAET);
+
+/// Das aktuell eingestellte Fassungsvermoegen neuer Pipes.
+pub fn kapazitaet() -> usize {
+    KAPAZITAET_STANDARD.load(Ordering::Relaxed)
+}
+
+/// Stellt das Fassungsvermoegen NEUER Pipes ein (auf `MIN..=MAX` geklemmt)
+/// und liefert den wirksam gewordenen Wert. Bestehende Pipes bleiben, wie
+/// sie sind — eine Pipe aendert ihre Groesse nie unter dem Benutzer.
+pub fn kapazitaet_setzen(bytes: usize) -> usize {
+    let wirksam = bytes.clamp(MIN_KAPAZITAET, MAX_KAPAZITAET);
+    KAPAZITAET_STANDARD.store(wirksam, Ordering::Relaxed);
+    wirksam
+}
 
 /// Welches Ende einer Pipe ist gemeint?
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,16 +194,69 @@ fn mit_pipes<T>(f: impl FnOnce(&mut [Option<Pipe>; MAX_PIPES]) -> T) -> T {
 }
 
 // ---------------------------------------------------------------------------
+// DER WECKRUF — ermittelt unter dem Lock, ausgeloest ausserhalb
+// ---------------------------------------------------------------------------
+
+/// Wer nach einer Pipe-Operation weiterkommen KANN. Reine Daten: Die
+/// Entscheidung faellt unter dem PIPES-Lock, das Wecken (das den
+/// TABELLE-Lock nimmt) passiert danach — siehe die ABBA-Warnung im Kopf.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Weckruf {
+    /// Leser dieser Pipe koennen fortfahren (Daten da oder Dateiende).
+    leser: bool,
+    /// Schreiber koennen fortfahren (Platz da oder kein Leser mehr).
+    schreiber: bool,
+}
+
+impl Weckruf {
+    const NICHTS: Weckruf = Weckruf {
+        leser: false,
+        schreiber: false,
+    };
+    const LESER: Weckruf = Weckruf {
+        leser: true,
+        schreiber: false,
+    };
+    const SCHREIBER: Weckruf = Weckruf {
+        leser: false,
+        schreiber: true,
+    };
+    const BEIDE: Weckruf = Weckruf {
+        leser: true,
+        schreiber: true,
+    };
+}
+
+/// Loest einen ermittelten Weckruf aus. **Nur AUSSERHALB von `mit_pipes`
+/// aufrufen** — hier wird der Prozess-Tabellen-Lock genommen.
+fn wecken(id: PipeId, ruf: Weckruf) {
+    if ruf.leser {
+        crate::scheduler::wecken(Warteauf::PipeLesen(id));
+    }
+    if ruf.schreiber {
+        crate::scheduler::wecken(Warteauf::PipeSchreiben(id));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Anlegen und Besitz
 // ---------------------------------------------------------------------------
 
-/// Legt eine neue Pipe an. Der Aufrufer haelt danach BEIDE Enden je einmal —
-/// er muss also beide wieder schliessen (oder weitergeben).
+/// Legt eine neue Pipe mit dem eingestellten Fassungsvermoegen an. Der
+/// Aufrufer haelt danach BEIDE Enden je einmal — er muss also beide wieder
+/// schliessen (oder weitergeben).
 pub fn anlegen() -> Option<PipeId> {
+    anlegen_mit(kapazitaet())
+}
+
+/// Legt eine Pipe mit einem AUSDRUECKLICHEN Fassungsvermoegen an (geklemmt
+/// auf `MIN_KAPAZITAET..=MAX_KAPAZITAET`).
+pub fn anlegen_mit(bytes: usize) -> Option<PipeId> {
+    let gross = bytes.clamp(MIN_KAPAZITAET, MAX_KAPAZITAET);
     mit_pipes(|pipes| {
         let platz = pipes.iter().position(|eintrag| eintrag.is_none())?;
         pipes[platz] = Some(Pipe {
-            puffer: Ringpuffer::neu(KAPAZITAET),
+            puffer: Ringpuffer::neu(gross),
             leser: 1,
             schreiber: 1,
         });
@@ -149,27 +281,48 @@ pub fn ende_uebernehmen(id: PipeId, ende: Ende) -> bool {
 
 /// Gibt ein Ende frei. Faellt sein Zaehler auf 0, gilt das Ende als
 /// geschlossen; sind BEIDE 0, verschwindet die Pipe mitsamt Puffer.
+///
+/// SCHLIESSEN IST EIN WECKGRUND, und zwar der wichtigste: Wer auf einer
+/// leeren Pipe schlaeft, wartet auf Daten, die nie mehr kommen — er muss
+/// aufwachen, um das DATEIENDE zu sehen. Genauso umgekehrt: Ein Schreiber,
+/// der auf Platz wartet, den niemand mehr schafft, muss aufwachen, um
+/// `Abgebrochen` (EPIPE) zu bekommen. Wird das vergessen, haengt der Prozess
+/// bis zur naechsten Timer-Pruefung — oder, wenn man den Timer als
+/// Sicherheitsnetz einspart, fuer immer.
 pub fn ende_schliessen(id: PipeId, ende: Ende) {
-    mit_pipes(|pipes| {
+    let ruf = mit_pipes(|pipes| {
         let platz = match pipes.get_mut(id as usize) {
             Some(platz) => platz,
-            None => return,
+            None => return Weckruf::NICHTS,
         };
-        let leer = match platz.as_mut() {
+        let (leer, ruf) = match platz.as_mut() {
             Some(pipe) => {
                 match ende {
                     Ende::Lesen => pipe.leser = pipe.leser.saturating_sub(1),
                     Ende::Schreiben => pipe.schreiber = pipe.schreiber.saturating_sub(1),
                 }
-                pipe.leser == 0 && pipe.schreiber == 0
+                let ruf = match ende {
+                    // Letzter Leser weg -> Schreiber wecken (EPIPE).
+                    Ende::Lesen if pipe.leser == 0 => Weckruf::SCHREIBER,
+                    // Letzter Schreiber weg -> Leser wecken (Dateiende).
+                    Ende::Schreiben if pipe.schreiber == 0 => Weckruf::LESER,
+                    _ => Weckruf::NICHTS,
+                };
+                (pipe.leser == 0 && pipe.schreiber == 0, ruf)
             }
-            None => false,
+            None => (false, Weckruf::NICHTS),
         };
         if leer {
-            // Hier fliesst der Ringpuffer-Speicher zurueck.
+            // Hier fliesst der Ringpuffer-Speicher zurueck. Wer jetzt noch
+            // auf DIESER Nummer schlaeft, bekommt beim Neustart des Syscalls
+            // `Ungueltig` — auch dafuer muss er geweckt werden, sonst
+            // schliefe er auf einer Pipe, die es nicht mehr gibt.
             *platz = None;
+            return Weckruf::BEIDE;
         }
-    })
+        ruf
+    });
+    wecken(id, ruf);
 }
 
 // ---------------------------------------------------------------------------
@@ -182,26 +335,30 @@ pub fn ende_schliessen(id: PipeId, ende: Ende) {
 /// * leer, Schreiber da  -> `Blockiert` (der Aufrufer legt den Prozess schlafen)
 /// * leer, kein Schreiber-> `Bytes(0)` = **Dateiende**
 pub fn lesen(id: PipeId, ziel: &mut [u8]) -> PipeErgebnis {
-    mit_pipes(|pipes| {
+    let (ergebnis, ruf) = mit_pipes(|pipes| {
         let pipe = match pipes.get_mut(id as usize).and_then(|p| p.as_mut()) {
             Some(pipe) => pipe,
-            None => return PipeErgebnis::Ungueltig,
+            None => return (PipeErgebnis::Ungueltig, Weckruf::NICHTS),
         };
         if ziel.is_empty() {
-            return PipeErgebnis::Bytes(0);
+            return (PipeErgebnis::Bytes(0), Weckruf::NICHTS);
         }
         let gelesen = pipe.puffer.lesen(ziel);
         if gelesen > 0 {
-            return PipeErgebnis::Bytes(gelesen);
+            // PLATZ IST FREI GEWORDEN -> ein blockierter Schreiber kann
+            // weiter. Das ist die eine Haelfte des Durchsatz-Gewinns.
+            return (PipeErgebnis::Bytes(gelesen), Weckruf::SCHREIBER);
         }
         // Nichts da. Ob das "warte" oder "Ende" heisst, entscheidet allein,
         // ob es ueberhaupt noch jemanden gibt, der schreiben KOENNTE.
         if pipe.schreiber == 0 {
-            PipeErgebnis::Bytes(0)
+            (PipeErgebnis::Bytes(0), Weckruf::NICHTS)
         } else {
-            PipeErgebnis::Blockiert
+            (PipeErgebnis::Blockiert, Weckruf::NICHTS)
         }
-    })
+    });
+    wecken(id, ruf);
+    ergebnis
 }
 
 /// Schreibt so viele Bytes wie moeglich.
@@ -211,26 +368,30 @@ pub fn lesen(id: PipeId, ziel: &mut [u8]) -> PipeErgebnis {
 /// * voll            -> `Blockiert`
 /// * kein Leser mehr -> `Abgebrochen` (POSIX-EPIPE)
 pub fn schreiben(id: PipeId, daten: &[u8]) -> PipeErgebnis {
-    mit_pipes(|pipes| {
+    let (ergebnis, ruf) = mit_pipes(|pipes| {
         let pipe = match pipes.get_mut(id as usize).and_then(|p| p.as_mut()) {
             Some(pipe) => pipe,
-            None => return PipeErgebnis::Ungueltig,
+            None => return (PipeErgebnis::Ungueltig, Weckruf::NICHTS),
         };
         // Die Leser-Pruefung kommt ZUERST: In eine Pipe zu schreiben, die
         // niemand mehr liest, ist auch dann ein Fehler, wenn noch Platz ist.
         if pipe.leser == 0 {
-            return PipeErgebnis::Abgebrochen;
+            return (PipeErgebnis::Abgebrochen, Weckruf::NICHTS);
         }
         if daten.is_empty() {
-            return PipeErgebnis::Bytes(0);
+            return (PipeErgebnis::Bytes(0), Weckruf::NICHTS);
         }
         let geschrieben = pipe.puffer.schreiben(daten);
         if geschrieben > 0 {
-            PipeErgebnis::Bytes(geschrieben)
+            // DATEN SIND DA -> ein blockierter Leser kann weiter. Die andere
+            // Haelfte des Durchsatz-Gewinns.
+            (PipeErgebnis::Bytes(geschrieben), Weckruf::LESER)
         } else {
-            PipeErgebnis::Blockiert
+            (PipeErgebnis::Blockiert, Weckruf::NICHTS)
         }
-    })
+    });
+    wecken(id, ruf);
+    ergebnis
 }
 
 // ---------------------------------------------------------------------------
@@ -274,6 +435,17 @@ pub fn schreibbar(id: PipeId) -> bool {
 /// Wie viele Pipes sind gerade offen? (Leck-Tests.)
 pub fn anzahl() -> usize {
     mit_pipes(|pipes| pipes.iter().filter(|eintrag| eintrag.is_some()).count())
+}
+
+/// Das Fassungsvermoegen EINER bestehenden Pipe (sie behaelt ihres, auch
+/// wenn die Voreinstellung sich seither geaendert hat).
+pub fn kapazitaet_von(id: PipeId) -> Option<usize> {
+    mit_pipes(|pipes| {
+        pipes
+            .get(id as usize)
+            .and_then(|p| p.as_ref())
+            .map(|pipe| pipe.puffer.kapazitaet())
+    })
 }
 
 /// Momentaufnahme einer Pipe: `(belegte Bytes, Leser, Schreiber)`.
@@ -330,9 +502,13 @@ mod tests {
     /// gelesen wurde, geht es genau um so viel weiter.
     #[test_case]
     fn test_pipe_voll_blockiert_und_weckt() {
-        let id = anlegen().expect("Pipe anlegen");
-        let brocken = alloc::vec![b'x'; KAPAZITAET];
-        assert_eq!(schreiben(id, &brocken), PipeErgebnis::Bytes(KAPAZITAET));
+        // Klein anlegen: Der Gegendruck ist hier der Prüfgegenstand, nicht
+        // der Durchsatz — mit 64 KiB wäre der Test nur langsamer.
+        let id = anlegen_mit(MIN_KAPAZITAET).expect("Pipe anlegen");
+        let gross = kapazitaet_von(id).expect("Kapazitaet");
+        assert_eq!(gross, MIN_KAPAZITAET);
+        let brocken = alloc::vec![b'x'; gross];
+        assert_eq!(schreiben(id, &brocken), PipeErgebnis::Bytes(gross));
         // Randvoll: kein Platz mehr.
         assert_eq!(schreiben(id, b"noch was"), PipeErgebnis::Blockiert);
         assert!(!schreibbar(id), "volle Pipe darf nicht schreibbar heissen");
@@ -421,6 +597,43 @@ mod tests {
         assert!(!ende_uebernehmen(id, Ende::Lesen));
     }
 
+    /// DAS FASSUNGSVERMOEGEN ist einstellbar, geklemmt — und eine bestehende
+    /// Pipe aendert es NIE unter dem Benutzer.
+    #[test_case]
+    fn test_pipe_kapazitaet_einstellbar() {
+        let vorher = kapazitaet();
+        assert_eq!(vorher, STANDARD_KAPAZITAET, "die Voreinstellung ist 64 KiB");
+        assert_eq!(STANDARD_KAPAZITAET, 64 * 1024);
+        // Der Deckel gilt in beide Richtungen — kein Wert kommt ungeprueft an.
+        assert_eq!(kapazitaet_setzen(0), MIN_KAPAZITAET);
+        assert_eq!(kapazitaet_setzen(usize::MAX), MAX_KAPAZITAET);
+        assert_eq!(kapazitaet_setzen(4096), 4096);
+        assert_eq!(kapazitaet(), 4096);
+
+        // Eine JETZT angelegte Pipe bekommt 4096 ...
+        let alt = anlegen().expect("Pipe");
+        assert_eq!(kapazitaet_von(alt), Some(4096));
+        // ... und behaelt sie, auch wenn die Voreinstellung danach steigt.
+        kapazitaet_setzen(STANDARD_KAPAZITAET);
+        assert_eq!(kapazitaet_von(alt), Some(4096), "Pipe waechst nachtraeglich");
+        let neu = anlegen().expect("Pipe");
+        assert_eq!(kapazitaet_von(neu), Some(STANDARD_KAPAZITAET));
+
+        // Ausdrueckliche Groesse ueberstimmt die Voreinstellung.
+        let klein = anlegen_mit(1024).expect("Pipe");
+        assert_eq!(kapazitaet_von(klein), Some(1024));
+        // Und sie fasst wirklich genau so viel.
+        assert_eq!(schreiben(klein, &alloc::vec![b'y'; 2000]), PipeErgebnis::Bytes(1024));
+        assert_eq!(schreiben(klein, b"x"), PipeErgebnis::Blockiert);
+
+        for id in [alt, neu, klein] {
+            ende_schliessen(id, Ende::Lesen);
+            ende_schliessen(id, Ende::Schreiben);
+        }
+        assert_eq!(kapazitaet_setzen(vorher), vorher);
+        assert_eq!(kapazitaet_von(alt), None, "abgeraeumte Pipe hat keine Groesse");
+    }
+
     /// Die Tabelle ist endlich, und das Volllaufen ist ein sauberer Fehler.
     #[test_case]
     fn test_pipe_tabelle_voll() {
@@ -442,8 +655,8 @@ mod tests {
     /// kommt doppelt — der Ringpuffer laeuft dabei mehrfach ueber.
     #[test_case]
     fn test_pipe_ringlauf_ohne_verlust() {
-        let id = anlegen().expect("Pipe anlegen");
-        const GESAMT: usize = KAPAZITAET * 3 + 777;
+        let id = anlegen_mit(MIN_KAPAZITAET).expect("Pipe anlegen");
+        const GESAMT: usize = MIN_KAPAZITAET * 3 + 777;
         let mut gesendet = 0usize;
         let mut empfangen = 0usize;
         let mut stueck = [0u8; 512];

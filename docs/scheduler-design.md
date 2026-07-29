@@ -351,6 +351,21 @@ CPU nur *weggenommen* worden sein.
   ein VFS-Syscall braucht deshalb erst das Warte-Modell („Prozess wird
   `Wartend`, ein Kernel-Task erledigt die Arbeit"), nicht einfach einen
   `mit_fs`-Aufruf im Syscall. Das ist Teil 4.
+- **Weck-Latenz.** *(Erledigt in Serie 7, Teil 0 — hier stand ursprünglich
+  „der Timer prüft je Tick nach, Preis max. 4 ms".)* Der Preis war in
+  Wahrheit eine ganze Scheduling-Runde und damit gemessen der Faktor 1000
+  beim Pipe-Durchsatz. Jetzt: `scheduler::wecken` macht Warter sofort
+  lauffähig, und ein **Reschedule-Punkt** (Syscall-Rückweg bzw.
+  `zeit::warte_auf_interrupt`) lässt den Scheduler direkt umplanen — über die
+  **normale zyklische Round-Robin-Wahl**, nie als direkte Übergabe an den
+  Geweckten (das wäre die einzige Variante, die einen Dritten aushungern
+  könnte). Die Timer-Prüfung bleibt als Sicherheitsnetz. Details und die
+  Fairness-Rechnung stehen im Kopfkommentar von `src/scheduler.rs`, die
+  ALT/NEU-Zahlen im CHANGELOG.
+- **Prioritäten für Weck-Ereignisse.** Ein gerade geweckter Prozess bekommt
+  keinen Bonus — er reiht sich normal ein. Das ist die einfachste Regel, die
+  fair bleibt; „geweckte zuerst" wäre der nächste Hebel, falls die
+  Antwortzeit einzelner Prozesse je zum Thema wird.
 - **SMP / APIC-Timer.** Unverändert vertagt (Bestandsaufnahme (a)).
 - **PCID.** Jeder Wechsel leert den TLB. Bei 20-ms-Scheiben irrelevant.
 - **Kernel-Stack-Wiederverwendung.** `memory::allocate_pages` zählt virtuelle

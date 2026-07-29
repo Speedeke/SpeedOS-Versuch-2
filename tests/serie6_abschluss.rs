@@ -530,24 +530,24 @@ fn test_leistung_pipe_durchsatz() {
         "    Ringpuffer allein (Kernel):  {} MiB/s",
         roh_mib_pro_s
     );
-    serial_println!("    DIE DIFFERENZ IST DIE WECK-LATENZ, nicht das Kopieren:");
+    // HISTORISCHE ANMERKUNG, damit die Zahl einzuordnen ist: Beim
+    // Serie-6-Abschluss standen hier 199 KiB/s gegen 241 MiB/s im
+    // Ringpuffer, und die Differenz war NICHT das Kopieren, sondern die
+    // WECK-LATENZ — 4 KiB Puffer je 20-ms-Scheduling-Runde. Beide damals
+    // benannten Hebel sind seither gezogen (Serie 7, Teil 0): sofortiges
+    // Wecken statt Timer-Pruefung und 64 KiB statt 4 KiB Puffer. Der
+    // ALT/NEU-Vergleich dazu steht in tests/wecken.rs; hier bleibt die
+    // laufende Messung.
     serial_println!(
-        "    Die Pipe fasst {} KiB. Ist sie voll, SCHLAEFT der Schreiber, und",
-        pipe::KAPAZITAET / 1024
+        "    Die Pipe fasst {} KiB; geweckt wird der Schreiber sofort beim",
+        pipe::kapazitaet() / 1024
     );
     serial_println!(
-        "    geweckt wird er erst, wenn der Timer die Bedingung nachprueft und"
+        "    Lesen, nicht erst bei der naechsten Timer-Pruefung. Beide Zahlen"
     );
     serial_println!(
-        "    er wieder an der Reihe ist — also etwa einmal je Scheduling-Runde"
+        "    liegen deshalb dicht beieinander — es begrenzt jetzt das Kopieren."
     );
-    serial_println!(
-        "    (20 ms). 4 KiB / 20 ms sind genau die gemessenen ~200 KiB/s."
-    );
-    serial_println!(
-        "    Hebel waeren ein groesserer Puffer oder ein sofortiges Wecken"
-    );
-    serial_println!("    durch den Leser statt der Pruefung im Timer.");
 
     assert!(bytes > 0, "durch die Pipe kam kein einziges Byte");
     assert!(roh_bytes > 0, "der Ringpuffer hat gar nichts uebertragen");

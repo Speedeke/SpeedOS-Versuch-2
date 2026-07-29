@@ -80,6 +80,98 @@ static WECHSEL_GESAMT: AtomicU64 = AtomicU64::new(0);
 static FREMDZEIT_US: AtomicU64 = AtomicU64::new(0);
 
 // ---------------------------------------------------------------------------
+// SOFORTIGES WECKEN (Serie 7, Teil 0 — der Weck-Latenz-Pass)
+// ---------------------------------------------------------------------------
+//
+// ==========================================================================
+// DIE ENTSCHEIDUNG: „LAUFFÄHIG MARKIEREN" **UND** EIN RESCHEDULE-PUNKT —
+// ABER NIEMALS EINE DIREKTE ÜBERGABE.
+//
+// Drei Möglichkeiten standen zur Wahl:
+//
+//  (a) NUR MARKIEREN. Der Geweckte wird `Lauffaehig` und wartet, bis die
+//      Zeitscheibe des Weckers abläuft. KLINGT sauber und LÖST DAS PROBLEM
+//      NICHT: Genau das war der gemessene Fall. Der Leser (PID 0) hatte nach
+//      dem Blockieren des Schreibers eine frische 20-ms-Scheibe; ob der
+//      Schreiber nach 4 ms per Timer-Prüfung oder nach 0 ms per Anstoss
+//      lauffähig wird, ändert nichts daran, dass er erst in 20 ms drankommt.
+//      Aus 199 KiB/s wären ~240 KiB/s geworden.
+//
+//  (b) DIREKTE ÜBERGABE an den Geweckten (klassisches „handoff scheduling").
+//      Am schnellsten — und die eine Variante, die WIRKLICH aushungert: Ein
+//      Ping-Pong-Paar A<->B übergibt sich die CPU gegenseitig, und ein
+//      dritter Prozess C kommt nie an die Reihe, weil er nie „der Geweckte"
+//      ist. VERWORFEN.
+//
+//  (c) RESCHEDULE-PUNKT über die NORMALE Round-Robin-Wahl — gewählt.
+//      Der Weckruf setzt nur ein Flag; am Rückweg des Syscalls (und in den
+//      synchronen Warteschleifen des Kernels) wird daraufhin `wechsel_
+//      entscheiden` mit `freiwillig = true` gefragt. Das Ziel ist damit
+//      IMMER der nächste Lauffähige HINTER dem aktuellen, nie „der, den ich
+//      gerade geweckt habe".
+//
+// WARUM (c) NICHT AUSHUNGERN KANN — das ist der Kern, und er steckt nicht in
+// einer Bremse, sondern in der Struktur: `naechster_lauffaehig` sucht
+// ZYKLISCH AB `aktuell + 1`. Im Ping-Pong A(Slot 1) <-> B(Slot 2) mit einem
+// dritten Prozess C(Slot 3) ergibt das
+//
+//      A weckt B, gibt ab -> nächster hinter 1 = 2 = B
+//      B weckt A, gibt ab -> nächster hinter 2 = 3 = **C**
+//
+// C kommt also schon in der zweiten Runde dran, ohne jedes Zutun. Der
+// Fairness-Beweis von `test_fairness_ueber_n_runden` gilt unverändert
+// weiter, denn es ist dieselbe Auswahlfunktion.
+//
+// WOGEGEN DENNOCH EINE BREMSE NÖTIG IST — nicht Verhungern, sondern
+// VERSCHWENDUNG: Ein Paar, das sich einzelne Bytes zuwirft, würde bei jedem
+// Byte einen Kontext-Wechsel (~450 ns, inklusive TLB-Leerung durch CR3)
+// auslösen. Der Durchsatz bräche nicht ein, aber ein beliebiger Anteil der
+// CPU ginge ins Umschalten. Deshalb ein BUDGET JE TIMER-TICK
+// (`SOFORT_MAX_PRO_TICK`): Danach wirkt der Weckruf nur noch markierend, und
+// der Geweckte wartet auf die normale Planung. Damit ist der Zusatzaufwand
+// nach oben hart gedeckelt (Rechnung an der Konstanten), und es gibt keinen
+// Eingabe-Datenstrom, mit dem ein Prozess den Scheduler beschäftigen kann.
+//
+// DER TIMER BLEIBT DAS SICHERHEITSNETZ. `warter_wecken` prüft weiterhin
+// JEDEN Tick alle Weck-Bedingungen nach. Das sofortige Wecken ist die
+// SCHNELLE SPUR, nicht die einzige — deshalb darf `wecken()` mit `try_lock`
+// arbeiten und im Zweifel gar nichts tun, ohne dass ein Weckruf verloren
+// geht. Genau das macht die Sache erst sicher: Ein Weckruf, der aussetzt,
+// kostet 4 ms; ein Weckruf, der als EINZIGER Weg gedacht wäre, würde einen
+// Prozess für immer schlafen lassen.
+// ==========================================================================
+
+/// Schaltet das sofortige Wecken samt Reschedule-Punkt ab/an. Der Standard
+/// ist AN; ausgeschaltet verhält sich der Kernel exakt wie vor diesem Pass
+/// (nur die Timer-Prüfung weckt) — das ist der ALT-Zweig der Messung.
+static SOFORT_AN: AtomicBool = AtomicBool::new(true);
+/// „Es wurde jemand geweckt — bei nächster Gelegenheit neu planen."
+static UMPLANUNG: AtomicBool = AtomicBool::new(false);
+/// Wie viele sofortige Umplanungen in DIESEM Tick schon stattfanden.
+static SOFORT_BUDGET: AtomicU32 = AtomicU32::new(0);
+/// Wie viele Prozesse insgesamt sofort geweckt wurden (Statistik).
+static SOFORT_WECKUNGEN: AtomicU64 = AtomicU64::new(0);
+/// Wie viele Kontext-Wechsel daraus entstanden (Statistik).
+static SOFORT_WECHSEL: AtomicU64 = AtomicU64::new(0);
+/// Wie oft das Budget gegriffen hat (Statistik — wird das je gross, redet
+/// ein Programm in zu kleinen Häppchen).
+static SOFORT_GEBREMST: AtomicU64 = AtomicU64::new(0);
+
+/// FAIRNESS-BREMSE: höchstens so viele weck-getriebene Umplanungen je
+/// Timer-Tick (4 ms).
+///
+/// DIE RECHNUNG, aus der die Zahl kommt: Ein Kontext-Wechsel kostet gemessen
+/// ~450 ns. 16 Wechsel sind 7,2 µs — bei 4 ms Tick sind das **0,18 %** der
+/// CPU, die ein noch so gesprächiges Prozess-Paar maximal ins Umschalten
+/// stecken kann. Nach oben ist die Zahl also durch „vernachlässigbarer
+/// Aufwand" begrenzt, nach unten dadurch, dass ein produktiver Datenstrom
+/// sie nie erreichen soll: Eine 64-KiB-Pipe braucht EINEN Weckruf je
+/// 64 KiB — 16 Weckrufe je 4 ms wären 256 MiB/s, mehr als der Ringpuffer
+/// selbst schafft. Wer das Budget ausschöpft, tauscht also nicht Daten,
+/// sondern schaltet um.
+const SOFORT_MAX_PRO_TICK: u32 = 16;
+
+// ---------------------------------------------------------------------------
 // (A) DIE REINEN ENTSCHEIDUNGS-FUNKTIONEN
 //
 // Bewusst ohne Globals, ohne Hardware, ohne Locks — damit die eigentliche
@@ -162,6 +254,103 @@ pub fn wechsel_entscheiden(
     }
     // Regel 3: Nur wechseln, wenn es einen ANDEREN Lauffähigen gibt.
     naechster_lauffaehig(zustaende, aktuell).filter(|ziel| *ziel != aktuell)
+}
+
+/// PASST EIN EREIGNIS AUF EINEN WARTEGRUND? Reine Funktion, damit die
+/// Zuordnung „wer wird von was geweckt" ohne Hardware prüfbar ist.
+///
+/// Zwei Feinheiten stecken darin:
+///  * `Kind(0)` heisst „irgendein Kind" und passt deshalb auf JEDES
+///    Kind-Ereignis. Andersherum gilt das nicht: Wer auf Kind 7 wartet, wird
+///    vom Ende von Kind 9 nicht geweckt.
+///  * `Zeit` passt auf NICHTS. Ein Weckzeitpunkt ist keine Nachricht, die
+///    jemand schickt — den prüft allein der Timer (`weck_faellig`). Stünde
+///    hier `(Zeit, Zeit) => true`, könnte ein beliebiger Anstoss einen
+///    Schläfer VOR seiner Zeit wecken.
+pub fn weck_passt(wartet_auf: Warteauf, ereignis: Warteauf) -> bool {
+    match (wartet_auf, ereignis) {
+        (Warteauf::PipeLesen(a), Warteauf::PipeLesen(b)) => a == b,
+        (Warteauf::PipeSchreiben(a), Warteauf::PipeSchreiben(b)) => a == b,
+        (Warteauf::Kind(wartend), Warteauf::Kind(geendet)) => wartend == 0 || wartend == geendet,
+        _ => false,
+    }
+}
+
+/// WECKT alle Prozesse, die auf `ereignis` warten — sofort, ohne auf den
+/// Timer-Tick zu warten. Liefert, wie viele es waren.
+///
+/// Aufrufbar aus jedem Kontext (Kernel, Syscall), aber **nie unter einem
+/// anderen Lock**, den der Timer-Pfad ebenfalls nimmt: Diese Funktion nimmt
+/// TABELLE, und der Timer nimmt TABELLE und DANN die Blatt-Locks (PIPES).
+/// Wer hier aus einem Blatt-Lock heraus aufruft, baut ein ABBA — deshalb
+/// ermittelt `pipe.rs` seinen Weckruf unter dem Lock und löst ihn danach aus.
+///
+/// `try_lock`: Bekommen wir die Tabelle nicht, passiert schlicht nichts. Der
+/// Weckruf ist dann nicht verloren, sondern nur langsam — der Timer prüft
+/// die Bedingung im nächsten Tick ohnehin nach.
+pub fn wecken(ereignis: Warteauf) -> usize {
+    if !SOFORT_AN.load(Ordering::Relaxed) || !PLANUNG_AN.load(Ordering::Relaxed) {
+        return 0;
+    }
+    let geweckt = {
+        let mut tabelle = match TABELLE.try_lock() {
+            Some(tabelle) => tabelle,
+            None => return 0,
+        };
+        let mut anzahl = 0usize;
+        for prozess in tabelle.iter_mut().flatten() {
+            if prozess.zustand != Zustand::Wartend {
+                continue;
+            }
+            let passt = matches!(prozess.wartet_auf, Some(grund) if weck_passt(grund, ereignis));
+            if passt {
+                prozess.wach_ab_ms = 0;
+                prozess.wartet_auf = None;
+                prozess.zustand = Zustand::Lauffaehig;
+                anzahl += 1;
+            }
+        }
+        anzahl
+    };
+    if geweckt > 0 {
+        SOFORT_WECKUNGEN.fetch_add(geweckt as u64, Ordering::Relaxed);
+        // NUR MERKEN, nicht hier umschalten: Der Aufrufer steckt womöglich
+        // mitten in einer Kernel-Operation. Umgeplant wird an definierten
+        // Punkten (Syscall-Rückweg, synchrone Warteschleife).
+        UMPLANUNG.store(true, Ordering::Relaxed);
+    }
+    geweckt
+}
+
+/// Liegt eine Umplanungs-Anforderung an? (Für die synchronen Warteschleifen
+/// des Kernels — `zeit::warte_auf_interrupt`.)
+pub fn umplanung_offen() -> bool {
+    SOFORT_AN.load(Ordering::Relaxed) && UMPLANUNG.load(Ordering::Relaxed)
+}
+
+/// Schaltet das sofortige Wecken um (Messung ALT/NEU) und liefert den alten
+/// Zustand. AUS heisst: nur der Timer weckt, kein Reschedule-Punkt.
+pub fn sofort_wecken_setzen(an: bool) -> bool {
+    let vorher = SOFORT_AN.swap(an, Ordering::SeqCst);
+    if !an {
+        UMPLANUNG.store(false, Ordering::SeqCst);
+    }
+    vorher
+}
+
+/// Läuft das sofortige Wecken?
+pub fn sofort_wecken_an() -> bool {
+    SOFORT_AN.load(Ordering::Relaxed)
+}
+
+/// Statistik: `(sofort geweckte Prozesse, daraus entstandene Wechsel,
+/// vom Fairness-Budget gebremste Umplanungen)`.
+pub fn sofort_statistik() -> (u64, u64, u64) {
+    (
+        SOFORT_WECKUNGEN.load(Ordering::Relaxed),
+        SOFORT_WECHSEL.load(Ordering::Relaxed),
+        SOFORT_GEBREMST.load(Ordering::Relaxed),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -320,6 +509,13 @@ enum Grund {
     Verdraengt,
     /// Der Prozess hat selbst abgegeben (yield/schlafen/exit).
     Freiwillig,
+    /// Ein WECKRUF hat umgeplant. Technisch wie `Freiwillig` (der Kontext
+    /// wird ganz normal gesichert), aber es zählt NICHT als Abgabe des
+    /// Prozesses: Er hat nicht abgegeben, ihm wurde im Interesse eines
+    /// Geweckten dazwischengefunkt. Würde das als `abgaben` gebucht, wären
+    /// die Präemptions-Beweise aus Teil 3 („0 Abgaben") plötzlich falsch,
+    /// ohne dass sich am Prozess etwas geändert hätte.
+    Umplanung,
     /// Der Prozess ist gestorben (Fault) — kein Kontext zu sichern.
     Tod,
 }
@@ -335,6 +531,14 @@ fn zustands_bild(tabelle: &Tabelle) -> [Option<Zustand>; MAX_PROZESSE] {
 }
 
 /// Weckt alle wartenden Prozesse, deren Bedingung jetzt erfüllt ist.
+///
+/// SEIT DEM SOFORTIGEN WECKEN IST DAS DAS SICHERHEITSNETZ, nicht mehr der
+/// Hauptweg: Im Normalfall hat `wecken()` den Prozess längst lauffähig
+/// gemacht, bevor dieser Tick kommt. Diese Schleife bleibt trotzdem, und
+/// zwar vollständig — denn `wecken()` darf aussetzen (`try_lock`), und die
+/// Zeit-Bedingung (`schlafe(ms)`) hat gar keinen Anstosser. Ein Weckruf, der
+/// hier durchfällt, kostet 4 ms; einer, der nirgends nachgeprüft würde,
+/// wäre ein Prozess, der nie wieder aufwacht.
 ///
 /// Läuft bei JEDEM Timer-Tick (4 ms) und ist deshalb streng an die
 /// Interrupt-Handler-Regel gebunden: keine Allokation, kein blockierendes
@@ -405,6 +609,20 @@ fn ende_vermerken(tabelle: &mut Tabelle, slot: usize, ende: ProzessEnde) {
             .find(|kandidat| kandidat.pid == eltern_pid && kandidat.zustand != Zustand::Beendet)
         {
             elternteil.kind_ende_ablegen(pid, ende);
+            // SOFORT WECKEN, wenn der Elternteil genau darauf gewartet hat.
+            // Nicht über `wecken()`: Wir HALTEN die Tabelle schon (der
+            // Aufrufer hat sie), ein zweiter Zugriff wäre ein Selbst-Deadlock.
+            // Das Ereignis liegt hier ohnehin direkt vor uns.
+            let wartet = elternteil.zustand == Zustand::Wartend
+                && matches!(elternteil.wartet_auf,
+                    Some(grund) if weck_passt(grund, Warteauf::Kind(pid)));
+            if wartet && SOFORT_AN.load(Ordering::Relaxed) {
+                elternteil.wach_ab_ms = 0;
+                elternteil.wartet_auf = None;
+                elternteil.zustand = Zustand::Lauffaehig;
+                SOFORT_WECKUNGEN.fetch_add(1, Ordering::Relaxed);
+                UMPLANUNG.store(true, Ordering::Relaxed);
+            }
         }
     }
 }
@@ -469,6 +687,13 @@ fn wechsel_ausfuehren(
                     alt.zustand = Zustand::Lauffaehig;
                 }
             }
+            Grund::Umplanung => {
+                alt.kontext = kontext_alt;
+                // KEIN `abgaben += 1` — siehe die Begründung am Enum.
+                if alt.zustand == Zustand::Laeuft {
+                    alt.zustand = Zustand::Lauffaehig;
+                }
+            }
         }
     }
 
@@ -508,6 +733,11 @@ fn wechsel_ausfuehren(
 extern "C" fn timer_dispatch(rahmen: *mut TrapFrame) -> *mut TrapFrame {
     // Exakt das, was der alte timer_interrupt_handler getan hat:
     crate::interrupts::timer_basisarbeit();
+
+    // Das Fairness-Budget für weck-getriebene Umplanungen füllt sich JE TICK
+    // wieder auf. Genau dadurch ist der Zusatzaufwand eine Rate (Wechsel je
+    // 4 ms) und keine Gesamtzahl, die irgendwann erschöpft wäre.
+    SOFORT_BUDGET.store(0, Ordering::Relaxed);
 
     if !PLANUNG_AN.load(Ordering::Relaxed) || SPERRE.load(Ordering::Relaxed) > 0 {
         return rahmen;
@@ -580,6 +810,13 @@ extern "C" fn scheduler_sterben() -> *mut TrapFrame {
 /// Gemeinsamer Weg aller FREIWILLIGEN Abgaben (yield, schlafen, exit).
 /// Liefert den Rahmen, mit dem es weitergeht (evtl. derselbe).
 fn freiwillig_wechseln(rahmen: *mut TrapFrame) -> *mut TrapFrame {
+    wechseln_mit_grund(rahmen, Grund::Freiwillig)
+}
+
+/// Wie `freiwillig_wechseln`, aber mit ausdrücklichem Grund — der
+/// Reschedule-Punkt benutzt `Grund::Umplanung`, damit er nicht als Abgabe
+/// des verdrängten Prozesses gebucht wird.
+fn wechseln_mit_grund(rahmen: *mut TrapFrame, grund: Grund) -> *mut TrapFrame {
     if !PLANUNG_AN.load(Ordering::Relaxed) || SPERRE.load(Ordering::Relaxed) > 0 {
         return rahmen;
     }
@@ -589,23 +826,74 @@ fn freiwillig_wechseln(rahmen: *mut TrapFrame) -> *mut TrapFrame {
     };
     let aktuell = AKTUELL.load(Ordering::Relaxed);
     let bild = zustands_bild(&tabelle);
+    // `freiwillig = true`: DIESELBE Round-Robin-Wahl wie bei yield — nie eine
+    // direkte Übergabe an den Geweckten (siehe die Entscheidung oben).
     let ziel = match wechsel_entscheiden(&bild, aktuell, false, true) {
         Some(ziel) => ziel,
         None => return rahmen,
     };
-    let neuer = wechsel_ausfuehren(
-        &mut tabelle,
-        aktuell,
-        ziel,
-        rahmen as u64,
-        Grund::Freiwillig,
-        false,
-    );
+    let neuer = wechsel_ausfuehren(&mut tabelle, aktuell, ziel, rahmen as u64, grund, false);
     if neuer == 0 {
         rahmen
     } else {
         neuer as *mut TrapFrame
     }
+}
+
+/// DER RESCHEDULE-PUNKT am Rückweg jedes Syscalls.
+///
+/// Hat der gerade gelaufene Syscall jemanden geweckt (z. B. `schreibe` in
+/// eine leere Pipe, auf der ein anderer Prozess schlief), bekommt der
+/// Scheduler hier die Gelegenheit, sofort umzuplanen — statt den Geweckten
+/// bis zum Ablauf der laufenden Zeitscheibe warten zu lassen.
+///
+/// WARUM GENAU HIER: Das ist der einzige Punkt im Syscall-Pfad, an dem
+/// GARANTIERT kein Kernel-Lock gehalten wird und der gesicherte Kontext
+/// vollständig ist (Ergebnis steht schon in rax/rdx). Ein Wechsel mitten im
+/// Syscall wäre beides nicht.
+///
+/// Der Aufrufer übergibt den Rahmen, den der Syscall ohnehin zurückgeben
+/// würde — hat der Syscall selbst schon umgeschaltet (exit/yield/blockieren),
+/// wird diese Funktion gar nicht erst gerufen.
+pub fn umplanen_am_syscall_ende(rahmen: *mut TrapFrame) -> *mut TrapFrame {
+    // `swap`: Die Anforderung gilt genau einmal. Wer sie sich holt, plant um.
+    if !SOFORT_AN.load(Ordering::Relaxed) || !UMPLANUNG.swap(false, Ordering::Relaxed) {
+        return rahmen;
+    }
+    // FAIRNESS-BREMSE: Ist das Budget dieses Ticks aufgebraucht, wirkt der
+    // Weckruf nur markierend — der Geweckte ist lauffähig und kommt über die
+    // normale Planung dran (spätestens beim Ablauf der Zeitscheibe).
+    if SOFORT_BUDGET.fetch_add(1, Ordering::Relaxed) >= SOFORT_MAX_PRO_TICK {
+        SOFORT_GEBREMST.fetch_add(1, Ordering::Relaxed);
+        return rahmen;
+    }
+    let neuer = wechseln_mit_grund(rahmen, Grund::Umplanung);
+    if neuer != rahmen {
+        SOFORT_WECHSEL.fetch_add(1, Ordering::Relaxed);
+    }
+    neuer
+}
+
+/// Der Reschedule-Punkt für KERNEL-Kontext (synchrone Warteschleifen).
+///
+/// Ein Kernel-Task kann nicht einfach seinen Trap-Rahmen umbiegen — er hat
+/// keinen. Also gibt er stattdessen die Zeitscheibe per `int 0x80` ab; der
+/// Weg durch den Syscall-Dispatcher ist derselbe wie bei einem Ring-3-yield.
+/// Liefert `true`, wenn abgegeben wurde.
+///
+/// DIE FAIRNESS-BREMSE GILT AUCH HIER — sonst könnte ein Kernel-Task, der
+/// eine Pipe leert, dasselbe Umschalt-Karussell auslösen.
+pub fn umplanen_im_kernel() -> bool {
+    if !SOFORT_AN.load(Ordering::Relaxed) || !UMPLANUNG.swap(false, Ordering::Relaxed) {
+        return false;
+    }
+    if SOFORT_BUDGET.fetch_add(1, Ordering::Relaxed) >= SOFORT_MAX_PRO_TICK {
+        SOFORT_GEBREMST.fetch_add(1, Ordering::Relaxed);
+        return false;
+    }
+    SOFORT_WECHSEL.fetch_add(1, Ordering::Relaxed);
+    abgeben();
+    true
 }
 
 /// Syscall `yield`: Zeitscheibe sofort abgeben.
@@ -1177,12 +1465,18 @@ pub fn andere_lauffaehig() -> bool {
     if !PLANUNG_AN.load(Ordering::Relaxed) {
         return false; // billiger Normalfall: ein Atomic-Laden
     }
-    mit_tabelle(|tabelle| {
-        tabelle
+    // `try_lock` statt `lock`, seit `zeit::warte_auf_interrupt` das hier
+    // fragt: Diese Funktion ist ein HINWEIS, keine Wahrheit, und sie wird aus
+    // Warteschleifen gerufen, deren Aufrufer die Tabelle theoretisch schon
+    // halten könnte. Ein Fehlversuch heisst „im Zweifel schlafen" — die
+    // nächste Runde fragt erneut, und der Timer plant ohnehin weiter.
+    x86_64::instructions::interrupts::without_interrupts(|| match TABELLE.try_lock() {
+        Some(tabelle) => tabelle
             .iter()
             .skip(1)
             .filter_map(|eintrag| eintrag.as_ref())
-            .any(|prozess| prozess.zustand.ist_lauffaehig())
+            .any(|prozess| prozess.zustand.ist_lauffaehig()),
+        None => false,
     })
 }
 
@@ -1423,6 +1717,114 @@ mod tests {
         // Geweckt (das macht schlaefer_wecken im Timer): sofort wieder dabei.
         bild[1] = Some(Lauffaehig);
         assert_eq!(wechsel_entscheiden(&bild, 0, true, false), Some(1));
+    }
+
+    /// DIE WECK-ZUORDNUNG: Wer wird von welchem Ereignis geweckt — und
+    /// vor allem: wer NICHT.
+    #[test_case]
+    fn test_weck_passt() {
+        use Warteauf::*;
+        // Dieselbe Pipe, dieselbe Richtung -> passt.
+        assert!(weck_passt(PipeLesen(3), PipeLesen(3)));
+        assert!(weck_passt(PipeSchreiben(3), PipeSchreiben(3)));
+        // FREMDE Pipe -> nie. (Sonst würde ein Datenstrom auf Pipe 3 die
+        // Warter aller anderen Pipes wecken; sie liefen alle in einen
+        // Syscall-Neustart und blockierten sofort wieder.)
+        assert!(!weck_passt(PipeLesen(3), PipeLesen(4)));
+        assert!(!weck_passt(PipeSchreiben(0), PipeSchreiben(1)));
+        // FALSCHE RICHTUNG -> nie: Wer auf Platz wartet, wird von neuen
+        // Daten nicht lauffähig.
+        assert!(!weck_passt(PipeLesen(3), PipeSchreiben(3)));
+        assert!(!weck_passt(PipeSchreiben(3), PipeLesen(3)));
+
+        // Kinder: `0` heisst "irgendeines" und passt auf alles ...
+        assert!(weck_passt(Kind(0), Kind(7)));
+        assert!(weck_passt(Kind(7), Kind(7)));
+        // ... aber nicht andersherum, und nicht auf ein fremdes Kind.
+        assert!(!weck_passt(Kind(7), Kind(9)));
+        assert!(!weck_passt(Kind(7), Kind(0)));
+
+        // ZEIT wird NIE angestossen — sie gehört allein dem Timer. Ein
+        // Schläfer darf durch keinen Weckruf vor seiner Zeit hochkommen.
+        assert!(!weck_passt(Zeit, Zeit));
+        assert!(!weck_passt(Zeit, PipeLesen(0)));
+        assert!(!weck_passt(PipeLesen(0), Zeit));
+        assert!(!weck_passt(Zeit, Kind(0)));
+    }
+
+    /// Der Reschedule-Punkt benutzt DIESELBE Auswahl wie `yield` — daraus
+    /// folgt, dass ein Ping-Pong-Paar niemanden aushungern KANN.
+    ///
+    /// Nachgerechnet an genau der Konstellation aus dem Entwurfs-Kommentar:
+    /// A (Slot 1) und B (Slot 2) wecken sich abwechselnd, C (Slot 3) tut
+    /// nichts als lauffähig zu sein. Bei einer direkten Übergabe an den
+    /// Geweckten käme C nie dran — über die zyklische Suche kommt er in
+    /// jeder Runde dran.
+    #[test_case]
+    fn test_pingpong_hungert_niemanden_aus() {
+        use Zustand::*;
+        let mut bild = [
+            Some(Lauffaehig), // 0 Kernel
+            Some(Laeuft),     // 1 = A
+            Some(Lauffaehig), // 2 = B
+            Some(Lauffaehig), // 3 = C
+            None,
+            None,
+            None,
+            None,
+        ];
+        let mut aktuell = 1usize;
+        let mut zaehler = [0usize; MAX_PROZESSE];
+        const RUNDEN: usize = 200;
+        for _ in 0..RUNDEN {
+            // Jeder Schritt ist ein weck-getriebener Reschedule: freiwillig,
+            // Zeitscheibe NICHT abgelaufen — genau die Argumente, mit denen
+            // `umplanen_am_syscall_ende` fragt.
+            let ziel = wechsel_entscheiden(&bild, aktuell, false, true)
+                .expect("bei mehreren Lauffaehigen muss ein Ziel existieren");
+            bild[aktuell] = Some(Lauffaehig);
+            bild[ziel] = Some(Laeuft);
+            aktuell = ziel;
+            zaehler[ziel] += 1;
+        }
+        // C (Slot 3) bekommt GENAU seinen Viertel-Anteil — nicht "wenigstens
+        // etwas", sondern denselben wie A und B.
+        let erwartet = RUNDEN / 4;
+        for slot in [0usize, 1, 2, 3] {
+            assert_eq!(
+                zaehler[slot], erwartet,
+                "Slot {} kam {}x dran statt {}x — das Ping-Pong-Paar hungert aus",
+                slot, zaehler[slot], erwartet
+            );
+        }
+    }
+
+    /// Die Fairness-Bremse ist eine RATE, kein Vorrat: Sie deckelt den
+    /// Umschalt-Aufwand je Tick auf einen vernachlässigbaren Anteil.
+    #[test_case]
+    fn test_fairness_budget_rechnung() {
+        // 16 Wechsel à ~450 ns je 4-ms-Tick = 7,2 us = 0,18 % CPU.
+        assert_eq!(SOFORT_MAX_PRO_TICK, 16);
+        let ns_je_tick = SOFORT_MAX_PRO_TICK as u64 * 450;
+        let tick_ns = crate::zeit::ms_von_ticks(1) * 1_000_000;
+        assert!(
+            ns_je_tick * 200 < tick_ns,
+            "das Budget darf nie mehr als 0,5 % eines Ticks kosten ({} von {} ns)",
+            ns_je_tick,
+            tick_ns
+        );
+        // Und ein produktiver Datenstrom braucht nur EINEN Weckruf je
+        // Pipe-Füllung — er kann das Budget gar nicht ausschöpfen. Rechnung:
+        // Budget x Kapazität x Ticks/s wären hier > 200 MiB/s, mehr als der
+        // Ringpuffer selbst schafft.
+        let obergrenze = SOFORT_MAX_PRO_TICK as u64
+            * crate::pipe::STANDARD_KAPAZITAET as u64
+            * (1000 / crate::zeit::ms_von_ticks(1));
+        assert!(
+            obergrenze > 200 * 1024 * 1024,
+            "das Budget bremst schon produktive Stroeme aus ({} B/s)",
+            obergrenze
+        );
     }
 
     /// Spur-Auswertung: die Zahlen, mit denen der Präemptions-Beweis

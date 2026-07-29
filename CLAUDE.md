@@ -573,6 +573,12 @@
   Timer prueft je Tick die Bedingung. Anstossen aus dem schreibenden Prozess
   waere schneller — und eine Lock-Kette quer durch den Kernel, aus einem
   Syscall heraus, in dem man nicht warten darf. Preis: max. 1 Tick (4 ms).
+  **UEBERHOLT IN SERIE 7, TEIL 0** (siehe „SOFORTIGES WECKEN" weiter unten):
+  Angestossen wird jetzt doch — die Lock-Kette wurde vermieden, indem der
+  Weckruf UNTER dem Blatt-Lock nur ermittelt und DANACH ausgeloest wird, und
+  indem `wecken` nie auf einen Lock wartet. Das Nachsehen im Timer BLEIBT
+  als Sicherheitsnetz; der Preis von 4 ms war gemessen der Faktor 1000 beim
+  Pipe-Durchsatz.
   ELTERN/KIND OHNE ZOMBIES — die UMKEHRUNG des Unix-Modells: Nicht der
   Kind-Eintrag bleibt liegen, sondern das ERGEBNIS wandert beim Ende in
   `Prozess::kinder_enden` des ELTERNTEILS (FESTES Feld, keine Allokation im
@@ -650,6 +656,44 @@
   bekommt dafuer genau EINEN neuen Syscall: `zufall`. Voraussetzung und
   erster Schritt ist `src/zufall.rs` (RDSEED/RDRAND + Interrupt-Entropie +
   ChaCha20-DRBG) — es gibt heute KEINEN Zufallsgenerator im System.
+- **SOFORTIGES WECKEN + RESCHEDULE-PUNKT (Serie 7, Teil 0) — die Weck-Latenz
+  ist weg:** Die Regel „NACHSEHEN STATT ANSTOSSEN" aus Teil 6 gilt NICHT mehr
+  als einziger Weg: `scheduler::wecken(Warteauf)` macht Warter SOFORT
+  lauffaehig (Pipe gefuellt/geleert/geschlossen, Kind beendet). Der TIMER
+  BLEIBT SICHERHEITSNETZ — `wecken` nimmt `try_lock` und darf folgenlos
+  aussetzen, `warter_wecken` prueft weiter jeden Tick nach; die Zeit-Bedingung
+  (`schlafe`) hat ohnehin keinen Anstosser (`weck_passt` laesst `Zeit` von
+  KEINEM Ereignis wecken). LOCK-FALLE: Der Weckruf wird UNTER dem Blatt-Lock
+  nur ERMITTELT und DANACH ausgeloest — der Timer nimmt TABELLE→PIPES, aus
+  `mit_pipes` heraus zu wecken waere PIPES→TABELLE = ABBA.
+  DIE ENTSCHEIDUNG (Begruendung in scheduler.rs): NUR MARKIEREN reicht nicht
+  (der Wecker haelt seine Scheibe), DIREKTE UEBERGABE an den Geweckten
+  hungert aus (Ping-Pong-Paar sperrt Dritte aus) — gewaehlt ist ein
+  RESCHEDULE-PUNKT ueber die NORMALE Round-Robin-Wahl: `wechsel_entscheiden`
+  mit `freiwillig = true`, Ziel ist immer der naechste Lauffaehige HINTER dem
+  aktuellen. Weil `naechster_lauffaehig` zyklisch sucht, ist Aushungern
+  STRUKTURELL ausgeschlossen; die FAIRNESS-BREMSE (`SOFORT_MAX_PRO_TICK = 16`
+  je Tick, danach nur noch markieren) deckelt nicht das Verhungern, sondern
+  den UMSCHALT-AUFWAND (16 x 450 ns je 4 ms = 0,18 % CPU). Zwei Punkte:
+  `syscall::umplanen_falls_noetig` (nur wenn der Syscall nicht schon selbst
+  gewechselt hat) und `scheduler::umplanen_im_kernel` (aus
+  `zeit::warte_auf_interrupt`). `Grund::Umplanung` zaehlt bewusst NICHT als
+  `abgaben` — sonst waeren die Praemptions-Beweise aus Teil 3 („0 Abgaben")
+  ploetzlich falsch. ALT/NEU-Schalter fuer Messungen:
+  `scheduler::sofort_wecken_setzen`, `pipe::kapazitaet_setzen`.
+  PIPE-PUFFER: `pipe::STANDARD_KAPAZITAET` = **64 KiB** (war 4 KiB), zur
+  Laufzeit einstellbar (512 B .. 256 KiB), `anlegen_mit` fuer eine
+  ausdrueckliche Groesse; eine bestehende Pipe aendert ihre Groesse NIE.
+  Begruendung: Die Puffergroesse IST die Stueckgroesse je Weckruf
+  (Durchsatz <= Kapazitaet / Weck-Latenz), und 64 KiB == `MAX_PUFFER`, also
+  fuellt EIN `schreibe` eine leere Pipe. ZAHLEN (`tests/wecken.rs`, ALT/NEU im
+  selben Lauf): Weck-Latenz 3558 -> **17 us**, Pipe Prozess->Kernel 203 KiB/s
+  -> **202 MiB/s**, Prozess->Prozess 101 KiB/s -> **199 MiB/s** (= roher
+  Ringpuffer, es begrenzt jetzt das Kopieren), Socket-`sende` 24 MiB/s /
+  40 us. SOCKETS sind NICHT betroffen und das ist nachpruefbar: `empfange`
+  ist laut ABI nicht-blockierend, es WARTET also nie ein Prozess auf einen
+  Socket — die Maschinerie ist allgemein, ein spaeteres blockierendes
+  `empfange` braucht nur einen `wecken`-Aufruf im Zustell-Pfad.
 - **DIE hlt-FALLE IM SYSCALL (Serie 6, Teil 5) — `zeit::warte_auf_interrupt()`:**
   `int 0x80` geht durch ein INTERRUPT-Gate, im Syscall sind Interrupts also
   AUS. Ein blankes `hlt` haelt die CPU dann FUER IMMER an (nichts kann sie
@@ -660,7 +704,11 @@
   geschalteten Interrupts ein Wartefenster (`enable_and_hlt` + `disable`).
   REGEL: Jede synchrone Warteschleife, die AUCH aus einem Syscall laufen kann,
   benutzt diese Funktion — und haelt dabei KEINEN Lock (im Wartefenster darf
-  der Scheduler verdraengen).
+  der Scheduler verdraengen). SEIT SERIE 7, TEIL 0 tut sie noch etwas: Kann
+  ein anderer Prozess laufen, GIBT SIE AB statt zu schlafen. `hlt` heisst „ich
+  habe nichts zu tun" — wer auf Daten eines anderen PROZESSES wartet und dabei
+  schlaeft, blockiert ihn, denn die verschlafene Zeitscheibe laeuft trotzdem
+  20 ms. Das war zugleich die Messfalle des Serie-6-Abschlusses.
 - **FAT32-Treiber (Juli 2026, `src/fs/fat32.rs`) — NUR LESEN:**
   SpeedOS liest fremde FAT32-Medien ("der USB-Stick"), schreibt sie
   aber NIE (jeder Schreib-Weg -> `IoFehler::NurLesen`). Kein/kaputtes

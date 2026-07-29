@@ -198,9 +198,38 @@ pub fn ms_seit_boot() -> u64 {
 /// Denn im Wartefenster darf der Scheduler den Prozess verdrängen. Alle
 /// Aufrufstellen erfüllen das: Sie warten zwischen zwei Pump-Durchgängen und
 /// halten dabei nichts.
+///
+/// ==========================================================================
+/// SEIT DEM WECK-LATENZ-PASS (Serie 7, Teil 0): ERST ABGEBEN, DANN SCHLAFEN.
+///
+/// `hlt` heisst „ich habe nichts zu tun, weckt mich beim nächsten Interrupt"
+/// — und genau das war die MESSFALLE aus dem Serie-6-Abschluss: Wer in einer
+/// synchronen Schleife auf Daten eines anderen PROZESSES wartet und dabei
+/// `hlt`-t, misst nicht dessen Geschwindigkeit, sondern die Tick-Rate. Er
+/// blockiert den anderen sogar: Solange PID 0 seine Zeitscheibe „verschläft",
+/// bekommt der Erzeuger die CPU erst, wenn sie abläuft (bis zu 20 ms).
+///
+/// Richtig ist: Kann ein anderer Prozess laufen, gehört ihm der Rest unserer
+/// Scheibe. Erst wenn wirklich niemand lauffähig ist, wird geschlafen. Das
+/// ist dieselbe Regel, nach der `Executor::sleep_if_idle` schon seit Teil 3
+/// verfährt — sie gilt jetzt für JEDE synchrone Warteschleife des Kernels
+/// (Pipe leeren, `scheduler::warten_auf`, DNS, HTTP), weil sie alle hier
+/// hindurchlaufen.
 /// ==========================================================================
 pub fn warte_auf_interrupt() {
     use x86_64::instructions::interrupts;
+
+    // Wartet jemand darauf, dass wir Platz machen? Dann nicht schlafen,
+    // sondern abgeben. `abgeben()` geht über `int 0x80` und funktioniert
+    // aus Ring 0 wie aus Ring 3, mit an- wie mit ausgeschalteten Interrupts.
+    if crate::scheduler::umplanung_offen() && crate::scheduler::umplanen_im_kernel() {
+        return;
+    }
+    if crate::scheduler::sofort_wecken_an() && crate::scheduler::andere_lauffaehig() {
+        crate::scheduler::abgeben();
+        return;
+    }
+
     if interrupts::are_enabled() {
         // Kernel-Kontext: der gewohnte Weg.
         x86_64::instructions::hlt();

@@ -540,10 +540,10 @@ fn test_pipe_schreiber_blockiert_bei_voll() {
     let (belegt, _, _) = pipe::zustand(leitung).expect("Pipe lebt");
     assert_eq!(
         belegt,
-        pipe::KAPAZITAET,
+        pipe::kapazitaet(),
         "die Pipe muesste randvoll sein, ist aber {} von {}",
         belegt,
-        pipe::KAPAZITAET
+        pipe::kapazitaet()
     );
 
     // Er verbraucht dabei KEINE CPU (er wartet wirklich).
@@ -580,7 +580,7 @@ fn test_pipe_schreiber_blockiert_bei_voll() {
     let mut wieder_voll = false;
     while zeit::ms_seit_boot() < frist {
         if let Some((belegt, _, _)) = pipe::zustand(leitung) {
-            if belegt == pipe::KAPAZITAET {
+            if belegt == pipe::kapazitaet() {
                 wieder_voll = true;
                 break;
             }

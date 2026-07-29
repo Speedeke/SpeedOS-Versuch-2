@@ -5,6 +5,121 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### Serie 7, Teil 0: DIE WECK-LATENZ — aus 199 KiB/s werden 202 MiB/s
+
+Die Vorarbeit für TLS. Der Serie-6-Abschluss hatte eine Zahl hinterlassen,
+die nicht stehen bleiben durfte: Eine Pipe brachte vom Prozess zum Kernel
+**199 KiB/s**, während derselbe Ringpuffer im Kernel allein **241 MiB/s**
+schaffte. Der Faktor 1200 war nicht das Kopieren, sondern das **Warten aufs
+Geweckt-Werden** — und TLS im User-Space schickt jedes einzelne Byte durch
+genau diese Kette.
+
+- **SOFORTIGES WECKEN STATT TIMER-PRÜFUNG (`scheduler::wecken`).** Bis hierhin
+  galt „nachsehen statt anstoßen": Der Timer fragte jeden Tick nach, ob ein
+  wartender Prozess weiterkann. Jetzt stößt die Pipe selbst an — wer Bytes
+  hineinlegt, weckt die Leser; wer welche herausnimmt, weckt die Schreiber;
+  wer ein Ende schließt, weckt die Gegenseite (Dateiende bzw. EPIPE). Dasselbe
+  gilt für das Ende eines Kindes (`warte`). **Der Timer bleibt als
+  SICHERHEITSNETZ**: `wecken()` arbeitet mit `try_lock` und darf folgenlos
+  aussetzen, weil `warter_wecken` jede Bedingung weiterhin jeden Tick
+  nachprüft. Ein Weckruf, der aussetzt, kostet 4 ms; einer, der als einziger
+  Weg gedacht wäre, wäre ein Prozess, der nie wieder aufwacht.
+- **DIE ENTSCHEIDUNG — Reschedule-Punkt, aber NIEMALS direkte Übergabe.**
+  Drei Wege standen zur Wahl, und die Begründung steht ausführlich in
+  `src/scheduler.rs`:
+  - *Nur „lauffähig markieren"* löst das Problem **nicht**. Genau das war der
+    gemessene Fall: Der Leser hatte eine frische 20-ms-Scheibe; ob der
+    Schreiber nach 0 ms oder nach 4 ms lauffähig wird, ändert nichts daran,
+    dass er erst in 20 ms drankommt. Aus 199 wären ~240 KiB/s geworden.
+  - *Direkte Übergabe an den Geweckten* („handoff") ist die einzige Variante,
+    die wirklich **aushungert**: Ein Ping-Pong-Paar A↔B reicht sich die CPU
+    gegenseitig, ein dritter Prozess C ist nie „der Geweckte". Verworfen.
+  - **Gewählt: ein Reschedule-Punkt über die normale Round-Robin-Wahl.** Der
+    Weckruf setzt nur ein Flag; am Rückweg des Syscalls
+    (`umplanen_am_syscall_ende`) und in den synchronen Warteschleifen des
+    Kernels (`zeit::warte_auf_interrupt`) wird daraufhin `wechsel_entscheiden`
+    gefragt — mit `freiwillig = true`, also derselben zyklischen Suche wie bei
+    `yield`. Das Ziel ist damit immer der nächste Lauffähige **hinter** dem
+    aktuellen, nie „der, den ich gerade geweckt habe".
+- **FAIRNESS: der Schutz steckt in der Struktur, die Bremse nur im Aufwand.**
+  Weil `naechster_lauffaehig` zyklisch ab `aktuell + 1` sucht, kommt bei
+  A(Slot 1)↔B(Slot 2) und C(Slot 3) schon in der zweiten Runde C dran — ohne
+  jedes Zutun. Aushungern ist damit strukturell ausgeschlossen (nachgerechnet
+  in `test_pingpong_hungert_niemanden_aus`: jeder bekommt exakt seinen
+  Viertel-Anteil über 200 Runden). Wogegen dennoch eine Bremse nötig war, ist
+  **Verschwendung**: Ein Paar, das sich einzelne Bytes zuwirft, würde je Byte
+  umschalten. Deshalb ein **Budget je Timer-Tick** (`SOFORT_MAX_PRO_TICK = 16`);
+  danach wirkt der Weckruf nur noch markierend. Die Zahl ist ausgerechnet:
+  16 × 450 ns je 4-ms-Tick = **0,18 % CPU-Deckel**, während ein produktiver
+  64-KiB-Strom nur einen Weckruf je Füllung braucht (das Budget entspräche
+  > 200 MiB/s, mehr als der Ringpuffer schafft). Wer das Budget ausschöpft,
+  tauscht keine Daten, sondern schaltet um.
+- **DIE hlt-FALLE, jetzt als Regel im Code:** `zeit::warte_auf_interrupt()`
+  **gibt ab, statt zu schlafen**, solange ein anderer Prozess laufen kann —
+  dieselbe Regel, nach der `Executor::sleep_if_idle` schon seit Serie 6 Teil 3
+  verfährt, gilt jetzt für jede synchrone Warteschleife des Kernels. Das war
+  nicht nur eine Messfalle: Wer auf Daten eines anderen Prozesses wartet und
+  dabei `hlt`-t, **blockiert ihn**, denn seine verschlafene Zeitscheibe läuft
+  trotzdem 20 ms.
+- **PIPE-PUFFER KONFIGURIERBAR, Standard 4 KiB → 64 KiB**
+  (`pipe::kapazitaet_setzen`, `anlegen_mit`; geklemmt auf 512 B … 256 KiB).
+  Die Puffergröße *ist* die Stückgröße je Weckruf, der Durchsatz also
+  höchstens `Kapazität / Weck-Latenz`. 64 KiB, weil das genau
+  `syscall::MAX_PUFFER` ist: Ein einziger `schreibe` füllt eine leere Pipe,
+  ein einziger `lese` leert sie — ein Kontext-Wechsel je 64 KiB ist damit
+  erreichbar, ohne dass ein Programm etwas anders machen müsste. Speicher
+  ehrlich ausgerechnet: 16 Pipes × 64 KiB = **1 MiB Worst Case**, alloziert
+  erst beim `anlegen`.
+
+**DIE ZAHLEN (QEMU/WHPX 4,2 GHz, ALT und NEU im SELBEN Lauf —
+`tests/wecken.rs`; zwei Zahlen aus zwei QEMU-Starts wären nicht
+vergleichbar):**
+
+| Messung | ALT | NEU | Faktor |
+|---|---|---|---|
+| Weck-Latenz (Mittel aus 20 Runden) | 3558 µs | **17 µs** | 209× |
+| Pipe Prozess → Kernel | 203 KiB/s | **202 MiB/s** | 1019× |
+| Pipe Prozess → Prozess | 101 KiB/s | **199 MiB/s** | 2022× |
+| Ringpuffer allein (Obergrenze) | — | 186 MiB/s | — |
+| Socket-Syscall (UDP, 1 KiB/Datagramm) | — | 24 MiB/s (40 µs je `sende`) | — |
+
+Die entscheidende Zeile ist die vierte: **Prozess-Pipe und roher Ringpuffer
+liegen jetzt gleichauf.** Die Weck-Latenz ist nicht verkleinert, sondern aus
+der Rechnung verschwunden — es begrenzt das Kopieren, und das ist die
+richtige Grenze. Der ALT-Wert der Weck-Latenz (3558 µs) ist übrigens genau,
+was er sein muss: ein halber bis ganzer Timer-Tick.
+
+- **SOCKETS — ehrliche Einordnung statt Scheinarbeit.** Von diesem Pass sind
+  Sockets **nicht** betroffen, und zwar aus einem nachprüfbaren Grund: *kein
+  Prozess wartet je auf einen Socket.* `empfange` ist laut ABI
+  nicht-blockierend (0 = noch nichts da, docs/syscalls.md), es gibt also
+  keinen `Warteauf`-Zustand für Sockets und damit niemanden, den ein
+  ankommendes Paket wecken könnte. Die Weck-Maschinerie ist trotzdem
+  allgemein gebaut (`scheduler::wecken` nimmt jeden `Warteauf`), sodass ein
+  späteres blockierendes `empfange` nur einen Aufruf im Zustell-Pfad braucht.
+  Ein blockierendes `empfange` **jetzt** einzuführen wäre eine stillschweigende
+  ABI-Änderung gewesen — die gibt es in diesem Projekt nur bewusst und
+  dokumentiert. Gemessen wurde deshalb der *Weg* (Ring 3 → `int 0x80` →
+  Zeigerprüfung → copy-in → UDP → virtio-net): 40 µs je `sende`, davon der
+  Löwenanteil Geräte-Übergabe (ein Syscall allein kostet 60–70 ns).
+- **TESTS (`tests/wecken.rs`, 6 Stück, alle grün):** Weck-Latenz ALT/NEU;
+  **Fairness unter Ping-Pong-Last** (zwei Prozesse werfen sich einzelne Bytes
+  zu, ein dritter rechnet nur — er bekam **99 % CPU**; bei direkter Übergabe
+  wären es 0 %); **kein verlorenes Wecken bei gleichzeitigem Schließen**
+  (25 Runden „Daten schreiben + Ende schließen ohne Pause dazwischen", jedes
+  Mal kommen die Daten an, dann das Dateiende, kein Hänger); dazu die drei
+  Durchsatz-Messungen. Unit-Tests für die reine Logik: `weck_passt`
+  (Zeit-Warter dürfen von **keinem** Anstoß vorzeitig geweckt werden, fremde
+  Pipes und die falsche Richtung wecken nicht, `Kind(0)` = „irgendeines"),
+  Pipe-Kapazität (Deckel, und eine bestehende Pipe wächst **nie** nachträglich).
+- **Selbst hineingelaufen, deshalb notiert:** Der erste Anlauf legte den
+  Weckruf *innerhalb* des `PIPES`-Locks — das wäre PIPES → TABELLE gewesen,
+  während der Timer TABELLE → PIPES nimmt: ein lehrbuchreines ABBA. Jetzt
+  wird der Weckruf unter dem Lock nur **ermittelt** und danach ausgelöst.
+  Und der Test lief prompt in die eigene, in CLAUDE.md notierte Falle:
+  `aufraeumen()` löscht den Tabelleneintrag **samt Exit-Code** — wer in einer
+  Schleife aufräumt, muss `ende_abfragen` vorher einsammeln.
+
 ### Serie-6-ABSCHLUSS: der Kernel unter Angriff, Zahlen, und die Weiche zu Serie 7
 
 - **DER WERTVOLLSTE TEST DES PROJEKTS — und er hat etwas gefunden.**

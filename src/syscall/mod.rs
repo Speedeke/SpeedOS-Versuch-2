@@ -679,9 +679,18 @@ extern "C" fn syscall_dispatch(rahmen: *mut TrapFrame) -> *mut TrapFrame {
         // DIE BLOCKIERENDEN SYSCALLS (Serie 6, Teil 6). Sie brauchen den
         // Rahmen, weil sie ihn beim Blockieren zurückstellen müssen — siehe
         // `blockierend_behandeln` und `scheduler::blockieren`.
-        SYS_SCHREIBE => return blockierend_behandeln(rahmen, f, sys_schreibe(a0, a1, a2)),
-        SYS_LESE => return blockierend_behandeln(rahmen, f, prozess::sys_lese(a0, a1, a2)),
-        SYS_WARTE => return blockierend_behandeln(rahmen, f, prozess::sys_warte(a0)),
+        SYS_SCHREIBE => {
+            let neu = blockierend_behandeln(rahmen, f, sys_schreibe(a0, a1, a2));
+            return umplanen_falls_noetig(rahmen, neu);
+        }
+        SYS_LESE => {
+            let neu = blockierend_behandeln(rahmen, f, prozess::sys_lese(a0, a1, a2));
+            return umplanen_falls_noetig(rahmen, neu);
+        }
+        SYS_WARTE => {
+            let neu = blockierend_behandeln(rahmen, f, prozess::sys_warte(a0));
+            return umplanen_falls_noetig(rahmen, neu);
+        }
 
         SYS_KONTEXT_TEST => {
             // Nur Tests: den EINGEHENDEN Rahmen wegkopieren (beweist die
@@ -695,7 +704,28 @@ extern "C" fn syscall_dispatch(rahmen: *mut TrapFrame) -> *mut TrapFrame {
     }
 
     ergebnis_eintragen(f, ausfuehren(nummer, a0, a1, a2, a3));
-    rahmen
+    umplanen_falls_noetig(rahmen, rahmen)
+}
+
+/// DER RESCHEDULE-PUNKT (Serie 7, Teil 0) am Rückweg jedes Syscalls, der
+/// nicht ohnehin schon umgeschaltet hat.
+///
+/// `eingang` ist der Rahmen, mit dem wir hereinkamen, `ausgang` der, den der
+/// Syscall zurückgibt. Sind sie VERSCHIEDEN, hat der Syscall selbst schon
+/// gewechselt (exit, yield, blockieren) — dann ist hier nichts mehr zu tun,
+/// und ein zweiter Wechsel wäre schlicht falsch (wir würden den Kontext eines
+/// Prozesses anfassen, der schon läuft).
+///
+/// Sind sie GLEICH, hat der Syscall womöglich jemanden GEWECKT (in eine Pipe
+/// geschrieben, ein Ende geschlossen, ein Kind beendet). Dann bekommt der
+/// Scheduler jetzt die Gelegenheit umzuplanen — und zwar nach der normalen
+/// Round-Robin-Regel, nicht als Übergabe an den Geweckten
+/// (Begründung in scheduler.rs).
+fn umplanen_falls_noetig(eingang: *mut TrapFrame, ausgang: *mut TrapFrame) -> *mut TrapFrame {
+    if ausgang != eingang {
+        return ausgang;
+    }
+    scheduler::umplanen_am_syscall_ende(ausgang)
 }
 
 // ---------------------------------------------------------------------------
