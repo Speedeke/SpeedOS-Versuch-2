@@ -149,6 +149,13 @@ impl Befehl for Help {
             konsole::set_color(Color::LightGray, Color::Black);
             println!("{}", befehl.beschreibung());
         }
+        // Der Hinweis gehört ans ENDE: Wer `help` tippt, hat gerade eine
+        // Ausgabe erzeugt, die länger ist als der Bildschirm — das ist
+        // genau der Moment, in dem man vom Zurückblättern erfahren will.
+        println!();
+        konsole::set_color(Color::DarkGray, Color::Black);
+        println!("Bild auf/ab blaettert zurueck (im Fenster auch das Mausrad).");
+        konsole::set_color(Color::LightGray, Color::Black);
     }
 }
 

@@ -14,6 +14,8 @@
 // mit deaktivierten Interrupts (passiert in _print/mit_framebuffer).
 
 use crate::framebuffer::{self, DoppelPuffer, Farbe};
+use alloc::vec;
+use alloc::vec::Vec;
 use crate::serial_print;
 use core::fmt;
 use noto_sans_mono_bitmap::{get_raster_width, FontWeight, RasterHeight};
@@ -93,6 +95,26 @@ impl Color {
     }
 }
 
+/// Eine Zelle des Konsolen-Rasters — NUR fuer den Rueckblick gefuehrt.
+///
+/// Die Konsole malt jedes Zeichen weiterhin direkt in den Back-Buffer
+/// (das ist der schnelle Weg und bleibt es). Zusaetzlich merkt sie sich
+/// hier, WAS an welcher Stelle steht — sonst liesse sich ein
+/// herausgescrolltes Bild nicht wiederherstellen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct KZelle {
+    zeichen: char,
+    vg: Farbe,
+    hg: Farbe,
+}
+
+/// Wie viele herausgescrollte Zeilen die Vollbild-Konsole aufhebt.
+///
+/// Kleiner als beim Terminal-Fenster (1000), weil die Konsole so breit ist
+/// wie der Bildschirm: Bei 4K sind das 480 Spalten, also 300 x 480 x 12 Byte
+/// = rund 1,7 MiB. Bei 720p ein Drittel davon.
+const MAX_HISTORIE: usize = 300;
+
 /// Der Zustand der Konsole (Rasterposition, Farben, Cursor).
 struct KonsolenZustand {
     spalte: usize,
@@ -115,6 +137,23 @@ struct KonsolenZustand {
     /// 2560x1600 wären das sonst 16 MB pro Zeichen!).
     dirty_von: usize,
     dirty_bis: usize,
+
+    // ----- Der Rueckblick (Scrollback) -----
+    //
+    // WICHTIG: Diese Puffer werden EINMAL angelegt (`rueckblick_einrichten`,
+    // nach der Heap-Erweiterung) und danach NIE wieder alloziert. Eine
+    // Allokation im print!-Pfad waere gefaehrlich: `_print` haelt den
+    // KONSOLE-Lock, und wenn dabei der Speicher ausginge, wollte der
+    // alloc_error_handler seinerseits drucken — ein Deadlock in genau der
+    // Funktion, die ihn melden soll.
+    /// Was auf dem sichtbaren Raster steht (leer = Rueckblick aus).
+    zellen: Vec<KZelle>,
+    /// Ring der herausgescrollten Zeilen (leer = Rueckblick aus).
+    historie: Vec<KZelle>,
+    historie_zeilen: usize,
+    historie_kopf: usize,
+    /// Wie weit zurueckgeblaettert ist. 0 = live.
+    blick_ab: usize,
 }
 
 static KONSOLE: Mutex<KonsolenZustand> = Mutex::new(KonsolenZustand {
@@ -130,6 +169,11 @@ static KONSOLE: Mutex<KonsolenZustand> = Mutex::new(KonsolenZustand {
     cursor_aktiv: false,
     dirty_von: usize::MAX,
     dirty_bis: 0,
+    zellen: Vec::new(),
+    historie: Vec::new(),
+    historie_zeilen: 0,
+    historie_kopf: 0,
+    blick_ab: 0,
 });
 
 /// Höhe einer Zeichenzelle in Pixeln.
@@ -173,6 +217,24 @@ impl KonsolenZustand {
         }
     }
 
+    /// Ist der Rueckblick eingerichtet (Puffer vorhanden)?
+    fn rueckblick_da(&self) -> bool {
+        !self.zellen.is_empty()
+    }
+
+    /// Merkt sich, was an der aktuellen Position steht.
+    fn zelle_merken(&mut self, zeichen: char) {
+        if !self.rueckblick_da() || self.spalte >= self.spalten || self.zeile >= self.zeilen {
+            return;
+        }
+        let index = self.zeile * self.spalten + self.spalte;
+        self.zellen[index] = KZelle {
+            zeichen,
+            vg: self.vordergrund,
+            hg: self.hintergrund,
+        };
+    }
+
     /// Schreibt ein Zeichen an die aktuelle Rasterposition.
     fn zeichen_schreiben(&mut self, fb: &mut DoppelPuffer, zeichen: char) {
         match zeichen {
@@ -184,18 +246,25 @@ impl KonsolenZustand {
                 if self.spalte >= self.spalten {
                     self.neue_zeile(fb);
                 }
-                fb.zeichen_zeichnen(
-                    self.spalte * self.zeichen_breite,
-                    self.zeile * ZELLEN_HOEHE,
-                    zeichen,
-                    FONT_GROESSE,
-                    FONT_GEWICHT,
-                    self.vordergrund,
-                    self.hintergrund,
-                );
+                self.zelle_merken(zeichen);
+                // ZURUECKGEBLAETTERT wird NICHT gemalt: Auf dem Schirm steht
+                // gerade Vergangenheit, und neue Ausgabe wuerde sie
+                // uebermalen. GEMERKT ist sie trotzdem — beim Sprung ans
+                // Ende erscheint sie vollstaendig.
+                if self.blick_ab == 0 {
+                    fb.zeichen_zeichnen(
+                        self.spalte * self.zeichen_breite,
+                        self.zeile * ZELLEN_HOEHE,
+                        zeichen,
+                        FONT_GROESSE,
+                        FONT_GEWICHT,
+                        self.vordergrund,
+                        self.hintergrund,
+                    );
+                    let pixel_zeile = self.zeile * ZELLEN_HOEHE;
+                    self.dirty_markieren(pixel_zeile, pixel_zeile + ZELLEN_HOEHE);
+                }
                 self.spalte += 1;
-                let pixel_zeile = self.zeile * ZELLEN_HOEHE;
-                self.dirty_markieren(pixel_zeile, pixel_zeile + ZELLEN_HOEHE);
             }
         }
     }
@@ -206,13 +275,179 @@ impl KonsolenZustand {
         if self.zeile + 1 < self.zeilen {
             self.zeile += 1;
         } else {
-            // Bewusst mit der STANDARD-Hintergrundfarbe leeren —
-            // die Lektion aus VGA-Zeiten gegen Farbstreifen.
-            fb.hochscrollen(ZELLEN_HOEHE, self.standard_hintergrund);
-            // Nach dem Scrollen hat sich ALLES verschoben:
-            self.dirty_markieren(0, self.zeilen * ZELLEN_HOEHE);
+            // Die oberste Zeile verlaesst den Schirm — ab in den Rueckblick.
+            self.oberste_zeile_aufheben();
+            if self.blick_ab == 0 {
+                // Bewusst mit der STANDARD-Hintergrundfarbe leeren —
+                // die Lektion aus VGA-Zeiten gegen Farbstreifen.
+                fb.hochscrollen(ZELLEN_HOEHE, self.standard_hintergrund);
+                // Nach dem Scrollen hat sich ALLES verschoben:
+                self.dirty_markieren(0, self.zeilen * ZELLEN_HOEHE);
+            }
         }
     }
+}
+
+impl KonsolenZustand {
+    /// Legt die oberste Rasterzeile im Rueckblick ab und schiebt die
+    /// Zellen nach.
+    fn oberste_zeile_aufheben(&mut self) {
+        if !self.rueckblick_da() {
+            return;
+        }
+        if !self.historie.is_empty() {
+            let ziel = self.historie_kopf * self.spalten;
+            self.historie[ziel..ziel + self.spalten]
+                .copy_from_slice(&self.zellen[..self.spalten]);
+            self.historie_kopf = (self.historie_kopf + 1) % MAX_HISTORIE;
+            self.historie_zeilen = (self.historie_zeilen + 1).min(MAX_HISTORIE);
+            // Den Blick MITZIEHEN, damit zurueckgeblaetterte Sicht steht.
+            if self.blick_ab > 0 {
+                self.blick_ab = (self.blick_ab + 1).min(self.historie_zeilen);
+            }
+        }
+        // Zellen eine Zeile hoch, unterste leeren.
+        self.zellen.copy_within(self.spalten.., 0);
+        let ab = (self.zeilen - 1) * self.spalten;
+        let leer = KZelle {
+            zeichen: ' ',
+            vg: self.standard_hintergrund,
+            hg: self.standard_hintergrund,
+        };
+        self.zellen[ab..].fill(leer);
+    }
+
+    /// Die Zelle, die an dieser Bildschirmposition zu sehen sein soll.
+    fn sicht_zelle(&self, spalte: usize, zeile: usize) -> KZelle {
+        let leer = KZelle {
+            zeichen: ' ',
+            vg: self.standard_hintergrund,
+            hg: self.standard_hintergrund,
+        };
+        if self.blick_ab == 0 || zeile >= self.blick_ab {
+            let live = zeile - self.blick_ab;
+            return self
+                .zellen
+                .get(live * self.spalten + spalte)
+                .copied()
+                .unwrap_or(leer);
+        }
+        let hinauf = self.blick_ab - zeile;
+        if hinauf > self.historie_zeilen || self.historie.is_empty() {
+            return leer;
+        }
+        let ring = MAX_HISTORIE;
+        let index = (self.historie_kopf + ring - hinauf % ring) % ring;
+        self.historie
+            .get(index * self.spalten + spalte)
+            .copied()
+            .unwrap_or(leer)
+    }
+
+    /// Zeichnet den GANZEN sichtbaren Bereich aus den Zellen neu.
+    ///
+    /// Das ist der Preis des Rueckblicks: Beim Blaettern gibt es kein
+    /// memmove-Kunststueck, es muss gemalt werden. Bei ~160x45 Zellen sind
+    /// das 7200 Glyphen — einmal je Tastendruck, nicht je Zeichen.
+    fn neu_zeichnen(&mut self, fb: &mut DoppelPuffer) {
+        fb.fuellen(self.standard_hintergrund);
+        for zeile in 0..self.zeilen {
+            for spalte in 0..self.spalten {
+                let zelle = self.sicht_zelle(spalte, zeile);
+                if zelle.zeichen == ' ' && zelle.hg == self.standard_hintergrund {
+                    continue;
+                }
+                fb.zeichen_zeichnen(
+                    spalte * self.zeichen_breite,
+                    zeile * ZELLEN_HOEHE,
+                    zelle.zeichen,
+                    FONT_GROESSE,
+                    FONT_GEWICHT,
+                    zelle.vg,
+                    zelle.hg,
+                );
+            }
+        }
+        self.dirty_markieren(0, self.zeilen * ZELLEN_HOEHE);
+    }
+}
+
+/// RICHTET DEN RUECKBLICK EIN — einmalig, nach der Heap-Erweiterung.
+///
+/// WARUM NICHT IN `init()`: Das laeuft direkt nach `framebuffer::init`, und
+/// zu dem Zeitpunkt hat der Kernel nur den kleinen Anfangs-Heap. Der
+/// Rueckblick braucht je nach Aufloesung ein bis zwei MiB — die gibt es
+/// erst nach `allocator::heap_erweitern`.
+///
+/// WARUM UEBERHAUPT VORAB: Damit im `print!`-Pfad NIE alloziert wird. `_print`
+/// haelt den KONSOLE-Lock; ginge dabei der Speicher aus, wollte der
+/// `alloc_error_handler` seinerseits drucken — ein Deadlock in genau der
+/// Funktion, die ihn melden soll.
+///
+/// Vor diesem Aufruf laeuft die Konsole wie immer, nur ohne Rueckblick:
+/// Die Boot-Meldungen sind also nicht zurueckblaetterbar.
+pub fn rueckblick_einrichten() {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut konsole = KONSOLE.lock();
+        if konsole.spalten == 0 || konsole.zeilen == 0 || konsole.rueckblick_da() {
+            return;
+        }
+        let leer = KZelle {
+            zeichen: ' ',
+            vg: konsole.standard_hintergrund,
+            hg: konsole.standard_hintergrund,
+        };
+        let (spalten, zeilen) = (konsole.spalten, konsole.zeilen);
+        konsole.zellen = vec![leer; spalten * zeilen];
+        konsole.historie = vec![leer; MAX_HISTORIE * spalten];
+        konsole.historie_zeilen = 0;
+        konsole.historie_kopf = 0;
+        konsole.blick_ab = 0;
+    });
+    crate::serial_println!("[konsole] Rueckblick bereit ({} Zeilen).", MAX_HISTORIE);
+}
+
+/// BLAETTERT in der Vollbild-Konsole. Positiv = nach oben.
+/// `seitenweise` blaettert einen ganzen Schirm. Liefert `true`, wenn sich
+/// etwas geaendert hat.
+pub fn blaettern(zeilen: isize, seitenweise: bool) -> bool {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut konsole = KONSOLE.lock();
+        if !konsole.rueckblick_da() {
+            return false;
+        }
+        let schritt = if seitenweise {
+            zeilen.signum() * (konsole.zeilen.saturating_sub(2)).max(1) as isize
+        } else {
+            zeilen
+        };
+        let vorher = konsole.blick_ab;
+        let ziel = konsole.blick_ab as isize + schritt;
+        konsole.blick_ab = ziel.clamp(0, konsole.historie_zeilen as isize) as usize;
+        if konsole.blick_ab == vorher {
+            return false;
+        }
+        framebuffer::mit_framebuffer(|fb| {
+            konsole.neu_zeichnen(fb);
+            fb.present();
+        });
+        true
+    })
+}
+
+/// Springt ans Ende (zum Live-Bild) — beim Tippen.
+pub fn zum_ende() {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut konsole = KONSOLE.lock();
+        if !konsole.rueckblick_da() || konsole.blick_ab == 0 {
+            return;
+        }
+        konsole.blick_ab = 0;
+        framebuffer::mit_framebuffer(|fb| {
+            konsole.neu_zeichnen(fb);
+            fb.present();
+        });
+    });
 }
 
 /// Initialisiert das Zeichenraster aus der Framebuffer-Auflösung.
@@ -342,6 +577,17 @@ pub fn clear_screen() {
         let mut konsole = KONSOLE.lock();
         konsole.spalte = 0;
         konsole.zeile = 0;
+        // `clear` wirft auch den Rueckblick — dieselbe Entscheidung wie im
+        // Terminal-Fenster: „mach sauber", nicht „schieb es aus dem Blick".
+        let leer = KZelle {
+            zeichen: ' ',
+            vg: konsole.standard_hintergrund,
+            hg: konsole.standard_hintergrund,
+        };
+        konsole.zellen.fill(leer);
+        konsole.historie_zeilen = 0;
+        konsole.historie_kopf = 0;
+        konsole.blick_ab = 0;
         let hintergrund = konsole.standard_hintergrund;
         framebuffer::mit_framebuffer(|fb| {
             fb.fuellen(hintergrund);

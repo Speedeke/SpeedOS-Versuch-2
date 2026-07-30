@@ -5,6 +5,49 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### Terminal: ZURÜCKBLÄTTERN (Scrollback)
+
+Eine lange Ausgabe lief bisher oben aus dem Bild und war **weg**. Jetzt
+nicht mehr:
+
+* **Bild auf / Bild ab** blättert seitenweise — in der Vollbild-Konsole und
+  im Terminal-Fenster.
+* **Das Mausrad** blättert im Fenster unter dem Zeiger (drei Zeilen je
+  Rastung).
+* **Wer tippt, springt ans Ende.** Man schreibt nie blind in die
+  Vergangenheit.
+* **Neue Ausgabe verschiebt den Blick nicht.** Wer zurückgeblättert hat, um
+  etwas zu lesen, bleibt an seiner Stelle — der Blick hängt an der *Stelle*,
+  nicht am Abstand zum Ende.
+* `clear` wirft den Rückblick mit weg (bewusst: „mach sauber", nicht „schieb
+  es aus dem Blick").
+
+**Ringpuffer, kein `Vec::remove(0)`:** Bei jedem Scrollen die älteste Zeile
+vorne herauszunehmen hieße, 1000 Zeilen à 200 Zellen zu verschieben — 2,4 MiB
+`memmove` **je Ausgabezeile**. Der Ring schreibt an eine Stelle.
+
+**Die Stelle, an der es hätte gefährlich werden können**, ist der
+`print!`-Pfad der Vollbild-Konsole: `_print` hält den KONSOLE-Lock, und ginge
+dabei der Speicher aus, wollte der `alloc_error_handler` seinerseits drucken —
+ein Deadlock in genau der Funktion, die ihn melden soll. Deshalb wird dort
+**nie** alloziert: Die Puffer entstehen einmalig in
+`konsole::rueckblick_einrichten()`, das `main.rs` direkt nach der
+Heap-Erweiterung ruft. (Und nicht in `konsole::init()` — das läuft noch mit
+dem kleinen Anfangs-Heap.) Der Preis: Die Boot-Meldungen davor sind nicht
+zurückblätterbar.
+
+Beim Zurückblättern zeichnet die Konsole den Schirm aus ihren Zellen neu
+(~7200 Glyphen bei 160×45) — einmal je Tastendruck, nicht je Zeichen. Und der
+Cursor verschwindet dabei: Er dort stehen zu lassen wäre eine Lüge, denn dort
+wird nicht getippt.
+
+Grenzen, ehrlich: 1000 Zeilen im Fenster, 300 in der Vollbild-Konsole (die ist
+so breit wie der Bildschirm — bei 4K sind das 480 Spalten). Eine
+Breitenänderung des Fensters **verwirft** den Rückblick, weil die gespeicherten
+Zeilen auf die alte Spaltenzahl gelegt sind; sie umzubrechen wäre ein eigenes
+Vorhaben. Fünf neue `#[test_case]`-Tests prüfen Zurückholen, Anschläge,
+Ring-Überlauf, das Mitziehen des Blicks und den verschwindenden Cursor.
+
 ### SERIE-7-ABSCHLUSS: der Kernel unter Angriff, die Zahlen, die Naht zu Serie 8
 
 Serie 7 hat SpeedOS ins verschlüsselte Netz gebracht. Dieser Abschluss prüft

@@ -178,6 +178,15 @@ Keine Threads. Kein SMP — SpeedOS läuft auf **einem** Kern.
   muss (`docs/serie8-bestandsaufnahme.md`).
 * Die Framebuffer-Konsole ist **Latin-1**: Gedankenstriche und typografische
   Anführungszeichen werden zu `?`.
+* **Der Terminal-Rückblick hat Grenzen** (Bild auf/ab, Mausrad): 1000 Zeilen
+  im Fenster, 300 in der Vollbild-Konsole. Eine **Breitenänderung des
+  Fensters verwirft ihn** — die gespeicherten Zeilen sind auf die alte
+  Spaltenzahl gelegt, und sie umzubrechen wäre ein eigenes Vorhaben (echte
+  Terminals tun sich damit schwer). Die **Boot-Meldungen** vor
+  `konsole::rueckblick_einrichten()` sind ebenfalls nicht zurückblätterbar:
+  Zu dem Zeitpunkt gibt es den Heap für die Puffer noch nicht, und im
+  `print!`-Pfad wird bewusst nie alloziert.
+* Kein Markieren und Kopieren mit der Maus im Terminal.
 * Schriftgrößen sind **vorgerastert** (16/24/32) — es gibt keinen
   Rasterizer, also keine beliebigen Größen.
 * Keine Bild-Dekodierung (PNG/JPEG).

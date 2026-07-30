@@ -440,6 +440,32 @@
   BEVOR je ein Byte Rumpf fliesst — die Rumpf-Fehlerfaelle laufen deshalb
   ueber http, es ist dieselbe Zustandsmaschine ohne Verschluesselung.
 
+## TERMINAL-RUECKBLICK (Scrollback, Juli 2026)
+- **Bild auf/ab blaettert; im Fenster auch das Mausrad (3 Zeilen je
+  Rastung).** Gilt fuer BEIDE Wege: `fenster/terminal.rs` (Fenster, 1000
+  Zeilen) und `konsole.rs` (Vollbild, 300 Zeilen — die ist so breit wie der
+  Bildschirm). Wer TIPPT, springt ans Ende; neue Ausgabe verschiebt den Blick
+  NICHT (`blick_ab` waechst beim Herausscrollen mit). `clear` wirft den
+  Rueckblick mit weg.
+- **RINGPUFFER, kein `Vec::remove(0)`.** Die aelteste Zeile vorne
+  herauszunehmen waere 2,4 MiB memmove JE AUSGABEZEILE.
+- **DIE GEFAEHRLICHE STELLE — im `print!`-Pfad wird NIE alloziert.** `_print`
+  haelt den KONSOLE-Lock; ginge dabei der Speicher aus, wollte der
+  `alloc_error_handler` drucken = Deadlock in genau der Funktion, die ihn
+  melden soll. Deshalb entstehen die Puffer EINMALIG in
+  `konsole::rueckblick_einrichten()`, gerufen aus main.rs NACH der
+  Heap-Erweiterung (nicht in `konsole::init()` — dort gibt es erst den
+  kleinen Anfangs-Heap). Wer dort etwas ergaenzt, haelt sich daran.
+- **Zurueckgeblaettert wird NICHT gemalt:** `zeichen_schreiben` merkt die
+  Zelle immer, zeichnet aber nur bei `blick_ab == 0` — sonst uebermalte neue
+  Ausgabe die angezeigte Vergangenheit. Beim Sprung ans Ende wird der Schirm
+  aus den Zellen neu gezeichnet. Und der CURSOR verschwindet beim Blaettern
+  (`cursor_bildschirm()` liefert `None`) — er dort stehen zu lassen waere
+  eine Luege.
+- **BEKANNTE GRENZE:** Eine Breitenaenderung VERWIRFT den Rueckblick (die
+  Zeilen sind auf die alte Spaltenzahl gelegt); Umbrechen waere ein eigenes
+  Vorhaben. Steht in docs/grenzen.md.
+
 ## SERIE-7-ABSCHLUSS (Juli 2026) — Angriffe, Zahlen, Grenzen, Serie-8-Naht
 - **DIE EINE STELLE FUER ALLE LUECKEN: `docs/grenzen.md`.** Keine
   Sperrlisten-Pruefung (OCSP/CRL), manueller Root-Store OHNE Signatur, kein

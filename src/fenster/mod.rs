@@ -948,6 +948,48 @@ impl FensterManager {
         }
     }
 
+    /// BLÄTTERT im Rückblick eines Terminal-Fensters (Index).
+    ///
+    /// Positiv = nach oben in die Vergangenheit. Liefert `true`, wenn sich
+    /// der Blick geändert hat — nur dann muss neu gerendert werden.
+    fn terminal_blaettern(&mut self, index: usize, zeilen: isize) -> bool {
+        let geaendert = match &mut self.fenster[index].inhalt {
+            Inhalt::Terminal { term, .. } => term.scrollen(zeilen),
+            _ => return false,
+        };
+        if geaendert {
+            self.fenster[index].inhalt_neu = true;
+            self.fenster[index].dirty = true;
+        }
+        geaendert
+    }
+
+    /// Springt im FOKUSSIERTEN Terminal ans Ende (wird beim Tippen
+    /// gerufen — wer schreibt, will sehen, was er schreibt).
+    fn fokus_terminal_zum_ende(&mut self) {
+        let Some(index) = self.fokus.and_then(|id| self.index_von(id)) else {
+            return;
+        };
+        let gesprungen = match &mut self.fenster[index].inhalt {
+            Inhalt::Terminal { term, .. } => term.zum_ende(),
+            _ => false,
+        };
+        if gesprungen {
+            self.fenster[index].inhalt_neu = true;
+            self.fenster[index].dirty = true;
+        }
+    }
+
+    /// Wie viele Zeilen ein Terminal auf einmal blättert (Bild auf/ab):
+    /// ein Bildschirm minus zwei Zeilen Überlappung, damit der
+    /// Zusammenhang nicht abreisst.
+    fn terminal_seite(&self, index: usize) -> isize {
+        match &self.fenster[index].inhalt {
+            Inhalt::Terminal { term, .. } => (term.zeilen().saturating_sub(2)).max(1) as isize,
+            _ => 1,
+        }
+    }
+
     /// Merkt einen Schadensbereich eines Ui-/App-Fensters für das
     /// nächste Render vor (Fensterinhalt-Koordinaten). Ohne Bereich
     /// (None) oder wenn schon ein Vollschaden ansteht: das ganze
@@ -1395,6 +1437,13 @@ impl FensterManager {
             .fenster_unter(px, py)
             .and_then(|id| self.index_von(id))
         {
+            // TERMINALS ZUERST: Sie haben keinen Widget-Baum, der ein
+            // Scroll-Ereignis verarbeiten könnte — bei ihnen blättert das
+            // Rad im Rückblick. Drei Zeilen je Rasterung, wie überall.
+            if matches!(self.fenster[index].inhalt, Inhalt::Terminal { .. }) {
+                self.terminal_blaettern(index, delta as isize * 3);
+                return NachLock::Keine;
+            }
             if let Some((lx, ly)) = self.fenster[index].lokal(px, py) {
                 return self.ui_maus(index, crate::ui::UiEreignis::Scroll { delta, x: lx, y: ly });
             }
@@ -2265,7 +2314,11 @@ fn terminal_rendern(term: &mut terminal::Terminal, puffer: &mut FensterPuffer) {
     // Blink-Task ist im Desktop-Modus pausiert). Nur zeichnen, wenn
     // seine Zeile im gerenderten Streifen liegt — sonst steht er
     // dort unverändert aus dem letzten Rendern.
-    let (cursor_spalte, cursor_zeile) = term.cursor();
+    // `cursor_bildschirm` liefert None, wenn zurückgeblättert wurde — dann
+    // gibt es keinen Cursor zu zeichnen (dort wird ja nicht getippt).
+    let Some((cursor_spalte, cursor_zeile)) = term.cursor_bildschirm() else {
+        return;
+    };
     if (dirty_von..dirty_bis).contains(&cursor_zeile) {
         z.rechteck_fuellen(
             Rechteck::neu(
@@ -2495,6 +2548,35 @@ pub fn terminal_schreiben(sitzung: u64, args: core::fmt::Arguments, vg: Farbe, h
 /// Leert das Terminal der Sitzung (clear-Befehl im Desktop-Modus).
 pub fn terminal_leeren(sitzung: u64) {
     let _ = mit_manager(|m| m.terminal_leeren(sitzung));
+}
+
+/// BLÄTTERT im fokussierten Terminal. Positiv = nach oben.
+///
+/// `seitenweise` blättert einen ganzen Bildschirm (Bild auf/ab), sonst die
+/// angegebene Zeilenzahl. Liefert `true`, wenn ein Terminal den Fokus hatte
+/// und sich der Blick geändert hat — der Eingabe-Router entscheidet daran,
+/// ob er die Taste verschluckt.
+pub fn terminal_blaettern(zeilen: isize, seitenweise: bool) -> bool {
+    mit_manager(|m| {
+        let Some(index) = m.fokus.and_then(|id| m.index_von(id)) else {
+            return false;
+        };
+        if !matches!(m.fenster[index].inhalt, Inhalt::Terminal { .. }) {
+            return false;
+        }
+        let schritt = if seitenweise {
+            zeilen.signum() * m.terminal_seite(index)
+        } else {
+            zeilen
+        };
+        m.terminal_blaettern(index, schritt)
+    })
+    .unwrap_or(false)
+}
+
+/// Springt im fokussierten Terminal ans Ende (beim Tippen).
+pub fn terminal_zum_ende() {
+    let _ = mit_manager(|m| m.fokus_terminal_zum_ende());
 }
 
 // ----- Schnittstelle für die App-Registry (apps.rs) -----

@@ -154,6 +154,12 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     //    ergänzt, prüft diese Zahl mit.
     allocator::heap_erweitern(2048).expect("Heap-Erweiterung vor den Mounts fehlgeschlagen");
 
+    //    Jetzt ist Platz fuer den KONSOLEN-RUECKBLICK (Bild auf/ab in der
+    //    Vollbild-Konsole). Bewusst HIER und nicht in konsole::init(): Dort
+    //    gibt es erst den kleinen Anfangs-Heap. Und bewusst VORAB statt
+    //    faul, damit im print!-Pfad nie alloziert wird (siehe konsole.rs).
+    speed_os::konsole::rueckblick_einrichten();
+
     //    PCI enumerieren und den virtio-blk-Treiber aufsetzen (falls
     //    QEMU die Daten-Platte per virtio statt IDE anbietet). Danach
     //    entscheidet fs::daten_geraet(), welches Backend /platte trägt.

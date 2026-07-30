@@ -28,6 +28,22 @@ use pc_keyboard::{DecodedKey, KeyCode};
 /// Wie viele Befehle sich der Verlauf merkt (Pfeil hoch/runter).
 const MAX_VERLAUF: usize = 10;
 
+/// Ist das eine Blätter-Taste fürs Terminal? Und wurde sie verbraucht?
+///
+/// * `None` — keine Blätter-Taste, ganz normal weiterreichen.
+/// * `Some(true)` — geblättert, die Taste ist damit erledigt.
+/// * `Some(false)` — es war eine Blätter-Taste, aber es gab nichts zu
+///   blättern (kein Terminal im Fokus, oder schon ganz oben/unten). Dann
+///   soll sie weiterlaufen, damit z. B. der Explorer sie bekommt.
+fn blaetter_taste(taste: DecodedKey) -> Option<bool> {
+    let (zeilen, seitenweise) = match taste {
+        DecodedKey::RawKey(KeyCode::PageUp) => (1, true),
+        DecodedKey::RawKey(KeyCode::PageDown) => (-1, true),
+        _ => return None,
+    };
+    Some(crate::fenster::terminal_blaettern(zeilen, seitenweise))
+}
+
 /// Der EINGABE-ROUTER: der EINZIGE Leser des globalen KeyStreams.
 /// Er verteilt jede Taste an ihr Ziel — Startmenü, Fenster oder die
 /// Tasten-Queue der fokussierten Terminal-SITZUNG (seit dem
@@ -74,8 +90,27 @@ pub async fn eingabe_router() {
                 }
                 continue;
             }
+            // ==========================================================
+            // BLÄTTERN IM RÜCKBLICK — vor der Weitergabe an die Shell.
+            //
+            // Bild auf/ab und Strg+Pfeil gehören dem TERMINAL, nicht der
+            // Eingabezeile: Eine lange Ausgabe soll nicht unwiederbringlich
+            // oben herauslaufen. Nur wenn wirklich ein Terminal den Fokus
+            // hat UND sich der Blick geändert hat, wird die Taste
+            // verschluckt — sonst darf sie ganz normal weiterlaufen (der
+            // Explorer braucht Bild auf/ab für seine Liste).
+            // ==========================================================
+            if let Some(verschluckt) = blaetter_taste(key) {
+                if verschluckt {
+                    continue;
+                }
+            }
             match crate::fenster::terminal_fokus_sitzung() {
-                Some(id) => sitzung::taste_einwerfen(id, key),
+                Some(id) => {
+                    // Wer TIPPT, will sehen, was er schreibt.
+                    crate::fenster::terminal_zum_ende();
+                    sitzung::taste_einwerfen(id, key);
+                }
                 None => crate::fenster::taste_event(key),
             }
             continue;
@@ -91,7 +126,22 @@ pub async fn eingabe_router() {
             continue;
         }
 
-        // Vollbild-Konsole: Die Tasten gehören der Haupt-Sitzung.
+        // Vollbild-Konsole: Bild auf/ab blättert im Rückblick, alles
+        // andere gehört der Haupt-Sitzung. Wer TIPPT, springt ans Ende —
+        // sonst schriebe man blind in die Vergangenheit hinein.
+        match key {
+            DecodedKey::RawKey(KeyCode::PageUp) => {
+                if konsole::blaettern(1, true) {
+                    continue;
+                }
+            }
+            DecodedKey::RawKey(KeyCode::PageDown) => {
+                if konsole::blaettern(-1, true) {
+                    continue;
+                }
+            }
+            _ => konsole::zum_ende(),
+        }
         let haupt = sitzung::haupt();
         if haupt != 0 {
             sitzung::taste_einwerfen(haupt, key);
