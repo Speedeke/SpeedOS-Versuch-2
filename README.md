@@ -16,6 +16,41 @@ Vertrauensanker geprüft (119 Wurzeln), Hostname abgeglichen — und darüber
 HTTP/1.1 mit **demselben Parser, den auch der Kernel benutzt**.
 Details: [`docs/tls-verbindung.md`](docs/tls-verbindung.md).*
 
+### Eine HTTPS-Sitzung, Mitschnitt
+
+Zwei Befehle — und darin steckt alles aus sieben Serien: eigener NIC-Treiber,
+eigenes TCP/IP, eigener Prozess in Ring 3, TLS 1.3 mit geprüfter
+Zertifikatskette, eigenes Dateisystem.
+
+```
+SpeedOS:/> hole example.com seite.html
+[PID 1 gestartet: /platte/programme/holes]
+  Vertrauensanker: 119 Wurzeln uebernommen (von 119 gelesen, 0 verworfen) aus /platte/system/ca-bundle.pem
+holes: https://example.com/
+  TLS: TLS 1.3 / TLS13_AES_128_GCM_SHA256 - Handshake in 31 ms (TCP 27 ms)
+
+HTTP 200 OK
+  Date: Thu, 30 Jul 2026 12:30:22 GMT
+  Content-Type: text/html
+  Transfer-Encoding: chunked
+  Connection: close
+  Server: cloudflare
+  Accept-Ranges: bytes
+  cf-cache-status: HIT
+--- Rumpf: 559 Byte (roh 868 Byte in 105 ms) ---
+559 Byte nach '/platte/heim/seite.html' geschrieben.
+Heap: Spitze 121920 Byte, jetzt 66656 von 131072 Byte gemappt.
+[holes (PID 1) erfolgreich beendet — Exit-Code 0]
+
+SpeedOS:/> type /platte/heim/seite.html
+<!doctype html><html lang="en"><head><title>Example Domain</title>…
+```
+
+`hole` hat dabei selbst entschieden, dass hier https gemeint ist, und den
+Abruf an ein Ring-3-Programm übergeben. Der Kernel hat nie TLS gesprochen.
+
+![HTTPS-Sitzung](docs/screenshots/serie7-sitzung.png)
+
 ![hole waehlt den Weg selbst](docs/screenshots/serie7-hole-vereinheitlicht.png)
 *Und seit Serie 7, Teil 5 muss man das nicht mehr wissen: `hole example.com`
 erkennt, dass hier https gemeint ist, übergibt an das Ring-3-Programm und
@@ -402,38 +437,38 @@ ARP-Cache:
 (Diese Ausgaben sind der echte serielle Mitschnitt von `cargo test --test
 netz_shell` — sie laufen also als Test mit, nicht nur im Devlog.)
 
-## Bekannte Grenzen des Netzwerk-Stacks
+## Bekannte Grenzen — Ehrlichkeit als Feature
 
-Der TCP/IP-Stack ist **komplett selbst gebaut** — vom Ethernet-Frame bis zum
-HTTP-Client. Das ist der Punkt des Projekts, aber es heißt auch: Er ist ein
-**Lern-Artefakt mit klar vermessenen Grenzen**. Ehrlich, damit niemand
-überrascht wird (Details + Messprotokoll: [docs/tcp-scope.md](docs/tcp-scope.md)):
+**Alle bekannten Lücken stehen an EINER Stelle: [docs/grenzen.md](docs/grenzen.md).**
 
-- **Auf sauberen Netzen tadellos.** Gemessen: 56 von 60 Abrufen gegen acht
-  verschiedene echte Internet-Server sauber (93 %); sieben der acht Server
-  100 %, typisch 250–500 ms. Gegen einen LAN-Server 10/10 mit exakt
-  passender Byte-Zahl. Keine falschen Daten, keine Deadlocks, keine
-  Socket-/TIME_WAIT-Lecks (200-Zyklen-Speichertest: **0 Byte Heap-Wachstum,
-  0 geleakte Frames/Sockets**).
-- **Durchsatz gemessen ~0,6 MiB/s** (512 KiB über LAN). Langsam — und ehrlich
-  begründet: das **feste 8-KiB-Fenster ohne Scaling** lässt höchstens 8 KiB pro
-  Round-Trip unterwegs sein, und der Client **pumpt synchron pro Segment** (ein
-  VM-Exit je Notify). Für LAN und Lernzweck völlig ausreichend, aber kein
-  Datendurchsatz-Kraftpaket. Ping-RTT im LAN: ~0,2 ms (der erste Ping ~4 ms
-  wegen der ARP-Auflösung).
-- **Unter Paketverlust wird TCP sehr langsam.** 21 KB brauchen bei 10 %
-  Verlust zwischen 0,3 s und 12 s; gelegentlich reißt ein 15-Sekunden-Budget.
-  Ursache sind drei bewusst weggelassene Mechanismen: **kein Fast-Retransmit**
-  (jeder Verlust kostet eine volle Timeout-Runde), **Out-of-Order-Segmente
-  werden verworfen** statt zwischengespeichert, und der **RTO-Backoff geht bis
-  8 s**. Es ist ein Effizienz-, kein Korrektheitsproblem.
-- **Ebenfalls bewusst nicht vorhanden:** Congestion-Control, SACK,
-  Window-Scaling (festes 8-KiB-Fenster), IP-Fragment-Reassemblierung.
-- **Kein HTTPS/TLS.** `hole` spricht nur `http://`; eine https-URL wird sauber
-  abgelehnt statt halbherzig versucht. TLS braucht geprüfte Krypto — das wäre
-  eine eigene Serie.
-- **Ein Socket-Typ pro Verbindung, keine Nebenläufigkeit im Client:** Die
-  Shell-Befehle pumpen den Stack synchron; währenddessen steht der Desktop.
+Nicht verstreut über sieben Serien, nicht in Fußnoten. Ein System, das seine
+Grenzen nicht kennt, wird an einer Stelle vertraut, an der es nichts leistet —
+und eine grüne Testsuite sagt nur etwas über das Gebaute, nichts über das
+Nicht-Gebaute.
+
+Die vier, die am meisten überraschen:
+
+- **Keine Sperrlisten-Prüfung (weder OCSP noch CRL).** Ein gestohlenes, noch
+  nicht abgelaufenes Zertifikat wird akzeptiert. Das ist die schwerwiegendste
+  Lücke der TLS-Implementierung.
+- **Der Vertrauensanker wird von Hand aktualisiert.** Die gefährliche Richtung
+  ist dabei nicht die naheliegende: Ein zu altes Bündel lehnt nicht zu viel
+  ab, es *vertraut zu viel*.
+- **Kein NTP.** Die Uhr wird nur gegen eine einzige Plausibilität geprüft (sie
+  kann nicht vor dem Bau-Datum des Kernels liegen). Eine um Stunden falsch
+  gehende oder absichtlich vorgestellte Uhr fällt nicht auf — mit direkten
+  Folgen für die Gültigkeitsprüfung.
+- **Kein Netz-Treiber für echte Hardware.** SpeedOS hat genau einen
+  NIC-Treiber, `virtio-net`, und den gibt es nur in virtuellen Maschinen. Der
+  USB-Live-Boot funktioniert — aber offline.
+
+Der TCP/IP-Stack ist ein bewusstes **Minimal-Viable** mit vermessenen Grenzen
+(kein Congestion-Control, kein Fast-Retransmit, kein SACK, kein
+Window-Scaling, keine Out-of-Order-Reassembly). Gemessen: 56 von 60 Abrufen
+gegen acht echte Internet-Server sauber (93 %), LAN 10/10 byte-exakt, keine
+falschen Daten und keine Lecks; unter Paketverlust wird er *langsam*, nicht
+falsch. Protokoll und registrierte Reißleine:
+[docs/tcp-scope.md](docs/tcp-scope.md).
 
 Der Cargo-Schalter `tcp-eigen` (Standard an) markiert die Stelle, an der man
 die TCP-Schicht gegen eine Fremd-Implementierung (z. B. smoltcp) tauschen

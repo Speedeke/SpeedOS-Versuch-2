@@ -60,6 +60,9 @@ fn haupt(argumente: &Argumente) -> i32 {
             println!("  4  Zeiger mit Integer-Ueberlauf");
             println!("  5  riesige Laengen");
             println!("  6  Pfad-Angriffe");
+            println!("  7  zufall-Syscall mit boesen Zeigern/Laengen");
+            println!("  8  Speicher-Syscall mit absurden Groessen");
+            println!("  9  riesige und kaputte PEM-Buendel");
             println!(" 20  Kernel-Speicher LESEN      (-> Absturz erwartet)");
             println!(" 21  Kernel-Speicher SCHREIBEN  (-> Absturz erwartet)");
             println!(" 22  Stack-Ueberlauf            (-> Absturz erwartet)");
@@ -79,6 +82,9 @@ fn haupt(argumente: &Argumente) -> i32 {
         4 => zeiger_ueberlauf(),
         5 => riesige_laengen(),
         6 => pfad_angriffe(),
+        7 => zufall_angriffe(),
+        8 => speicher_angriffe(),
+        9 => pem_angriffe(),
         20 => kernel_lesen(),
         21 => kernel_schreiben(),
         22 => stack_ueberlauf(),
@@ -348,6 +354,323 @@ fn pfad_angriffe() -> i32 {
         println!("angreifer: alle Pfad-Angriffe korrekt abgelehnt.");
     }
     fehler_gesamt
+}
+
+// ===========================================================================
+// TEIL A2: DIE NEUEN FLAECHEN AUS SERIE 7 (Zufall, User-Heap, Zertifikate)
+// ===========================================================================
+
+/// ANGRIFF 7: Den Zufallsgenerator missbrauchen.
+///
+/// ==========================================================================
+/// WARUM AUSGERECHNET `zufall` EIN LOHNENDES ZIEL IST
+///
+/// Es ist der einzige Syscall, der UNAUFGEFORDERT in fremden Speicher
+/// schreibt und dabei etwas hineinschreibt, das der Angreifer nicht kennen
+/// soll. Zwei Angriffe liegen nahe:
+///
+///  (a) Den Kernel dazu bringen, SICH SELBST zu ueberschreiben, indem man
+///      ihm einen Kernel-Zeiger als Ziel gibt (copy-OUT, Dauerregel I).
+///  (b) Den Puffer TEILWEISE fuellen lassen. Das waere heimtueckischer als
+///      ein Fehler: Halb gefuellter Zufall sieht aus wie Zufall, und die
+///      Nullen am Ende faellt niemandem auf. RNG-Dauerregel IV sagt
+///      deshalb: Im Fehlerfall bleibt der Puffer IN RUHE. Genau das wird
+///      hier nachgemessen und nicht geglaubt.
+/// ==========================================================================
+fn zufall_angriffe() -> i32 {
+    println!("angreifer: zufall-Syscall mit boesen Zeigern und Laengen ...");
+    let mut fehler_gesamt = 0;
+
+    // (a) Kernel-Adressen als ZIEL des copy-OUT.
+    for (name, adresse) in [
+        ("Kernel-Heap", KERNEL_HEAP),
+        ("obere Haelfte", OBERE_HAELFTE),
+        ("Nullzeiger", 0u64),
+        ("Seite unter dem User-Bereich", USER_BASIS - 0x1000),
+        ("Seite ueber dem User-Bereich", 0x100_0000_0000),
+    ] {
+        // Sicherheit: Der Kernel prueft den Zeiger selbst — das IST der Test.
+        let ergebnis = unsafe { syscall4(libspeed::SYS_ZUFALL, adresse, 32, 0, 0) };
+        if let Some(code) = muss_scheitern("zufall schreibt nach", ergebnis) {
+            println!("  ... naemlich nach {}", name);
+            fehler_gesamt = code;
+        }
+    }
+
+    // (b) Laengen, die nicht gehen duerfen.
+    let mut puffer = [0u8; 64];
+    let zeiger = puffer.as_mut_ptr() as u64;
+    for laenge in [
+        64 * 1024 + 1,  // knapp ueber MAX_PUFFER
+        1u64 << 30,
+        u64::MAX / 2,
+        u64::MAX,       // Integer-Ueberlauf beim Addieren
+    ] {
+        let ergebnis = unsafe { syscall4(libspeed::SYS_ZUFALL, zeiger, laenge, 0, 0) };
+        if let Some(code) = muss_scheitern("zufall mit riesiger Laenge", ergebnis) {
+            fehler_gesamt = code;
+        }
+    }
+
+    // (c) DIE WICHTIGSTE PRUEFUNG: Bleibt der Puffer im Fehlerfall UNBERUEHRT?
+    //
+    // Ein Zielbereich, der in unserem Speicher BEGINNT und darueber
+    // hinausreicht. Ein Kernel, der erst schreibt und dann prueft, wuerde
+    // den Anfang fuellen — und der Aufrufer haette halben Zufall, ohne es
+    // zu merken.
+    const MUSTER: u8 = 0xA5;
+    let mut probe = [MUSTER; 64];
+    let probe_zeiger = probe.as_mut_ptr() as u64;
+    // Weit ueber das Ende unseres Stacks hinaus.
+    let ergebnis = unsafe { syscall4(libspeed::SYS_ZUFALL, probe_zeiger, 16 * 1024 * 1024, 0, 0) };
+    if let Some(code) = muss_scheitern("zufall ueber die Bereichsgrenze", ergebnis) {
+        fehler_gesamt = code;
+    }
+    if probe.iter().any(|byte| *byte != MUSTER) {
+        println!("  !!! Der Puffer wurde TEILWEISE gefuellt — RNG-Dauerregel IV verletzt !!!");
+        fehler_gesamt = durchgekommen("zufall hat halb gefuellt");
+    } else {
+        libspeed::diagnoseln!("[angreifer] Puffer nach abgelehntem zufall unveraendert — gut.");
+    }
+
+    // (d) Laenge 0 ist erlaubt und muss folgenlos bleiben.
+    let mut leer = [MUSTER; 8];
+    let _ = unsafe { syscall4(libspeed::SYS_ZUFALL, leer.as_mut_ptr() as u64, 0, 0, 0) };
+    if leer.iter().any(|byte| *byte != MUSTER) {
+        fehler_gesamt = durchgekommen("zufall mit Laenge 0 hat geschrieben");
+    }
+
+    // (e) Und der GUTE Fall muss weiterhin funktionieren — ein Kernel, der
+    //     nach den Angriffen keinen Zufall mehr liefert, waere auch kaputt.
+    let mut echt = [0u8; 32];
+    match libspeed::zufall(&mut echt) {
+        Ok(_) => {
+            if echt.iter().all(|byte| *byte == echt[0]) {
+                println!("  !!! zufall lieferte 32 gleiche Bytes !!!");
+                fehler_gesamt = 1;
+            }
+        }
+        Err(fehler) => {
+            // NichtGesaet ist zulaessig (der Pool braucht Zeit) — alles
+            // andere waere ein Schaden aus den Angriffen davor.
+            if fehler != Fehler::NICHT_GESAET {
+                println!("  zufall ist nach den Angriffen kaputt: {}", fehler.text());
+                fehler_gesamt = 1;
+            }
+        }
+    }
+
+    if fehler_gesamt == 0 {
+        println!("angreifer: zufall haelt stand (Puffer blieb unberuehrt).");
+    }
+    fehler_gesamt
+}
+
+/// ANGRIFF 8: Den User-Heap-Syscall mit absurden Groessen fuettern.
+///
+/// `SYS_SPEICHER` mappt Seiten in den eigenen Adressraum. Die Gefahr ist
+/// nicht, dass ein Prozess sich selbst schadet (das darf er), sondern dass
+/// er den KERNEL beim Rechnen aus dem Tritt bringt: ein Ueberlauf in der
+/// Groessen-Arithmetik, eine Obergrenze, die nicht greift, oder ein
+/// Speicherfresser, der andere Prozesse aushungert.
+fn speicher_angriffe() -> i32 {
+    println!("angreifer: Speicher-Syscall mit absurden Groessen ...");
+    let mut fehler_gesamt = 0;
+
+    // Absurde Groessen muessen ABGELEHNT werden — und zwar, ohne dass der
+    // Kernel dabei rechnet, bis etwas ueberlaeuft.
+    for bytes in [u64::MAX, u64::MAX - 4095, 1u64 << 60, 1u64 << 40] {
+        let ergebnis = libspeed::speicher_anfordern(bytes);
+        if let Some(code) = muss_scheitern("Speicher in absurder Groesse", ergebnis) {
+            fehler_gesamt = code;
+        }
+    }
+
+    // Und jetzt ehrlich anfordern, bis der Kernel Nein sagt. Die Obergrenze
+    // MUSS greifen (12 MiB laut docs/syscalls.md) — ein Prozess darf nicht
+    // beliebig viel Speicher an sich ziehen.
+    let mut geholt: u64 = 0;
+    let mut runden = 0;
+    while libspeed::speicher_anfordern(1024 * 1024).is_ok() {
+        geholt += 1024 * 1024;
+        runden += 1;
+        if runden > 64 {
+            println!("  !!! Der Kernel gibt ohne Ende Speicher heraus !!!");
+            fehler_gesamt = durchgekommen("Speicher ohne Obergrenze");
+            break;
+        }
+    }
+    libspeed::diagnoseln!(
+        "[angreifer] Der Kernel gab {} MiB und sagte dann Nein.",
+        geholt / (1024 * 1024)
+    );
+
+    // Der Prozess muss danach WEITERLAUFEN koennen — ein Syscall, der nach
+    // erschoepftem Heap nicht mehr geht, waere ein Folgeschaden.
+    if libspeed::pid() == 0 {
+        fehler_gesamt = 1;
+        println!("  Nach dem Speicher-Angriff geht getpid nicht mehr.");
+    }
+
+    if fehler_gesamt == 0 {
+        println!("angreifer: der Speicher-Syscall haelt seine Obergrenze ein.");
+    }
+    fehler_gesamt
+}
+
+// --- Der Arbeitsspeicher fuer die PEM-Angriffe (in `.bss`, kein Heap) ---
+const BUENDEL_BYTES: usize = 256 * 1024;
+static mut BUENDEL: [u8; BUENDEL_BYTES] = [0; BUENDEL_BYTES];
+static mut DER_PUFFER: [u8; libspeed::pem::MAX_DER_BYTES] = [0; libspeed::pem::MAX_DER_BYTES];
+
+/// # Safety
+/// Ein SpeedOS-Prozess hat einen Ausfuehrungsstrang.
+fn buendel() -> &'static mut [u8] {
+    unsafe { &mut *core::ptr::addr_of_mut!(BUENDEL) }
+}
+fn der_puffer() -> &'static mut [u8] {
+    unsafe { &mut *core::ptr::addr_of_mut!(DER_PUFFER) }
+}
+
+/// ANGRIFF 9: Den Zertifikats-Parser mit Unsinn fuettern.
+///
+/// ==========================================================================
+/// WARUM DAS EIN ANGRIFF UND KEINE SPIELEREI IST
+///
+/// Der Vertrauensanker ist eine DATEI. Wer sie ersetzen kann, bestimmt, was
+/// als „geprueft" durchgeht — und der erste Schritt dahin ist, den Parser
+/// zum Absturz oder in eine Endlosschleife zu bringen. Deshalb liegt er in
+/// Ring 3 (docs/tls-vertrauen.md §4): Ein Fehler soll einen PROZESS treffen.
+///
+/// Die Zusage aus pem.rs lautet: **panickt nie, feste Obergrenzen, und ein
+/// kaputter Block macht nur DIESEN Block ungueltig.** Hier wird sie
+/// angegriffen — mit dem Ergebnis, dass der Angreifer NORMAL zurueckkehrt.
+/// Ein Absturz waere hier ein Fehlschlag, kein Erfolg.
+/// ==========================================================================
+fn pem_angriffe() -> i32 {
+    println!("angreifer: riesige und kaputte PEM-Buendel ...");
+    let mut fehler_gesamt = 0;
+    let der = der_puffer();
+
+    // (1) BEGIN ohne END — der Rest der Datei ist unbrauchbar, alles davor
+    //     muss gueltig bleiben.
+    let laenge = fuellen(b"-----BEGIN CERTIFICATE-----\nQUJD\n", 1);
+    let bestand = libspeed::pem::bloecke_durchgehen(&buendel()[..laenge], der, |_| {});
+    libspeed::diagnoseln!(
+        "[angreifer] BEGIN ohne END: {} gelesen, {} kaputt",
+        bestand.gelesen,
+        bestand.kaputt
+    );
+
+    // (2) Base64-Muell zwischen gueltigen Marken.
+    let laenge = fuellen(
+        b"-----BEGIN CERTIFICATE-----\n!!!!!????\n-----END CERTIFICATE-----\n",
+        1,
+    );
+    let bestand = libspeed::pem::bloecke_durchgehen(&buendel()[..laenge], der, |_| {});
+    if bestand.gelesen != 0 {
+        fehler_gesamt = durchgekommen("Base64-Muell wurde als Zertifikat gelesen");
+    }
+
+    // (3) SEHR VIELE Bloecke — die Obergrenze MAX_ZERTIFIKATE (512) muss
+    //     greifen, und zwar ohne dass es ewig dauert.
+    let laenge = fuellen(
+        b"-----BEGIN CERTIFICATE-----\nQUJDRA==\n-----END CERTIFICATE-----\n",
+        4000,
+    );
+    let start = libspeed::zeit_jetzt();
+    let bestand = libspeed::pem::bloecke_durchgehen(&buendel()[..laenge], der, |_| {});
+    let dauer = libspeed::zeit_jetzt() - start;
+    libspeed::diagnoseln!(
+        "[angreifer] {} Bloecke: {} gelesen, {} uebrig, {} ms",
+        4000,
+        bestand.gelesen,
+        bestand.uebrig,
+        dauer
+    );
+    if bestand.gelesen > libspeed::pem::MAX_ZERTIFIKATE {
+        fehler_gesamt = durchgekommen("MAX_ZERTIFIKATE wurde ueberschritten");
+    }
+
+    // (4) EIN Block, der groesser ist als der Arbeitspuffer.
+    let laenge = riesigen_block_bauen();
+    let bestand = libspeed::pem::bloecke_durchgehen(&buendel()[..laenge], der, |_| {});
+    if bestand.gelesen != 0 {
+        fehler_gesamt = durchgekommen("ein uebergrosser Block wurde angenommen");
+    }
+
+    // (5) DER-LAEUFER auf Unsinn: abgeschnitten, Laengen, die ins Nichts
+    //     zeigen, und ein Tag-Salat. `kurzinfo` darf NIE panicken und muss
+    //     IMMER zurueckkehren.
+    let muster: [&[u8]; 7] = [
+        &[],
+        &[0x30],
+        &[0x30, 0x82],
+        &[0x30, 0x82, 0xff, 0xff],              // Laenge 65535, nichts dahinter
+        &[0x30, 0x84, 0xff, 0xff, 0xff, 0xff],  // Laenge 4 GiB
+        &[0x30, 0x80, 0x30, 0x80, 0x30, 0x80],  // unbestimmte Laenge (BER)
+        &[0xff; 64],
+    ];
+    for (nummer, probe) in muster.iter().enumerate() {
+        let info = libspeed::pem::kurzinfo(probe);
+        libspeed::diagnoseln!(
+            "[angreifer] DER-Muster {}: Name {} Byte, gueltig {}..{}",
+            nummer,
+            info.name.len(),
+            info.gueltig_ab,
+            info.gueltig_bis
+        );
+    }
+
+    // (6) Selbstaehnlichkeit: ein Block, dessen Inhalt wieder wie ein Block
+    //     aussieht. Ein Parser, der rekursiv sucht, haengt hier.
+    let laenge = fuellen(
+        b"-----BEGIN CERTIFICATE-----\n-----BEGIN CERTIFICATE-----\nQUJD\n",
+        200,
+    );
+    let start = libspeed::zeit_jetzt();
+    let _ = libspeed::pem::bloecke_durchgehen(&buendel()[..laenge], der, |_| {});
+    let dauer = libspeed::zeit_jetzt() - start;
+    if dauer > 5_000 {
+        println!("  !!! Verschachtelte Marken brauchten {} ms !!!", dauer);
+        fehler_gesamt = 1;
+    }
+
+    if fehler_gesamt == 0 {
+        println!("angreifer: der PEM-Parser haelt stand (kein Absturz, keine Schleife).");
+    }
+    fehler_gesamt
+}
+
+/// Fuellt den Buendel-Puffer `wiederholungen`-mal mit `block` und liefert die
+/// benutzte Laenge.
+fn fuellen(block: &[u8], wiederholungen: usize) -> usize {
+    let ziel = buendel();
+    let mut stelle = 0usize;
+    for _ in 0..wiederholungen {
+        if stelle + block.len() > ziel.len() {
+            break;
+        }
+        ziel[stelle..stelle + block.len()].copy_from_slice(block);
+        stelle += block.len();
+    }
+    stelle
+}
+
+/// Baut EINEN Block, dessen Base64-Inhalt weit groesser ist als
+/// `MAX_DER_BYTES` — der Arbeitspuffer darf davon nicht ueberlaufen.
+fn riesigen_block_bauen() -> usize {
+    let ziel = buendel();
+    let kopf = b"-----BEGIN CERTIFICATE-----\n";
+    let fuss = b"\n-----END CERTIFICATE-----\n";
+    ziel[..kopf.len()].copy_from_slice(kopf);
+    let mut stelle = kopf.len();
+    while stelle + fuss.len() + 4 < ziel.len() {
+        ziel[stelle..stelle + 4].copy_from_slice(b"QUJD");
+        stelle += 4;
+    }
+    ziel[stelle..stelle + fuss.len()].copy_from_slice(fuss);
+    stelle + fuss.len()
 }
 
 // ===========================================================================

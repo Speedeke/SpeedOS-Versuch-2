@@ -242,8 +242,15 @@ pub struct Abruf {
     pub wiederholungen: u32,
     /// Rohe Antwort-Bytes (Kopf + Rumpf, vor dem Zerlegen).
     pub roh_bytes: usize,
-    /// Gesamtdauer ueber alle Versuche.
+    /// Gesamtdauer ueber alle Versuche (inkl. DNS, Verbinden, Handshake).
     pub dauer_ms: u64,
+    /// NUR die Uebertragung des LETZTEN Versuchs — ohne DNS, Verbinden und
+    /// Handshake.
+    ///
+    /// Warum getrennt: Sonst misst „Durchsatz" bei einer kleinen Seite vor
+    /// allem den Handshake. Fuer die Frage „wie schnell kommen Bytes durch"
+    /// ist genau diese Zahl die richtige.
+    pub uebertragung_ms: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -424,7 +431,7 @@ impl Klient {
         let mut weiterleitungen = 0u32;
         let mut wiederholt = 0u32;
         loop {
-            let (roh, info) = match self.einmal_holen(&ziel) {
+            let (roh, info, uebertragung_ms) = match self.einmal_holen(&ziel) {
                 Ok(paar) => paar,
                 // Der EINE wiederholbare Fall — siehe `Klient::wiederholungen`.
                 Err(AbrufFehler::LeereAntwort) if wiederholt < self.wiederholungen => {
@@ -476,12 +483,16 @@ impl Klient {
                 weiterleitungen,
                 wiederholungen: wiederholt,
                 dauer_ms: crate::zeit_jetzt() - start,
+                uebertragung_ms,
             });
         }
     }
 
     /// EIN Versuch: verbinden, Anfrage senden, Antwort einsammeln.
-    fn einmal_holen(&mut self, ziel: &Ziel) -> Result<(Vec<u8>, Verbindungsinfo), AbrufFehler> {
+    fn einmal_holen(
+        &mut self,
+        ziel: &Ziel,
+    ) -> Result<(Vec<u8>, Verbindungsinfo, u64), AbrufFehler> {
         let frist = crate::zeit_jetzt() + self.frist_ms;
 
         // --- 1. Name -> IP ---
@@ -511,6 +522,7 @@ impl Klient {
         let info = strom.info(tcp_ms, self.kette_behalten);
 
         // --- 4. Anfrage ---
+        let uebertragung_start = crate::zeit_jetzt();
         strom.schreiben(ziel.anfrage().as_bytes())?;
 
         // --- 5. Antwort einsammeln ---
@@ -543,10 +555,12 @@ impl Klient {
         // `strom` faellt hier — und mit ihm das Socket-Handle (Drop von
         // TcpStrom). Auch auf jedem Fehlerweg oben, denn Drop laeuft immer.
 
+        let uebertragung_ms = crate::zeit_jetzt() - uebertragung_start;
+
         if roh.is_empty() {
             return Err(AbrufFehler::LeereAntwort);
         }
-        Ok((roh, info))
+        Ok((roh, info, uebertragung_ms))
     }
 }
 

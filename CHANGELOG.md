@@ -5,6 +5,140 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### SERIE-7-ABSCHLUSS: der Kernel unter Angriff, die Zahlen, die Naht zu Serie 8
+
+Serie 7 hat SpeedOS ins verschlüsselte Netz gebracht. Dieser Abschluss prüft
+nach, misst nach — und legt offen, was **nicht** geht.
+
+#### Der Sicherheits-Pass: drei neue Angriffsflächen
+
+`userland/angreifer` bekommt drei neue Angriffe. Sie zielen auf genau das,
+was Serie 7 hinzugefügt hat: einen Zufallsgenerator, aus dem Schlüssel
+entstehen, einen Syscall, der Speicher herausgibt, und eine **Datei**, die
+entscheidet, wem das System vertraut.
+
+| Angriff | Ergebnis |
+|---|---|
+| `zufall` mit Kernel-Zeiger als Ziel (5 Adressen) | jedes Mal `UngueltigerZeiger` |
+| `zufall` mit Längen bis `u64::MAX` | `ZuGross`, kein Überlauf |
+| `zufall` über die Bereichsgrenze hinaus | abgelehnt — **und der Puffer blieb Byte für Byte unverändert** |
+| `speicher` mit `u64::MAX`, `1<<60`, `1<<40` | abgelehnt, kein Überlauf |
+| `speicher` in 1-MiB-Schritten bis zum Nein | **genau 12 MiB**, dann `KeinPlatz` |
+| PEM: BEGIN ohne END, Base64-Müll, 4000 Blöcke, Block > Puffer, 7 DER-Muster, verschachtelte Marken | kein Absturz, keine Schleife, Millisekunden |
+| Vertrauensanker durch Müll ersetzt (4 Varianten) | **jedes Mal Exit 4 — nie verbunden** |
+| Server schickt absurde TLS-Records (Typ 0xFF, Länge 0xFFFF, zu wenig Inhalt) | sauberer Protokollfehler in 268 ms |
+
+Die dritte Zeile ist die wichtigste: Ein halb gefüllter Zufallspuffer wäre
+heimtückischer als ein Fehler — Nullen sehen aus wie Zufall. RNG-Dauerregel IV
+(„lieber warten als schwach") ist damit **geprüft**, nicht nur formuliert.
+
+Und die vorletzte: SpeedOS kann nicht verhindern, dass jemand die
+Vertrauensdatei ersetzt (es gibt keine Signatur darauf, siehe
+`docs/grenzen.md`). Was es muss: sich nicht **täuschen** lassen. Eine kaputte
+Datei führt nicht dazu, dass weniger geprüft wird, sondern dass gar nicht
+verbunden wird.
+
+**48 Angriffe im Dauerbeschuss, Heap byte-exakt, Frames byte-exakt.**
+
+#### Speicher-Pass: 50 HTTPS-Zyklen
+
+Jeder Zyklus fährt den vollen Weg: Prozess starten, 186 KiB Vertrauensanker
+lesen, 119 Wurzeln parsen, TLS-Handshake, Kette prüfen, HTTP, beenden.
+
+```
+=== 50 HTTPS-ZYKLEN gegen https://example.com/ ===
+50 von 50 wie erwartet, 17607 ms gesamt (352 ms je Zyklus)
+Frames   21576 -> 21576        Sockets  2 -> 2        Pipes  0 -> 0
+Frame-Differenz 0 (erlaubt 34: 34 P1-Tabellen + 0 Log-Seiten)
+```
+
+Die **bekannte P1-Buchhaltung** ist dabei ausgerechnet, nicht weggelassen:
+`allocate_pages` vergibt virtuellen Raum monoton, alle 512 Seiten bleibt eine
+P1-Tabelle zurück; 50 Prozesse à ~340 Seiten ergeben höchstens 34. Gemessen
+wurden **0**.
+
+**Zwei Messfallen, beide selbst hineingelaufen** und deshalb im Code
+festgehalten: `socket::schliessen` *markiert* nur — der Eintrag verschwindet
+erst, wenn TIME_WAIT (2 s) durch ist. Wer vorher zählt, sieht Sockets, die
+keine mehr sind; und weil ein TCB zwei 8-KiB-Ringpuffer hält, sieht der Heap
+gleich mit nach einem Leck aus (17 KiB — genau eine Verbindung). Erst war die
+Messung *nach* den Zyklen zu früh, dann die *davor*. Beide Messpunkte
+brauchen dieselbe Ruhe-Prozedur.
+
+#### Leistung, final (QEMU/WHPX 4,2 GHz)
+
+| Messgröße | Wert |
+|---|---|
+| Syscall-Roundtrip aus Ring 3 (`getpid`) | **70 ns** |
+| Kontext-Wechsel (yield-Roundtrip, inkl. CR3) | **479 ns** |
+| Weck-Latenz | 3829 µs → **5 µs** |
+| Pipe Prozess → Kernel | 199 KiB/s → **228 MiB/s** |
+| Pipe Prozess → Prozess | 100 KiB/s → **224 MiB/s** |
+| Socket `sende` | 29 869 KiB/s (33 µs je Aufruf) |
+| TLS-Handshake example.com | **29 ms** (TCP 26 ms) |
+| TLS-Handshake curl.se | **11 ms** (TCP 8 ms) |
+| **HTTPS-Durchsatz** | 186 446 B in 27 ms = **6 743 KiB/s** |
+| dieselbe Größenordnung ohne TLS, Kernel-Klient, LAN | 524 288 B in 818 ms = **625 KiB/s** |
+| Heap-Spitze `holes` | 121 920 B (kleine Seite) / 621 976 B (186 KiB) |
+| 50 HTTPS-Zyklen | 352 ms je Zyklus |
+
+**Die letzte Zeile der oberen Hälfte ist die Aussage:** TLS aus Ring 3 ist
+**~10× schneller** als plain TCP aus dem Kernel. Verschlüsselung ist nicht der
+Engpass; das *Warten* war es. Der Kernel-Klient wartet mit
+`warte_auf_interrupt()`, ein Ring-3-Programm mit `abgeben()` — der Wecken-Fix
+aus Teil 0 schlägt bis in den HTTPS-Durchsatz durch.
+
+#### unsafe-Audit (`docs/unsafe-audit-serie7.md`)
+
+| Bereich | `unsafe`-Blöcke |
+|---|---|
+| `src/zufall.rs` inkl. IRQ-Pfad | 3 |
+| `scheduler::heap_erweitern` (der Syscall) | **0** |
+| `userland/src/tls.rs`, `netz.rs`, `pem.rs` | **0** |
+| `speedhttp/` | **0** |
+| `userland/src/heap.rs` | 3 |
+
+Die Nullen sind die Aussage. **Der Entropie-Pfad im Interrupt-Kontext ist
+`unsafe`-frei** — ein `rdtsc` und drei Atomics, kein Lock, keine Allokation.
+Und der **Speicher-Syscall** kommt ohne aus, weil die gefährliche Arbeit in
+`adressraum::bereich_mappen_mit_rechten` steckt (Serie 6 auditiert); was
+bleibt, sind vier Zeilen Arithmetik mit `checked_add` und einer harten
+Grenze — jede fängt einen echten Angriff.
+
+#### Doku: Ehrlichkeit an EINER Stelle
+
+**Neu: [`docs/grenzen.md`](docs/grenzen.md)** — alle bekannten Lücken
+gesammelt, nicht über sieben Serien verstreut: keine Sperrlisten-Prüfung
+(OCSP/CRL), manueller Root-Store ohne Signatur, kein NTP, kein Netz-Treiber
+für echte Hardware, TCP ohne Congestion-Control, FAT32 nur lesend, SpeedFS
+ohne Journal, kein SMP, keine Rechte. Mit einem eigenen Abschnitt für das,
+was **mit Absicht** fehlt (ein `--unsicher`-Schalter zum Beispiel).
+
+Dazu: `docs/syscalls.md` um die Messergebnisse zu `zufall`/`speicher`
+ergänzt, README mit einer echten HTTPS-Sitzung als Mitschnitt, und die
+veraltete Zeile „Kein HTTPS/TLS" ist raus.
+
+#### Die Naht für Serie 8 (`docs/serie8-bestandsaufnahme.md`)
+
+Die Frage, die das Projekt bisher umgangen hat: **Wie zeichnet ein
+Ring-3-Prozess in ein Fenster?** Heute lebt die Fenster-/Widget-Schicht im
+Kernel.
+
+Drei Optionen, ehrlich bewertet — Pixelpuffer per Syscall (einfach, kopiert),
+geteilter Speicher (schnell, durchbricht die Isolation aus Serie 6),
+Zeichenbefehle als Protokoll (mächtig, für einen Browser die falsche
+Abstraktion). **Empfehlung: Pixelpuffer**, weil es keine Sicherheitszusage
+kostet und Option 2 nicht verbaut — mit einem *vorher festgelegten
+Kriterium*, wann sich geteilter Speicher lohnt (Scroll-Frame über ~8 ms,
+Kopie mehr als die Hälfte davon). Dieselbe Methodik wie die TCP-Reißleine.
+
+Dazu: Eingabe-Events (die Warte-Mechanik ist vorhanden — `Warteauf` braucht
+nur eine Variante), **die Architekturfrage** (Toolkit als geteilte Kiste
+`speedui`, nach dem Muster von `speedhttp`), was ein HTML/CSS-Renderer noch
+braucht (Font-Rasterizer, Bild-Dekodierung, Scroll-Strategie) und ein
+realistischer Zuschnitt für Browser V1 — **ohne JavaScript**, und mit
+`info.cern.ch` als ehrlichem Prüfstein.
+
 ### Serie 7, Teil 5: TLS WIRD EINE SYSTEMFÄHIGKEIT
 
 Teil 4 hat bewiesen, dass es geht — in **einem** Programm. Teil 5 macht

@@ -90,6 +90,9 @@ fn panic(info: &PanicInfo) -> ! {
 
 const KLAR: &str = "http://10.0.2.2:8080";
 const STUMM: &str = "https://10.0.2.2:8444/";
+/// Der lokale TLS-Server. Er wird (zu Recht) abgelehnt — fuer den
+/// Speicher-Pass ist das egal, der Weg durch den TLS-Stapel ist derselbe.
+const SELBST_SIGNIERT: &str = "https://10.0.2.2:8443/klein.txt";
 /// Ein Name, den es per Norm (RFC 2606) NIEMALS geben kann.
 const KEIN_NAME: &str = "https://gibt.es.nicht.invalid/";
 
@@ -983,4 +986,230 @@ fn test_news_zeigt_text_statt_tags() {
     );
     // Und keine Tags:
     assert!(!lauf.ausgabe.contains("<h1>"), "es sind Tags uebrig");
+}
+
+// ===========================================================================
+// 6. DER SPEICHER-PASS (Serie-7-Abschluss)
+// ===========================================================================
+
+/// 50 HTTPS-ZYKLEN: Prozess starten, laden, beenden — und danach ist alles
+/// wieder da.
+///
+/// ==========================================================================
+/// WARUM 50 UND NICHT 3
+///
+/// Ein einzelner Zyklus kann ein Leck verdecken: Vieles wird beim ersten Mal
+/// alloziert und dann behalten (Caches, Puffer, die erste Heap-Erweiterung).
+/// Erst die WIEDERHOLUNG trennt „einmalige Kosten" von „waechst mit jedem
+/// Lauf". Fuenfzig Zyklen sind genug, dass ein Leck von auch nur einem Frame
+/// je Lauf unuebersehbar waere — und wenig genug, dass der Test in einer
+/// Minute durch ist.
+///
+/// Jeder Zyklus faehrt den VOLLEN TLS-Weg: 186 KiB Vertrauensanker lesen,
+/// 119 Wurzeln parsen, Handshake, Zertifikatskette pruefen, HTTP, beenden.
+/// Das ist der teuerste Ablauf, den SpeedOS kennt.
+///
+/// ==========================================================================
+/// DIE BEKANNTE BUCHHALTUNG — benannt, nicht wegdefiniert
+///
+/// `memory::allocate_pages` vergibt virtuellen Raum MONOTON. Alle 512 Seiten
+/// bleibt dabei eine P1-Tabelle im Kernel-Adressraum zurueck (CLAUDE.md,
+/// Serie-6-Abschluss). Das ist KEIN Prozess-Leck — der Adressraum eines
+/// Prozesses faellt vollstaendig —, sondern eine Eigenschaft des
+/// Kernel-Allocators, und sie ist AUSRECHENBAR:
+///
+///     Frames je Prozess  ~340  (holes ist ~950 KiB gross)
+///     50 Prozesse        ~17000 Seiten virtuellen Raums
+///     -> hoechstens        34  P1-Tabellen
+///
+/// Dazu der Log-Puffer, der mit jeder Ausgabe waechst (bis 64 KiB) und
+/// ebenfalls in Seiten gerechnet wird. Die Schranke unten ist die SUMME
+/// dieser beiden — kein Sicherheitsabstand ins Blaue.
+/// ==========================================================================
+#[test_case]
+fn test_50_https_zyklen_speicher_stabil() {
+    if !programme_vorhanden() {
+        return;
+    }
+    zufall_bereitmachen();
+
+    // Welches Ziel? Am liebsten echtes HTTPS aus dem Internet. Ist keins da,
+    // tut es der lokale TLS-Server — er wird zwar (zu Recht) abgelehnt, aber
+    // der Speicher-Weg ist derselbe: Wurzeln laden, Handshake, Kette pruefen.
+    let internet = netz::dns::aufloesen("example.com").is_ok();
+    let (ziel, erwartet) = if internet {
+        ("https://example.com/", 0)
+    } else {
+        serial_println!(
+            "  (kein Internet — die Zyklen laufen gegen den lokalen TLS-Server \
+             und enden in der Ablehnung. Derselbe Speicher-Weg.)"
+        );
+        (SELBST_SIGNIERT, 4)
+    };
+
+    // AUFWAERMEN: Die einmaligen Kosten (erste Heap-Erweiterung, Caches,
+    // Socket-Tabelle) gehoeren nicht in die Messung.
+    for _ in 0..2 {
+        starten("holes", &["holes", ziel, "--still"]);
+    }
+    zur_ruhe_kommen();
+
+    let frames_vorher = memory::frame_statistik().0;
+    let sockets_vorher = netz::socket::anzahl();
+    let pipes_vorher = pipe::anzahl();
+    let heap_vorher = heap_ohne_log();
+    let log_vorher = speed_os::protokoll::puffer_bytes();
+
+    const ZYKLEN: usize = 50;
+    let start = zeit::ms_seit_boot();
+    let mut erfolge = 0usize;
+    for runde in 0..ZYKLEN {
+        let lauf = starten("holes", &["holes", ziel, "--still"]);
+        if lauf.code() == erwartet {
+            erfolge += 1;
+        } else {
+            serial_println!("  Runde {}: Exit {} (erwartet {})", runde, lauf.code(), erwartet);
+        }
+        // Ein haengender Prozess waere das Ende der Messung.
+        assert!(
+            lauf.ende.is_some(),
+            "Runde {}: der Prozess ist nicht fertig geworden",
+            runde
+        );
+    }
+    let dauer = zeit::ms_seit_boot() - start;
+
+    // ==================================================================
+    // ZUR RUHE KOMMEN LASSEN — und zwar lange genug fuer TIME_WAIT.
+    //
+    // DIE MESSFALLE, in die ich hier gelaufen bin: `socket::schliessen`
+    // MARKIERT nur; der Eintrag verschwindet erst, wenn der TCP-Automat
+    // `Closed` erreicht — und dazwischen liegt TIME_WAIT, bei uns 2 s
+    // (docs/tcp-scope.md). 60-mal pumpen sind rund 240 ms; danach stand
+    // die Zaehlung bei „ein Socket uebrig", und weil dessen TCB zwei
+    // 8-KiB-Ringpuffer haelt, sah auch der Heap nach einem Leck aus
+    // (17 KiB — genau eine Verbindung).
+    //
+    // Beides war dieselbe Ungeduld. Statt einer festen Zahl wird jetzt
+    // gewartet, bis die Socket-Tabelle wieder auf ihrem Ausgangsstand ist —
+    // mit einer Frist, damit ein ECHTES Leck den Test nicht aufhaengt,
+    // sondern rot macht.
+    // ==================================================================
+    zur_ruhe_kommen();
+
+    let frames_nachher = memory::frame_statistik().0;
+    let sockets_nachher = netz::socket::anzahl();
+    let pipes_nachher = pipe::anzahl();
+    let heap_nachher = heap_ohne_log();
+    let log_nachher = speed_os::protokoll::puffer_bytes();
+
+    serial_println!("  === {} HTTPS-ZYKLEN gegen {} ===", ZYKLEN, ziel);
+    serial_println!(
+        "  {} von {} wie erwartet, {} ms gesamt ({} ms je Zyklus).",
+        erfolge,
+        ZYKLEN,
+        dauer,
+        dauer / ZYKLEN as u64
+    );
+    serial_println!("  Frames   {} -> {}", frames_vorher, frames_nachher);
+    serial_println!("  Sockets  {} -> {}", sockets_vorher, sockets_nachher);
+    serial_println!("  Pipes    {} -> {}", pipes_vorher, pipes_nachher);
+    serial_println!(
+        "  Heap (ohne Log) {} -> {} Byte; Log-Puffer {} -> {} Byte",
+        heap_vorher,
+        heap_nachher,
+        log_vorher,
+        log_nachher
+    );
+
+    // --- SOCKETS UND PIPES: byte-exakt. ---
+    // Hier gibt es nichts zu runden: Die Handle-Tabelle steckt IM Prozess,
+    // ihr Drop schliesst alles. Bleibt auch nur eines uebrig, ist der
+    // Aufraeum-Pfad kaputt.
+    assert_eq!(sockets_nachher, sockets_vorher, "Sockets geleckt");
+    assert_eq!(pipes_nachher, pipes_vorher, "Pipes geleckt");
+
+    // --- FRAMES: die ausgerechnete Schranke (siehe Kopfkommentar). ---
+    let log_seiten = (log_nachher.saturating_sub(log_vorher)).div_ceil(4096);
+    let p1_schranke = 34usize; // 50 Prozesse a ~340 Seiten / 512
+    let schranke = p1_schranke + log_seiten;
+    let verlust = frames_vorher.saturating_sub(frames_nachher);
+    serial_println!(
+        "  Frame-Differenz {} (erlaubt {}: {} P1-Tabellen + {} Log-Seiten).",
+        verlust,
+        schranke,
+        p1_schranke,
+        log_seiten
+    );
+    assert!(
+        verlust <= schranke,
+        "{} Frames nach {} Zyklen verloren — mehr als die bekannte \
+         P1-Buchhaltung hergibt ({})",
+        verlust,
+        ZYKLEN,
+        schranke
+    );
+
+    // --- HEAP: darf nicht WACHSEN. ---
+    // Ein Rueckgang ist keine Sorge (der Log-Puffer verschiebt beim Umzug
+    // die Bezugsgroesse, siehe tests/sicherheit.rs); Wachstum waere eins.
+    assert!(
+        heap_nachher <= heap_vorher + 8192,
+        "der Kernel-Heap ist um {} Byte gewachsen",
+        heap_nachher.saturating_sub(heap_vorher)
+    );
+}
+
+/// Wartet, bis der Netz-Stack zur Ruhe gekommen ist.
+///
+/// ==========================================================================
+/// DIE MESSFALLE, in die ich hier zweimal gelaufen bin
+///
+/// `socket::schliessen` MARKIERT nur; der Eintrag verschwindet erst, wenn der
+/// TCP-Automat `Closed` erreicht — und dazwischen liegt TIME_WAIT, bei uns
+/// 2 s (docs/tcp-scope.md). Wer vorher zaehlt, sieht Sockets, die keine mehr
+/// sind. Und weil ein TCB zwei 8-KiB-Ringpuffer haelt, sieht der HEAP dann
+/// gleich mit nach einem Leck aus (17 KiB — genau eine Verbindung).
+///
+/// Erst habe ich zu kurz gewartet (die Messung NACH den Zyklen war zu frueh),
+/// dann zu kurz VOR den Zyklen — und bekam „weniger Sockets als vorher".
+/// Beide Messpunkte brauchen dieselbe Ruhe, sonst vergleicht man Aepfel mit
+/// Birnen.
+///
+/// Gewartet wird, bis die Zahl STEHT (nicht bis sie null ist — die Wurzel-
+/// Sockets des Kernels bleiben), mit Frist, damit ein echtes Leck den Test
+/// rot macht statt ihn aufzuhaengen.
+/// ==========================================================================
+fn zur_ruhe_kommen() {
+    // IN ZEIT GERECHNET, NICHT IN DURCHLAEUFEN — und zwar laenger als
+    // TIME_WAIT (2 s). Der erste Versuch zaehlte Schleifendurchlaeufe und
+    // hielt eine halbe Sekunde fuer genug; ein Socket aus dem letzten Zyklus
+    // war dann noch in TIME_WAIT, blieb dabei stabil, und die Zaehlung ging
+    // um eins daneben (samt 17 KiB Heap, den seine Ringpuffer halten).
+    // Ausserdem ist ein Durchlauf NICHT 4 ms lang: `warte_auf_interrupt`
+    // kehrt auch bei Netz-IRQs zurueck.
+    const RUHE_MS: u64 = 2_600;
+    let frist = zeit::ms_seit_boot() + 15_000;
+    let mut letzte = usize::MAX;
+    let mut seit = zeit::ms_seit_boot();
+    while zeit::ms_seit_boot() < frist {
+        netz::pumpen();
+        scheduler::aufraeumen();
+        zeit::warte_auf_interrupt();
+        let jetzt = netz::socket::anzahl();
+        if jetzt != letzte {
+            letzte = jetzt;
+            seit = zeit::ms_seit_boot();
+        } else if zeit::ms_seit_boot() - seit >= RUHE_MS {
+            return;
+        }
+    }
+}
+
+/// Belegter Kernel-Heap OHNE den Log-Puffer (siehe tests/sicherheit.rs).
+fn heap_ohne_log() -> usize {
+    let belegt = speed_os::allocator::heap_statistik()
+        .map(|(belegt, _)| belegt)
+        .unwrap_or(0);
+    belegt.saturating_sub(speed_os::protokoll::puffer_bytes())
 }

@@ -440,6 +440,63 @@
   BEVOR je ein Byte Rumpf fliesst — die Rumpf-Fehlerfaelle laufen deshalb
   ueber http, es ist dieselbe Zustandsmaschine ohne Verschluesselung.
 
+## SERIE-7-ABSCHLUSS (Juli 2026) — Angriffe, Zahlen, Grenzen, Serie-8-Naht
+- **DIE EINE STELLE FUER ALLE LUECKEN: `docs/grenzen.md`.** Keine
+  Sperrlisten-Pruefung (OCSP/CRL), manueller Root-Store OHNE Signatur, kein
+  NTP, KEIN NETZ-TREIBER FUER ECHTE HARDWARE (nur virtio-net, also nur in
+  VMs), TCP ohne Congestion-Control/SACK/Window-Scaling/Out-of-Order, FAT32
+  nur lesend, SpeedFS ohne Journal, kein SMP, keine Rechte/Benutzer.
+  **REGEL: Wer eine neue Luecke findet oder schafft, traegt sie DORT ein** —
+  verstreute Ehrlichkeit ist keine. Das Dokument hat einen eigenen Abschnitt
+  fuer das, was MIT ABSICHT fehlt (`--unsicher`-Schalter, Eigenbau-TLS,
+  Zufall-Fallback, Auto-Format) — das ist keine Wunschliste.
+- **DER ANGREIFER KENNT JETZT AUCH TLS UND RNG** (`angreifer 7/8/9`):
+  `zufall` mit Kernel-Zeigern und Riesenlaengen, `speicher` mit absurden
+  Groessen, PEM-Buendel aller Kaputtheitsgrade. **DIE SCHAERFSTE EINZELNE
+  PRUEFUNG: Nach einem abgelehnten `zufall` muss der Puffer Byte fuer Byte
+  UNVERAENDERT sein** (RNG-Dauerregel IV) — halb gefuellter Zufall waere
+  heimtueckischer als ein Fehler, denn Nullen sehen aus wie Zufall.
+  Gemessen: `speicher` gibt GENAU 12 MiB und sagt dann Nein.
+- **DIE VERTRAUENSDATEI IST EIN ANGRIFFSZIEL, und das steht im Test:**
+  `tests/sicherheit.rs::test_kaputter_vertrauensanker_verbindet_nicht`
+  ersetzt /platte/system/ca-bundle.pem durch vier Sorten Muell und stellt sie
+  danach wieder her. SpeedOS kann das Ersetzen NICHT verhindern (keine
+  Signatur, siehe grenzen.md §1); es darf sich nur nicht TAEUSCHEN lassen —
+  eine kaputte Datei fuehrt zu GAR KEINER Verbindung, nicht zu weniger
+  Pruefung. Wer den Test anfasst: Der Anker MUSS am Ende wiederhergestellt
+  sein, sonst sind alle folgenden Tests wertlos.
+- **SPEICHER-PASS: 50 HTTPS-Zyklen, Frames byte-exakt 0, Sockets/Pipes
+  stabil, 352 ms je Zyklus.** Die P1-Buchhaltung (1 Frame je 512 Seiten) wird
+  AUSGERECHNET (50 Prozesse a ~340 Seiten -> Schranke 34), nicht weggelassen.
+- **MESSFALLE, zweimal hineingelaufen:** `socket::schliessen` MARKIERT nur;
+  der Eintrag faellt erst nach TIME_WAIT (2 s). Wer vorher zaehlt, sieht
+  Sockets, die keine mehr sind — und weil ein TCB zwei 8-KiB-Ringpuffer
+  haelt, sieht der HEAP gleich mit nach einem Leck aus (17 KiB = genau eine
+  Verbindung). BEIDE Messpunkte (vorher UND nachher) brauchen dieselbe
+  Ruhe-Prozedur (`zur_ruhe_kommen()` in tests/netz_klient.rs).
+- **LEISTUNG FINAL:** Syscall-Roundtrip **70 ns**, Kontext-Wechsel **479 ns**,
+  Weck-Latenz **5 us** (war 3829), Pipe **228 MiB/s** (war 199 KiB/s),
+  Socket-`sende` 29 869 KiB/s, TLS-Handshake 11–29 ms, **HTTPS-Durchsatz
+  6 743 KiB/s** gegen 625 KiB/s beim Kernel-Klienten ohne TLS —
+  Verschluesselung ist NICHT der Engpass, das Warten war es.
+- **unsafe-AUDIT SERIE 7 (`docs/unsafe-audit-serie7.md`):** Der ENTROPIE-PFAD
+  IM IRQ-KONTEXT IST unsafe-FREI (ein `rdtsc` + drei Atomics), und der
+  SPEICHER-SYSCALL AUCH — die gefaehrliche Arbeit steckt in
+  `adressraum::bereich_mappen_mit_rechten` (Serie 6 auditiert), was bleibt,
+  sind vier Zeilen `checked_add` + harte Grenze. `userland/tls.rs`,
+  `netz.rs`, `pem.rs` und `speedhttp/` haben zusammen NULL unsafe-Bloecke.
+  Wer dort einen einbaut, begruendet ihn im Audit-Dokument.
+- **DIE NAHT ZU SERIE 8 (`docs/serie8-bestandsaufnahme.md`):** Empfohlen ist
+  **Pixelpuffer per Syscall** (`fenster_neu`/`fenster_zeichnen` ueber
+  `copy_in`) — nicht weil es das schnellste ist, sondern weil es KEINE
+  Sicherheitszusage kostet und geteilten Speicher nicht verbaut. Das
+  Kriterium fuer den Umstieg ist VORHER festgelegt (Scroll-Frame > ~8 ms und
+  die Kopie mehr als die Haelfte davon) — dieselbe Methodik wie die
+  TCP-Reissleine. Die Architekturfrage lautet: Toolkit als GETEILTE Kiste
+  `speedui` nach dem Muster von `speedhttp`; der Vorbehalt dabei ist ehrlich
+  notiert (das Toolkit kennt Schriften, Themes und Zeit — drei
+  Abhaengigkeiten, die zu Argumenten werden muessen).
+
 ## Platten-Sicherheits-Regel (Juli 2026)
 - Der ATA-Treiber weigert sich PER KONSTRUKTION, auf das Boot-Laufwerk
   zu schreiben: Das Feld `beschreibbar` ist privat, Laufwerke entstehen

@@ -45,8 +45,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use bootloader_api::{entry_point, BootInfo};
 use core::panic::PanicInfo;
-use speed_os::prozess::{self, ProzessEnde};
-use speed_os::{allocator, fs, memory, pipe, programme, scheduler, serial_println, zeit};
+use speed_os::prozess::{self, Pid, ProzessEnde};
+use speed_os::syscall::handle::KernelObjekt;
+use speed_os::{allocator, fs, memory, netz, pipe, programme, scheduler, serial_println};
+use speed_os::{virtio, zeit, zufall};
 use x86_64::VirtAddr;
 
 entry_point!(main, config = &speed_os::BOOTLOADER_CONFIG);
@@ -54,6 +56,10 @@ entry_point!(main, config = &speed_os::BOOTLOADER_CONFIG);
 fn main(boot_info: &'static mut BootInfo) -> ! {
     speed_os::init();
     zeit::init();
+    // Seit Serie 7 greift der Angreifer auch Zufall, User-Heap und den
+    // Vertrauensanker an — dafuer braucht der Testkernel dieselbe
+    // Ausstattung wie der echte Boot.
+    zufall::init();
     let boot_info: &'static BootInfo = boot_info;
     let offset = boot_info
         .physical_memory_offset
@@ -61,15 +67,20 @@ fn main(boot_info: &'static mut BootInfo) -> ! {
         .expect("kein Physik-Mapping");
     memory::init(VirtAddr::new(offset), &boot_info.memory_regions);
     allocator::init_heap().expect("Heap-Initialisierung fehlgeschlagen");
-    allocator::heap_erweitern(512).expect("Heap-Erweiterung fehlgeschlagen");
+    // 8 MiB: `holes` ist ~950 KiB und wird bei jedem Start am Stueck in den
+    // Kernel-Heap gelesen (siehe tests/netz_klient.rs).
+    allocator::heap_erweitern(2048).expect("Heap-Erweiterung fehlgeschlagen");
 
     speed_os::ata::init();
     speed_os::pci::init();
     speed_os::virtio::blk::init();
+    virtio::net::init();
     fs::init();
     fs::platte_automounten();
     programme::installieren();
+    programme::ca_buendel_installieren();
     scheduler::init();
+    netz::dhcp::autokonfig(5000);
 
     test_main();
     speed_os::hlt_loop();
@@ -117,6 +128,70 @@ fn angreifen(nummer: u32) -> Option<ProzessEnde> {
     let pid = prozess::prozess_starten(&pfad, &["angreifer", &argument])
         .unwrap_or_else(|fehler| panic!("angreifer {} starten: {}", nummer, fehler.meldung()));
     scheduler::warten_auf(pid, FRIST_MS)
+}
+
+/// Startet ein Programm mit einer Pipe als Ausgabe und liest alles mit.
+///
+/// Dieselbe Mechanik wie in tests/netz_klient.rs — inklusive des Pumpens
+/// nach dem Prozess-Ende (ein Testkernel hat keinen `netz_task`).
+fn starten_und_lesen(name: &str, argumente: &[&str]) -> (Option<ProzessEnde>, String) {
+    let leitung = pipe::anlegen().expect("Pipe");
+    let pfad = programme::pfad(name);
+    pipe::ende_uebernehmen(leitung, pipe::Ende::Schreiben);
+    let pid: Pid = prozess::prozess_starten_mit(
+        &pfad,
+        argumente,
+        None,
+        None,
+        Some(KernelObjekt::PipeSchreiben(leitung)),
+        false,
+    )
+    .unwrap_or_else(|fehler| panic!("'{}' starten: {}", name, fehler.meldung()));
+    pipe::ende_schliessen(leitung, pipe::Ende::Schreiben);
+
+    let mut gesammelt = Vec::new();
+    let mut puffer = alloc::vec![0u8; 8192];
+    let mut ende = None;
+    let frist = zeit::ms_seit_boot() + 90_000;
+    loop {
+        match pipe::lesen(leitung, &mut puffer) {
+            pipe::PipeErgebnis::Bytes(0) => break,
+            pipe::PipeErgebnis::Bytes(n) => gesammelt.extend_from_slice(&puffer[..n]),
+            pipe::PipeErgebnis::Blockiert => {
+                if zeit::ms_seit_boot() >= frist {
+                    break;
+                }
+                if ende.is_none() {
+                    ende = scheduler::ende_abfragen(pid);
+                }
+                scheduler::aufraeumen();
+                netz::pumpen();
+                zeit::warte_auf_interrupt();
+            }
+            _ => break,
+        }
+    }
+    if ende.is_none() {
+        ende = scheduler::ende_abfragen(pid).or_else(|| scheduler::warten_auf(pid, 10_000));
+    }
+    pipe::ende_schliessen(leitung, pipe::Ende::Lesen);
+    scheduler::aufraeumen();
+    for _ in 0..60 {
+        netz::pumpen();
+        zeit::warte_auf_interrupt();
+    }
+    (ende, String::from_utf8_lossy(&gesammelt).into_owned())
+}
+
+/// Wartet, bis der Zufallsgenerator gesät ist (kein Nachsaat-Task im Test).
+fn zufall_bereitmachen() {
+    let frist = zeit::ms_seit_boot() + 30_000;
+    while !zufall::bereit() && zeit::ms_seit_boot() < frist {
+        if zufall::status().entropie_bits >= zufall::SCHWELLE_BITS {
+            zufall::nachsaeen();
+        }
+        zeit::warte_auf_interrupt();
+    }
 }
 
 /// DER LEBENSBEWEIS: Läuft der Kernel nach dem Angriff noch normal?
@@ -538,7 +613,9 @@ fn test_dauerbeschuss_bilanz_bleibt_null() {
     let pipes_vorher = pipe::anzahl();
 
     const RUNDEN: usize = 3;
-    let angriffe = [1u32, 20, 2, 21, 3, 23, 4, 24, 5, 25, 6, 26, 22];
+    // Seit Serie 7 auch die neuen Flaechen: 7 = Zufall, 8 = User-Heap,
+    // 9 = Zertifikats-Parser.
+    let angriffe = [1u32, 20, 2, 21, 3, 23, 4, 24, 5, 25, 6, 26, 22, 7, 8, 9];
     for runde in 0..RUNDEN {
         for nummer in angriffe {
             let ende = angreifen(nummer)
@@ -643,4 +720,163 @@ fn test_der_angreifer_laeuft_wirklich_unprivilegiert() {
     assert!(namen.contains(&"angreifer"), "der Angreifer fehlt im Image");
     drop(prozess);
     let _ = String::new();
+}
+
+// ===========================================================================
+// TEIL G: DIE NEUEN FLAECHEN AUS SERIE 7 (TLS, Zufall, Vertrauensanker)
+// ===========================================================================
+//
+// Serie 7 hat drei Dinge hinzugefuegt, die es vorher nicht gab und die
+// allesamt lohnende Ziele sind:
+//   * einen Zufallsgenerator, aus dem Schluessel entstehen,
+//   * einen Syscall, der einem Prozess Speicher gibt,
+//   * eine DATEI, die entscheidet, wem das System vertraut.
+// Der Angreifer hat sie einzeln vorgenommen (Angriffe 7, 8, 9); hier kommen
+// die Faelle dazu, die einen echten Gegenueber brauchen.
+
+/// Wo der Vertrauensanker liegt (dieselbe Wahl wie `programme.rs`).
+fn ca_pfad() -> alloc::string::String {
+    alloc::string::String::from(programme::ca_buendel_pfad())
+}
+
+/// DER GEFAEHRLICHSTE ANGRIFF DER GANZEN SERIE: die Vertrauensdatei tauschen.
+///
+/// ==========================================================================
+/// WARUM DAS DER SCHLIMMSTE FALL IST
+///
+/// Alles, was TLS leistet, haengt an einer Frage: „Kenne ich die Wurzel, die
+/// das unterschrieben hat?" Die Antwort steht in EINER Datei. Wer sie
+/// ersetzt, hebelt die gesamte Pruefung aus — nicht durch einen Fehler im
+/// Code, sondern durch einen Fehler im Vertrauen.
+///
+/// SpeedOS kann das nicht verhindern (ein Prozess mit Schreibrechten auf
+/// /platte/system kann die Datei ersetzen; es gibt keine Signatur darauf —
+/// docs/grenzen.md nennt das als bekannte Luecke). Was es MUSS: sich nicht
+/// TAEUSCHEN lassen. Eine kaputte Datei darf nicht dazu fuehren, dass
+/// weniger geprueft wird; sie muss dazu fuehren, dass GAR NICHT verbunden
+/// wird.
+///
+/// Der Test ersetzt das Buendel durch Muell, laesst `holes` laufen und
+/// stellt es danach wieder her.
+/// ==========================================================================
+#[test_case]
+fn test_kaputter_vertrauensanker_verbindet_nicht() {
+    if !programme_vorhanden() {
+        return;
+    }
+    let pfad = ca_pfad();
+    let original = match fs::mit_fs(|f| f.lesen(&pfad)) {
+        Ok(inhalt) => inhalt,
+        Err(_) => {
+            serial_println!("  (uebersprungen: kein Vertrauensanker installiert)");
+            return;
+        }
+    };
+    zufall_bereitmachen();
+    serial_println!("  Vertrauensanker {} ({} Byte) wird ersetzt ...", pfad, original.len());
+
+    // Vier Sorten Unsinn, jede mit einer eigenen Falle.
+    let faelle: [(&str, Vec<u8>); 4] = [
+        ("leer", Vec::new()),
+        ("nur Text ohne Marken", b"hier stand mal ein Zertifikat\n".to_vec()),
+        (
+            "BEGIN ohne END",
+            b"-----BEGIN CERTIFICATE-----\nQUJD\n".to_vec(),
+        ),
+        (
+            "gueltige Marken, Base64-Muell",
+            b"-----BEGIN CERTIFICATE-----\n!!!???\n-----END CERTIFICATE-----\n".to_vec(),
+        ),
+    ];
+
+    let mut ergebnisse: Vec<(&str, i64)> = Vec::new();
+    for (name, inhalt) in &faelle {
+        fs::mit_fs(|f| f.schreiben(&pfad, inhalt)).expect("Buendel ersetzen");
+        let _ = fs::sync();
+        let (ende, ausgabe) = starten_und_lesen("holes", &["holes", "https://example.com/"]);
+        let code = ende.map(|e| e.code() as i64).unwrap_or(-1);
+        serial_println!("  '{}' -> Exit {}", name, code);
+        for zeile in ausgabe.lines().take(6) {
+            serial_println!("    | {}", zeile);
+        }
+        // NIE erfolgreich: Ohne brauchbare Wurzeln gibt es keine Verbindung.
+        assert_ne!(
+            code, 0,
+            "'{}': mit kaputtem Vertrauensanker wurde trotzdem verbunden!",
+            name
+        );
+        // Und der Prozess muss ENDEN — kein Haenger, kein Absturz.
+        assert!(
+            ende.is_some(),
+            "'{}': der Prozess haengt oder ist verschwunden",
+            name
+        );
+        assert_ne!(
+            ende,
+            Some(ProzessEnde::Abgestuerzt),
+            "'{}': der Parser ist ABGESTUERZT statt sauber abzulehnen",
+            name
+        );
+        ergebnisse.push((name, code));
+    }
+
+    // Wiederherstellen — und pruefen, dass es danach WIEDER geht.
+    fs::mit_fs(|f| f.schreiben(&pfad, &original)).expect("Buendel wiederherstellen");
+    let _ = fs::sync();
+    let zurueck = fs::mit_fs(|f| f.lesen(&pfad)).expect("Buendel zuruecklesen");
+    assert_eq!(zurueck, original, "der Vertrauensanker wurde nicht sauber wiederhergestellt");
+    serial_println!(
+        "  Vertrauensanker wiederhergestellt ({} Byte). Ergebnisse: {:?}",
+        zurueck.len(),
+        ergebnisse
+    );
+    kernel_lebt_noch();
+}
+
+/// Eine Gegenstelle, die ABSURDE TLS-Records schickt.
+///
+/// Content-Type 0xFF, Version 0xFFFF, Laenge 0xFFFF — und dann viel zu wenig
+/// Inhalt. Ein Klient, der der Laengenangabe glaubt, wartet auf 65535 Byte,
+/// die nie kommen; einer, der den Content-Type nicht prueft, versucht das
+/// Zeug zu entschluesseln.
+///
+/// Erwartung: sauberer Protokollfehler, in Frist, Prozess endet normal.
+#[test_case]
+fn test_absurde_tls_records() {
+    if !programme_vorhanden() {
+        return;
+    }
+    zufall_bereitmachen();
+    let start = zeit::ms_seit_boot();
+    let (ende, ausgabe) = starten_und_lesen(
+        "holes",
+        &["holes", "https://10.0.2.2:8445/", "--frist=10000"],
+    );
+    let dauer = zeit::ms_seit_boot() - start;
+    serial_println!("  === absurde TLS-Records ({} ms) ===", dauer);
+    for zeile in ausgabe.lines() {
+        serial_println!("  | {}", zeile);
+    }
+
+    if ausgabe.contains("(verbindung)") && dauer < 2_000 {
+        serial_println!("  (uebersprungen: auf 10.0.2.2:8445 lauscht nichts)");
+        return;
+    }
+    assert!(ende.is_some(), "der Prozess haengt");
+    assert_ne!(
+        ende.map(|e| e.code()),
+        Some(0),
+        "TLS-Muell wurde als gueltige Verbindung angenommen!"
+    );
+    assert_ne!(
+        ende,
+        Some(ProzessEnde::Abgestuerzt),
+        "der TLS-Stapel ist ABGESTUERZT statt sauber abzulehnen"
+    );
+    assert!(
+        dauer < 30_000,
+        "{} ms — die Frist hat nicht gegriffen",
+        dauer
+    );
+    kernel_lebt_noch();
 }

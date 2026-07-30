@@ -225,11 +225,12 @@ fn holen(auftrag: &Auftrag) -> i32 {
     let (belegt, gemappt, spitze) = libspeed::heap::heap_stand();
     if auftrag.still {
         println!(
-            "MESSUNG tcp_ms={} handshake_ms={} dauer_ms={} weiterleitungen={} roh={} \
-             rumpf={} status={} heap_spitze={} heap_belegt={} heap_gemappt={} \
-             protokoll={} suite={}",
+            "MESSUNG tcp_ms={} handshake_ms={} uebertragung_ms={} dauer_ms={} \
+             weiterleitungen={} roh={} rumpf={} status={} heap_spitze={} \
+             heap_belegt={} heap_gemappt={} protokoll={} suite={}",
             abruf.info.tcp_ms,
             abruf.info.handshake_ms,
+            abruf.uebertragung_ms,
             abruf.dauer_ms,
             abruf.weiterleitungen,
             abruf.roh_bytes,

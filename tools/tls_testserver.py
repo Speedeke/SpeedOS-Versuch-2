@@ -349,6 +349,52 @@ def zertifikat_sicherstellen():
                 ziel.write(quelle.read())
 
 
+def tls_muell_lauscher(host, port):
+    """Nimmt an und schickt ABSURDE TLS-Records (Serie-7-Sicherheits-Pass).
+
+    Was hier rausgeht, ist mit Absicht kein gueltiges TLS:
+      * ein Record mit unbekanntem Content-Type (0xFF),
+      * die groesste Laenge, die das Feld hergibt (0xFFFF), aber nur ein
+        paar Bytes dahinter,
+      * eine Protokollversion, die es nicht gibt,
+      * und danach Zufallsbytes.
+
+    Ein TLS-Klient MUSS das ablehnen, und zwar schnell und ohne dabei
+    65535 Byte zu erwarten, die nie kommen. `rustls` tut genau das
+    (`InvalidMessage`); geprueft wird, dass unser Programm den Fehler sauber
+    nach oben reicht, statt in der Frist zu haengen oder abzustuerzen.
+    """
+    lauscher = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    lauscher.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    lauscher.bind((host, port))
+    lauscher.listen(16)
+    while True:
+        try:
+            verbindung, _ = lauscher.accept()
+        except OSError:
+            time.sleep(0.1)
+            continue
+        try:
+            verbindung.settimeout(5)
+            try:
+                verbindung.recv(4096)        # das ClientHello wegwerfen
+            except OSError:
+                pass
+            # Content-Type 0xFF, Version 0xFFFF, Laenge 0xFFFF -- und dann
+            # viel zu wenig Inhalt.
+            verbindung.sendall(b"\xff\xff\xff\xff\xff" + os.urandom(37))
+            # Noch ein Record, diesmal mit Laenge 0 (auch verboten).
+            verbindung.sendall(b"\x16\x03\x03\x00\x00")
+            verbindung.sendall(os.urandom(256))
+        except OSError:
+            pass
+        finally:
+            try:
+                verbindung.close()
+            except OSError:
+                pass
+
+
 def stummer_lauscher(host, port):
     """Nimmt Verbindungen an und sagt dann NICHTS.
 
@@ -383,6 +429,8 @@ def main():
                           help="derselbe Server OHNE TLS (fuer die Rumpf-Testfaelle)")
     zerleger.add_argument("--stummport", type=int, default=8444,
                           help="nimmt an und schweigt (Handshake-Timeout)")
+    zerleger.add_argument("--muellport", type=int, default=8445,
+                          help="schickt absurde TLS-Records (Sicherheits-Pass)")
     zerleger.add_argument("--host", default="0.0.0.0")
     argumente = zerleger.parse_args()
 
@@ -410,6 +458,9 @@ def main():
     threading.Thread(target=stummer_lauscher,
                      args=(argumente.host, argumente.stummport),
                      name="stumm", daemon=True).start()
+    threading.Thread(target=tls_muell_lauscher,
+                     args=(argumente.host, argumente.muellport),
+                     name="tls-muell", daemon=True).start()
 
     print("=" * 70)
     print(" SpeedOS-Testserver")
@@ -431,6 +482,8 @@ def main():
     print("      /langsam        256 KiB in ~3 s         (Kabel-weg-Test)")
     print("  10.0.2.2:%d              nimmt an und schweigt (Handshake-Timeout)"
           % argumente.stummport)
+    print("  10.0.2.2:%d              schickt absurde TLS-Records (Sicherheits-Pass)"
+          % argumente.muellport)
     print("=" * 70)
     try:
         while True:

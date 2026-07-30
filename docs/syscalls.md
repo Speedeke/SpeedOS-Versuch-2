@@ -232,6 +232,25 @@ inklusive geordnetem TCP-Abbau).
   * Aus dem Kernel-Prozess (PID 0) gerufen: `NichtUnterstuetzt` (23) — der
     Kernel hat seinen eigenen Heap.
 
+### Nachgemessen statt behauptet (Serie-7-Abschluss)
+
+Die beiden neuen Syscalls sind der Angriffsfläche wegen eigens beschossen
+worden (`userland/angreifer`, ausgewertet in `tests/sicherheit.rs`):
+
+| Angriff | Ergebnis |
+|---|---|
+| `zufall` mit Kernel-Zeiger als Ziel (5 Adressen) | jedes Mal `UngueltigerZeiger` (3) |
+| `zufall` mit Längen bis `u64::MAX` | `ZuGross` (4), kein Überlauf |
+| `zufall` mit Ziel, das über die Bereichsgrenze reicht | abgelehnt — **und der Puffer blieb Byte für Byte unverändert** |
+| `zufall` mit `len == 0` | folgenlos, nichts geschrieben |
+| `speicher` mit `u64::MAX`, `MAX-4095`, `1<<60`, `1<<40` | abgelehnt, kein Überlauf |
+| `speicher` in 1-MiB-Schritten, bis der Kernel Nein sagt | **genau 12 MiB**, dann `KeinPlatz` (14) |
+
+Die dritte Zeile ist die wichtigste: Ein halb gefüllter Zufallspuffer wäre
+heimtückischer als ein Fehler — Nullen sehen aus wie Zufall. RNG-Dauerregel
+IV („lieber warten als schwach") ist damit nicht nur formuliert, sondern
+geprüft.
+
 ---
 
 ## 5. Gruppe 1 — Dateien (VFS)
