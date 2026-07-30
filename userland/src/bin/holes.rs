@@ -87,6 +87,14 @@ struct Auftrag<'a> {
     zieldatei: Option<&'a str>,
     max_bytes: Option<usize>,
     frist_ms: Option<u64>,
+    /// `--serie=N`: N Abrufe HINTEREINANDER im SELBEN Prozess, ohne
+    /// Wiederholung, und am Ende eine Zaehlzeile.
+    ///
+    /// Das ist ein DIAGNOSE-Schalter: Er trennt „liegt es am Syscall-Pfad?"
+    /// von „liegt es am Prozess-Start/-Ende?". Ein Prozess mit N Abrufen
+    /// gegen N Prozesse mit je einem Abruf — laeuft das eine sauber und das
+    /// andere nicht, ist die Ursache eingekreist.
+    serie: Option<u32>,
 }
 
 fn haupt(argumente: &Argumente) -> i32 {
@@ -108,6 +116,7 @@ fn hilfe(programm: &str) {
     println!();
     println!("  --info        Protokollversion, Ciphersuite und Zertifikatskette");
     println!("  --still       nur eine maschinenlesbare Messzeile");
+    println!("  --serie=N     N Abrufe im selben Prozess (Diagnose)");
     println!("  --max=N       hoechstens N Byte annehmen (Standard {})", libspeed::netz::MAX_BYTES);
     println!("  --frist=MS    Frist je Versuch (Standard {} ms)", libspeed::netz::FRIST_MS);
     println!();
@@ -123,6 +132,7 @@ fn auftrag_lesen<'a>(argumente: &'a Argumente) -> Option<Auftrag<'a>> {
         zieldatei: None,
         max_bytes: None,
         frist_ms: None,
+        serie: None,
     };
     let mut url = None;
     for i in 1..argumente.anzahl() {
@@ -131,6 +141,8 @@ fn auftrag_lesen<'a>(argumente: &'a Argumente) -> Option<Auftrag<'a>> {
             auftrag.max_bytes = Some(wert.parse().ok()?);
         } else if let Some(wert) = wort.strip_prefix("--frist=") {
             auftrag.frist_ms = Some(wert.parse().ok()?);
+        } else if let Some(wert) = wort.strip_prefix("--serie=") {
+            auftrag.serie = Some(wert.parse().ok()?);
         } else {
             match wort {
                 "--info" => auftrag.info = true,
@@ -169,6 +181,11 @@ fn holen(auftrag: &Auftrag) -> i32 {
     }
     // Die Kette kostet eine Kopie — nur holen, wenn sie gezeigt wird.
     klient.kette_behalten = auftrag.info;
+
+    // DIAGNOSE-BETRIEB: N Abrufe im selben Prozess, OHNE Wiederholung.
+    if let Some(anzahl) = auftrag.serie {
+        return serie_fahren(&mut klient, auftrag.url, anzahl);
+    }
 
     if laut {
         println!("holes: {}", auftrag.url);
@@ -263,6 +280,36 @@ fn holen(auftrag: &Auftrag) -> i32 {
         spitze, belegt, gemappt
     );
     code
+}
+
+/// N Abrufe hintereinander im SELBEN Prozess — der Diagnose-Betrieb.
+///
+/// Die Wiederholung wird dabei ABGESCHALTET (`wiederholungen = 0`), sonst
+/// verdeckt sie genau das, was gemessen werden soll.
+fn serie_fahren(klient: &mut Klient, url: &str, anzahl: u32) -> i32 {
+    klient.wiederholungen = 0;
+    let mut ok = 0u32;
+    let mut leer = 0u32;
+    let mut andere = 0u32;
+    for _ in 0..anzahl {
+        match klient.holen(url) {
+            Ok(_) => ok += 1,
+            Err(AbrufFehler::LeereAntwort) => leer += 1,
+            Err(fehler) => {
+                andere += 1;
+                libspeed::diagnoseln!("[holes-serie] {}", fehler.kurz());
+            }
+        }
+    }
+    println!(
+        "SERIE abrufe={} ok={} leer={} andere={}",
+        anzahl, ok, leer, andere
+    );
+    if leer + andere == 0 {
+        OK
+    } else {
+        FEHLER_NETZ
+    }
 }
 
 /// Baut die TLS-Konfiguration mit den `.bss`-Puffern (siehe oben).

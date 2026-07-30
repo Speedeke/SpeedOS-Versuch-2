@@ -338,22 +338,26 @@ pub struct Klient {
     /// „Verbindung angenommen, null Bytes, sofort wieder zu" ist der
     /// klassische FLUECHTIGE Fehler: ein Server, der gerade seinen
     /// Arbeiter-Thread wechselt, eine NAT-Tabelle, die einen Eintrag
-    /// recycelt, ein Paket, das unterwegs verlorenging. Bei uns tritt er in
-    /// schnellen Abrufserien gegen den lokalen Testserver in etwa einem von
-    /// zwanzig Faellen auf. WORAN es liegt, ist NICHT geklaert: Vom Host
-    /// aus ist derselbe Server in 15 von 15 Versuchen einwandfrei, unser
-    /// Stack verwirft aber auch keine Daten falsch — es kommt schlicht
-    /// nichts an. Kandidaten sind unsere fehlende Out-of-Order-Behandlung
-    /// (docs/tcp-scope.md) und QEMUs slirp-Verbindungstabelle.
+    /// recycelt, ein Paket, das unterwegs verlorenging.
     ///
-    /// Solange das offen ist, wird es BEHANDELT statt verschwiegen: Ein GET,
-    /// bei dem NULL Bytes ankamen, ist gefahrlos wiederholbar — es kann
-    /// nichts zweimal passiert sein, wir haben ja nichts gesehen.
+    /// HISTORISCHE NOTIZ, weil sie eine Lehre enthaelt: Als es diese
+    /// Einstellung zum ersten Mal gab, sollte sie einen Fehler ueberdecken,
+    /// der bei UNS lag — der Wettlauf am Strom-Ende in
+    /// `TcpStrom::lesen` (siehe dort). Der ist behoben; seitdem sind es in
+    /// denselben Messungen 0 von 30 statt 6 von 30. Die Wiederholung bleibt
+    /// trotzdem, aber jetzt aus dem richtigen Grund: Netze sind unzuverlaessig,
+    /// und ein GET, bei dem NULL Bytes ankamen, ist gefahrlos wiederholbar —
+    /// es kann nichts zweimal passiert sein, wir haben ja nichts gesehen.
     ///
     /// NUR FUER DIESEN FALL. Ein Zertifikatsfehler wird NIE wiederholt (das
     /// waere ein Angreifer, der es einfach nochmal versucht), eine
     /// abgeschnittene Antwort auch nicht (dort ist schon etwas passiert),
     /// und eine Frist erst recht nicht (dann dauert es doppelt so lange).
+    ///
+    /// **Eine Wiederholung, die man nicht MISST, ist ein Teppich, unter den
+    /// man kehrt.** Deshalb steht die Zahl im Ergebnis
+    /// (`Abruf::wiederholungen`), und deshalb schaltet `holes --serie` sie
+    /// ab: So faellt es auf, wenn sie wieder etwas verdecken muesste.
     /// ==================================================================
     pub wiederholungen: u32,
     /// Die TLS-Konfiguration — erst beim ersten https-Abruf gebaut.

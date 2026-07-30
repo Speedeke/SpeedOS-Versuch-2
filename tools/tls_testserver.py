@@ -92,6 +92,29 @@ def gross_erzeugen(n):
     return voll
 
 
+class Server(http.server.ThreadingHTTPServer):
+    """ThreadingHTTPServer mit groesserem Annahme-Stapel.
+
+    Pythons Voreinstellung ist `request_queue_size = 5`. Fuer eine schnelle
+    Abrufserie ist das knapp: Der Server nimmt jede Verbindung in einem
+    eigenen Thread an, und Thread-Erzeugung dauert unter Windows rund eine
+    Millisekunde.
+
+    EHRLICHE NOTIZ: Das war die erste Vermutung fuer den fluechtigen
+    Fehlschlag aus dem Robustheits-Pass ("verbunden, null Bytes, zu") -- und
+    sie war FALSCH. Mit 128 statt 5 blieb die Fehlerrate unveraendert. Die
+    Ursache lag bei uns (ein Wettlauf zwischen `empfange` und
+    `socket_zustand` in `libspeed::tls::TcpStrom::lesen`, siehe dort). Der
+    groessere Stapel bleibt trotzdem: Er ist fuer einen Testserver, den man
+    mit Serien beschiesst, ohnehin die richtige Einstellung -- er hat den
+    Fehler nur nicht verursacht.
+    """
+
+    request_queue_size = 128
+    # Sonst bleibt der Port nach dem Beenden im TIME_WAIT haengen.
+    allow_reuse_address = True
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "SpeedOS-TLS-Testserver/1.0"
@@ -144,6 +167,31 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.connection.close()
         except OSError:
             pass
+        self.close_connection = True
+
+    def _langsam(self):
+        """Liefert langsam -- damit ein Test MITTEN im Download zuschlagen kann.
+
+        256 KiB in 8-KiB-Schritten mit 100 ms Pause: rund 3 Sekunden. Ohne
+        so einen Endpunkt laesst sich 'die Verbindung geht waehrend des
+        Downloads verloren' nicht zuverlaessig pruefen -- seit der Wettlauf
+        am Strom-Ende behoben ist, holt SpeedOS 512 KiB in 16 ms, und jedes
+        Kabelziehen kaeme zu spaet.
+        """
+        gesamt = 256 * 1024
+        stueck = b"L" * 8192
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(gesamt))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        try:
+            for _ in range(gesamt // len(stueck)):
+                self.wfile.write(stueck)
+                self.wfile.flush()
+                time.sleep(0.1)
+        except OSError:
+            pass          # Klient ist weg -- genau das war der Testfall
         self.close_connection = True
 
     def _endlos(self):
@@ -209,6 +257,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # --- Boesartiges ---
         elif pfad == "/abbruch":
             self._abbrechen()
+        elif pfad == "/langsam":
+            self._langsam()
         elif pfad == "/endlos":
             self._endlos()
         else:
@@ -342,7 +392,7 @@ def main():
     kontext = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     kontext.load_cert_chain(certfile=ZERT, keyfile=SCHLUESSEL)
 
-    tls_server = http.server.ThreadingHTTPServer((argumente.host, argumente.port), Handler)
+    tls_server = Server((argumente.host, argumente.port), Handler)
     tls_server.socket = kontext.wrap_socket(tls_server.socket, server_side=True)
 
     # DERSELBE Handler ohne TLS. Warum das noetig ist: Die Rumpf-Testfaelle
@@ -351,7 +401,7 @@ def main():
     # das TLS-Zertifikat hier wird ja zu Recht abgelehnt, bevor je ein Byte
     # Rumpf fliesst. Ueber Klartext laesst sich derselbe Klient-Code
     # deterministisch pruefen.
-    klar_server = http.server.ThreadingHTTPServer((argumente.host, argumente.klarport), Handler)
+    klar_server = Server((argumente.host, argumente.klarport), Handler)
 
     for ziel, name in ((tls_server.serve_forever, "https"),
                        (klar_server.serve_forever, "http")):
@@ -378,6 +428,7 @@ def main():
     print("      /kette          10 Weiterleitungen      (Zaehler-Grenze)")
     print("      /abbruch        kappt die Leitung MITTEN im Rumpf")
     print("      /endlos         sendet ohne Ende        (Groessenlimit)")
+    print("      /langsam        256 KiB in ~3 s         (Kabel-weg-Test)")
     print("  10.0.2.2:%d              nimmt an und schweigt (Handshake-Timeout)"
           % argumente.stummport)
     print("=" * 70)

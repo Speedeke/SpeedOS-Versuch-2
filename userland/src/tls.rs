@@ -149,6 +149,35 @@ impl TcpStrom {
     }
 
     /// BLOCKIEREND lesen. `Ok(0)` heisst Dateiende (Gegenstelle zu).
+    ///
+    /// ==========================================================================
+    /// DIE WETTLAUF-FALLE AM STROM-ENDE — hier lag ein echter Fehler
+    ///
+    /// `empfange` und `socket_zustand` sind ZWEI Syscalls. Zwischen ihnen kann
+    /// der Netz-Stack weiterlaufen, und am Ende einer HTTP-Antwort passiert
+    /// genau das: Der Server schickt die Antwort und schliesst SOFORT danach
+    /// (`Connection: close`). Im Mitschnitt liegen beide Pakete **49 us**
+    /// auseinander, unser Stack verarbeitet sie im selben Durchgang.
+    ///
+    /// Die erste Fassung fragte deshalb ins Leere:
+    ///     1. `empfange` -> 0        (die Daten sind noch unterwegs)
+    ///     2. ... Stack verarbeitet Daten UND FIN ...
+    ///     3. `socket_zustand` -> "Peer hat geschlossen" -> return Ok(0)
+    /// — und die 345 Byte lagen derweil ungelesen im Empfangspuffer. Fuer den
+    /// Aufrufer sah das aus wie „Verbindung angenommen, nichts geschickt".
+    ///
+    /// Sichtbar wurde es nur unter Last: Der Kernel-Klient pumpt nach jedem
+    /// Schliessen 60 Ticks und ist zu langsam, um den Wettlauf zu verlieren;
+    /// ein Ring-3-Programm in einer schnellen Abrufserie verlor ihn in etwa
+    /// jedem fuenften Fall.
+    ///
+    /// DIE REGEL, die daraus folgt und die hier jetzt auch im Code steht:
+    /// **Ein Zustand, der „zu" sagt, ist kein Dateiende — er ist die
+    /// Aufforderung, den Puffer NOCH EINMAL zu leeren.** Erst ein `empfange`,
+    /// das NACH dem Schliess-Befund leer bleibt, ist wirklich das Ende. Mehr
+    /// als einmal nachsehen muss man nicht: Nach dem FIN kann nichts mehr
+    /// nachkommen, und alles davor liegt dann schon im Puffer.
+    /// ==========================================================================
     pub fn lesen(&mut self, ziel: &mut [u8]) -> Result<usize, Fehler> {
         if ziel.is_empty() {
             return Ok(0);
@@ -160,10 +189,16 @@ impl TcpStrom {
                     // Nichts da. Ist die Verbindung noch offen?
                     match crate::socket_zustand(self.handle)? {
                         crate::Z_VERBUNDEN => {}
-                        // Peer hat geschlossen: Es koennen noch Restdaten im
-                        // Puffer liegen — ein weiterer `empfange` holt sie.
-                        // Erst wenn AUCH der 0 liefert, ist wirklich Schluss.
-                        crate::Z_PEER_HAT_GESCHLOSSEN | crate::Z_GESCHLOSSEN => return Ok(0),
+                        crate::Z_PEER_HAT_GESCHLOSSEN | crate::Z_GESCHLOSSEN => {
+                            // NOCH EINMAL nachsehen (siehe Kopfkommentar):
+                            // Zwischen den beiden Syscalls koennen Daten UND
+                            // FIN angekommen sein.
+                            let nachzuegler = crate::empfange(self.handle, ziel)?;
+                            if nachzuegler > 0 {
+                                return Ok(nachzuegler as usize);
+                            }
+                            return Ok(0);
+                        }
                         _ => return Err(Fehler::NICHT_VERBUNDEN),
                     }
                     if crate::zeit_jetzt() >= frist {

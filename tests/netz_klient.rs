@@ -198,15 +198,13 @@ fn starten(name: &str, argumente: &[&str]) -> Lauf {
     // Betrieb ohnehin laeuft — dieselbe Ueberlegung wie beim `pumpen()` in
     // der Warteschleife oben.
     //
-    // EHRLICH DAZU: Diese Zeilen haben die Laeufe deutlich beruhigt, aber
-    // sie beseitigen den fluechtigen Fehlschlag NICHT. Er tritt auf dem
-    // Prozess-Pfad weiterhin ein paar Mal je Lauf auf (sichtbar an den
-    // „lieferte 0 Byte"-Zeilen auf dem Diagnose-Kanal); was die Laeufe
-    // durchtragen laesst, ist die Wiederholung in `libspeed::netz`.
-    // Was WEITERHIN GILT und die Suche eingrenzt: Der KERNEL-Klient, der
-    // ganz ohne Prozesse arbeitet, sieht in 30 Abrufen 0 Fehlschlaege
-    // (`test_fluechtige_fehlschlaege_zaehlen`). Es liegt also am
-    // Prozess-Pfad oder an slirps Sicht darauf, nicht an TCP selbst.
+    // (Diese Zeilen standen urspruenglich hier, weil sie den fluechtigen
+    // Fehlschlag zu erklaeren schienen. Taten sie nicht — die Ursache war
+    // der Wettlauf am Strom-Ende, siehe
+    // `test_kein_wettlauf_am_strom_ende`. Sie bleiben trotzdem, denn den
+    // Abbau zu Ende zu pumpen ist unabhaengig davon richtig: Sonst haeuft
+    // ein Testlauf halb abgebaute Verbindungen an, die im Betrieb laengst
+    // weg waeren.)
     // ==================================================================
     for _ in 0..60 {
         netz::pumpen();
@@ -613,7 +611,10 @@ fn test_kabel_weg_waehrend_des_downloads() {
     }
     let leitung = pipe::anlegen().expect("Pipe");
     let pfad = programme::pfad("holes");
-    let url = alloc::format!("{}/gross.bin", KLAR);
+    // `/langsam` statt `/gross.bin`: Seit der Wettlauf am Strom-Ende
+    // behoben ist, holt SpeedOS 512 KiB in 16 ms — jedes Kabelziehen kaeme
+    // zu spaet. Dieser Endpunkt braucht rund 3 Sekunden.
+    let url = alloc::format!("{}/langsam", KLAR);
     pipe::ende_uebernehmen(leitung, pipe::Ende::Schreiben);
     let pid = prozess::prozess_starten_mit(
         &pfad,
@@ -768,16 +769,81 @@ fn test_fluechtige_fehlschlaege_zaehlen() {
             versuche
         );
     }
-    // Die Schranke ist grosszuegig und trotzdem eine Aussage: Mehr als ein
-    // Fuenftel waere kein „fluechtiger" Fehler mehr, sondern ein kaputter
-    // Stack.
-    assert!(
-        leer * 5 < versuche,
-        "{} von {} Abrufen lieferten NICHTS — das ist keine Fluechtigkeit mehr",
-        leer,
-        versuche
+    // EXAKT NULL, seit der Wettlauf am Strom-Ende behoben ist (Serie 7,
+    // Teil 5). Vorher war der Kernel-Klient hier schon sauber — er ist zu
+    // langsam, um den Wettlauf zu verlieren; die Zahl ist trotzdem eine
+    // Zusage und keine Schranke mehr.
+    assert_eq!(
+        leer, 0,
+        "{} von {} Abrufen lieferten NICHTS — der Stack verliert Daten",
+        leer, versuche
     );
     assert_eq!(andere, 0, "unerwartete Fehler neben den leeren Antworten");
+}
+
+/// DER WETTLAUF AM STROM-ENDE — der Regressionswaechter.
+///
+/// ==========================================================================
+/// DIE GESCHICHTE DIESES TESTS
+///
+/// Der Robustheits-Pass fand einen fluechtigen Fehlschlag: In schnellen
+/// Abrufserien endete etwa jede fuenfte Verbindung ohne ein einziges Byte,
+/// obwohl sie angenommen worden war. Der Weg zur Ursache lief ueber diesen
+/// Test und einen Mitschnitt:
+///
+///   1. VERDACHT „Prozess-Start/-Ende": widerlegt. 30 Abrufe in EINEM
+///      Prozess waren SCHLECHTER (6 Fehlschlaege) als 30 Prozesse mit je
+///      einem (2) — es lag also an der RATE, nicht am Prozess-Wechsel.
+///   2. VERDACHT „Listen-Backlog des Testservers": widerlegt. Von 5 auf 128
+///      erhoeht, Fehlerrate unveraendert.
+///   3. MITSCHNITT (`SPEEDOS_NET_DUMP=1`): Auf der Leitung hatte JEDE der
+///      143 Verbindungen ihre Antwort bekommen. Die Bytes kamen also an und
+///      wurden nur nicht ausgeliefert — der Fehler lag ueber dem Treiber.
+///   4. GEFUNDEN: `TcpStrom::lesen` fragte `empfange` und `socket_zustand`
+///      als ZWEI Syscalls ab. Antwort und FIN liegen im Mitschnitt 49 us
+///      auseinander; traf der Stack dazwischen, meldete der Zustand „zu",
+///      waehrend die Daten schon im Puffer lagen — und `lesen` gab
+///      Dateiende zurueck.
+///
+/// Seitdem: 30 von 30 in beiden Betriebsarten. Dieser Test haelt das fest.
+/// Faellt eine der beiden Zahlen wieder, ist der Wettlauf zurueck.
+/// ==========================================================================
+#[test_case]
+fn test_kein_wettlauf_am_strom_ende() {
+    if !programme_vorhanden() || !server_da() {
+        return;
+    }
+    let url = alloc::format!("{}/klein.txt", KLAR);
+
+    // (a) EIN Prozess, 30 Abrufe. `--serie` schaltet die Wiederholung ab —
+    //     sonst wuerde sie genau das verdecken, worum es hier geht.
+    let lauf = starten("holes", &["holes", &url, "--serie=30"]);
+    let mut bericht = None;
+    for zeile in lauf.ausgabe.lines() {
+        if let Some(rest) = zeile.trim().strip_prefix("SERIE ") {
+            bericht = Some(String::from(rest));
+        }
+    }
+    let bericht = bericht.unwrap_or_else(|| {
+        zeigen("Serie ohne Messzeile", &lauf);
+        panic!("`holes --serie=30` hat keine SERIE-Zeile ausgegeben")
+    });
+    serial_println!("  (a) EIN Prozess, 30 Abrufe:   {}", bericht);
+    assert!(
+        bericht.contains("ok=30 leer=0 andere=0"),
+        "der Wettlauf am Strom-Ende ist zurueck: {}",
+        bericht
+    );
+
+    // (b) 30 Prozesse, je 1 Abruf — dieselbe Zahl Abrufe, andere Verteilung.
+    let mut fehl = 0u32;
+    for _ in 0..30 {
+        if starten("holes", &["holes", &url, "--serie=1"]).code() != 0 {
+            fehl += 1;
+        }
+    }
+    serial_println!("  (b) 30 Prozesse, je 1 Abruf:  {} Fehlschlaege", fehl);
+    assert_eq!(fehl, 0, "{} von 30 Einzelabrufen fehlgeschlagen", fehl);
 }
 
 // ===========================================================================

@@ -90,27 +90,60 @@ abgelehnt wird, *bevor* ein Byte Rumpf fließt.
 
 Und die Bilanz danach: **Sockets byte-exakt gleich, Frame-Differenz 0.**
 
-#### Der flüchtige Fehlschlag — gemessen, nicht wegdefiniert
+#### EIN ECHTER FEHLER, gefunden und behoben: der Wettlauf am Strom-Ende
 
-Beim Robustheits-Pass fiel auf: In schnellen Abrufserien endet gelegentlich
-eine Verbindung, die **angenommen** wurde, sofort ohne ein einziges Byte. Vom
-Host aus ist derselbe Server 15/15 einwandfrei.
+Der Robustheits-Pass fand etwas, das keiner der bisherigen Tests je gezeigt
+hatte: In schnellen Abrufserien endete etwa **jede fünfte** Verbindung ohne
+ein einziges Byte, obwohl sie angenommen worden war.
 
-Statt zu raten, wurde gemessen (`test_fluechtige_fehlschlaege_zaehlen`): Der
-**Kernel-Klient** — ohne Prozesse, ohne TLS — schafft **30 von 30**. Es liegt
-also nicht an TCP, sondern am Prozess-Pfad bzw. an slirps Sicht darauf. Ein
-Teil davon war der Testkernel selbst: Endet ein Prozess, muss den TCP-Abbau
-seiner Sockets *jemand zu Ende pumpen*; im Betrieb tun das `netz_task` und
-Socket-Takt, in einem Testkernel ohne Executor muss es von Hand passieren.
+Der Weg zur Ursache lief über drei widerlegte Vermutungen — jede davon steht
+im Code, damit niemand sie noch einmal verfolgt:
 
-Das hat die Läufe beruhigt, aber **nicht beseitigt** — ehrlich notiert. Was
-sie durchträgt, ist eine Wiederholung in `libspeed::netz`, und zwar **nur für
-diesen einen Fall**: Ein GET, bei dem null Bytes ankamen, ist gefahrlos
-wiederholbar — es kann nichts zweimal passiert sein. Ein Zertifikatsfehler
-wird **nie** wiederholt (das wäre ein Angreifer, der es nochmal versucht), eine
-abgeschnittene Antwort auch nicht, eine Frist erst recht nicht. Die Zahl der
-Wiederholungen steht im Ergebnis (`Abruf::wiederholungen`), damit sie sich
-messen lässt statt im Verborgenen zu passieren.
+1. **„Prozess-Start/-Ende"** — widerlegt. 30 Abrufe in *einem* Prozess waren
+   **schlechter** (6 Fehlschläge) als 30 Prozesse mit je einem (2). Es lag
+   also an der **Rate**, nicht am Prozess-Wechsel.
+2. **„Listen-Backlog des Testservers"** — widerlegt. Von 5 auf 128 erhöht,
+   Fehlerrate unverändert.
+3. **Mitschnitt** (`SPEEDOS_NET_DUMP=1`, ausgewertet mit einem
+   30-Zeilen-pcap-Leser): Auf der Leitung hatte **jede** der 143
+   Verbindungen ihre Antwort bekommen. Die Bytes kamen also an — sie wurden
+   nur nicht ausgeliefert. Damit war klar: der Fehler liegt über dem Treiber.
+
+**Die Ursache:** `TcpStrom::lesen` fragte `empfange` und `socket_zustand` als
+*zwei* Syscalls ab. Am Ende einer HTTP-Antwort liegen Nutzdaten und FIN im
+Mitschnitt **49 µs** auseinander, und unser Stack verarbeitet beide im selben
+Durchgang. Traf er dazwischen, meldete der Zustand „Gegenstelle zu", während
+die 345 Byte längst im Empfangspuffer lagen — und `lesen` gab Dateiende
+zurück.
+
+Der Kommentar im Code beschrieb sogar den richtigen Ablauf („ein weiterer
+`empfange` holt sie; erst wenn AUCH der 0 liefert, ist wirklich Schluss") —
+nur tat der Code es nicht. Jetzt tut er es.
+
+**Die Regel, die daraus folgt:** Ein Zustand, der „zu" sagt, ist kein
+Dateiende — er ist die Aufforderung, den Puffer **noch einmal** zu leeren.
+
+Warum es so lange unentdeckt blieb: Der Kernel-Klient pumpt nach jedem
+Schließen 60 Ticks (~240 ms) und ist damit schlicht zu langsam, um den
+Wettlauf zu verlieren — er schaffte immer 30/30. Erst ein Ring-3-Programm ohne
+diese Bremse fährt schnell genug.
+
+| | vorher | nachher |
+|---|---|---|
+| 30 Abrufe in EINEM Prozess | 24 ok / 6 leer | **30 ok / 0 leer** |
+| 30 Prozesse mit je einem Abruf | 2 Fehlschläge | **0** |
+| Wiederholungen je Testlauf | 6–10 | **0** |
+
+`tests/netz_klient.rs::test_kein_wettlauf_am_strom_ende` hält beide Zahlen als
+Regressionswächter fest.
+
+Die Wiederholung in `libspeed::netz` bleibt — aber jetzt aus dem richtigen
+Grund: Netze sind unzuverlässig, und ein GET, bei dem null Bytes ankamen, ist
+gefahrlos wiederholbar. Ein Zertifikatsfehler wird **nie** wiederholt (das
+wäre ein Angreifer, der es nochmal versucht), eine abgeschnittene Antwort auch
+nicht, eine Frist erst recht nicht. Die Zahl steht im Ergebnis
+(`Abruf::wiederholungen`), und `holes --serie` schaltet sie ab — so fällt es
+auf, wenn sie wieder etwas verdecken müsste.
 
 #### Nebenbei repariert
 

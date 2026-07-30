@@ -35,3 +35,7 @@ speedos-live.vars.fd
 
 # Pythons Bytecode-Cache der Werkzeuge in tools/.
 /tools/__pycache__/
+
+# Der Netz-Mitschnitt von SPEEDOS_NET_DUMP=1 (Debug-Artefakt, jederzeit neu
+# erzeugbar — und mit ~1 MiB je Lauf nichts fuers Repository).
+speedos-net.pcap

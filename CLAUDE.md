@@ -374,26 +374,47 @@
   `TlsFehler::Netz(..)` wird BEWUSST zu `Verbindung` und NICHT zu `Tls` —
   sonst saehe ein abgerissenes Kabel wie ein Zertifikatsproblem aus, und das
   waere eine falsche Sicherheitsaussage.
+- **DER WETTLAUF AM STROM-ENDE — die wichtigste Lehre dieses Teils.**
+  `TcpStrom::lesen` fragte `empfange` und `socket_zustand` als ZWEI Syscalls
+  ab. Am Ende einer HTTP-Antwort liegen Nutzdaten und FIN nur **49 us**
+  auseinander (im Mitschnitt nachgemessen), und der Stack verarbeitet beide
+  im selben Durchgang. Traf er ZWISCHEN die beiden Syscalls, meldete der
+  Zustand „zu", waehrend die Daten schon im Puffer lagen — und `lesen` gab
+  Dateiende zurueck. Fehlerbild: „Verbindung angenommen, null Bytes",
+  ungefaehr jede fuenfte Verbindung in einer schnellen Serie.
+  **DIE REGEL: Ein Zustand, der „zu" sagt, ist KEIN Dateiende — er ist die
+  Aufforderung, den Puffer NOCH EINMAL zu leeren.** Erst ein `empfange`, das
+  NACH dem Schliess-Befund leer bleibt, ist wirklich das Ende. Wer irgendwo
+  sonst Zustand und Daten in zwei Schritten abfragt, hat denselben Fehler.
+  Warum es lange unentdeckt blieb: Der KERNEL-Klient pumpt nach jedem
+  Schliessen 60 Ticks (~240 ms) und ist zu langsam, um den Wettlauf zu
+  verlieren (30/30); erst ein Ring-3-Programm ohne diese Bremse ist schnell
+  genug. Regressionswaechter:
+  `tests/netz_klient.rs::test_kein_wettlauf_am_strom_ende` (30/30 in beiden
+  Betriebsarten, 0 Wiederholungen).
+- **DIE SUCHE, damit sie niemand wiederholt:** Zwei Vermutungen waren FALSCH
+  und stehen deshalb im Code — „liegt am Prozess-Start/-Ende" (widerlegt: 30
+  Abrufe in EINEM Prozess waren SCHLECHTER als 30 Prozesse mit je einem, es
+  lag also an der RATE) und „liegt am Listen-Backlog des Testservers"
+  (widerlegt: von 5 auf 128, Fehlerrate unveraendert). Gefunden hat es der
+  MITSCHNITT: `SPEEDOS_NET_DUMP=1` plus ein kleiner pcap-Leser zeigte, dass
+  auf der Leitung JEDE der 143 Verbindungen ihre Antwort bekommen hatte — die
+  Bytes kamen an und wurden nur nicht ausgeliefert.
 - **WIEDERHOLT WIRD GENAU EIN FALL: `LeereAntwort`** (Verbindung angenommen,
   null Bytes, sofort zu). Ein GET, bei dem nichts ankam, ist gefahrlos
   wiederholbar — es kann nichts zweimal passiert sein. Ein Zertifikatsfehler
   wird NIE wiederholt (das waere ein Angreifer, der es nochmal versucht),
   eine abgeschnittene Antwort auch nicht (dort ist schon etwas passiert),
   eine Frist erst recht nicht. Die Zahl steht in `Abruf::wiederholungen`,
-  damit sie MESSBAR ist statt heimlich.
-- **DER FLUECHTIGE FEHLSCHLAG, ehrlich notiert und NICHT geloest:** In
-  schnellen Abrufserien endet gelegentlich eine angenommene Verbindung ohne
-  ein einziges Byte. Gemessen statt geraten
-  (`tests/netz_klient.rs::test_fluechtige_fehlschlaege_zaehlen`): Der
-  KERNEL-Klient schafft 30/30, vom Host aus ist der Server 15/15 — es liegt
-  also NICHT an TCP, sondern am Prozess-Pfad bzw. an slirps Sicht darauf.
-  Wer daran weiterarbeitet, faengt bei diesem Test an.
-- **TESTKERNEL-REGEL, hier gelernt:** Endet ein Prozess, schliesst seine
-  Handle-Tabelle die Sockets — aber „schliessen" heisst bei TCP FIN, ACK,
-  TIME_WAIT, und dafuer muss jemand den Stack DREHEN. Im Betrieb tun das
-  `netz_task` und der Socket-Takt; ein Testkernel hat keinen Executor und
-  muss nach jedem Prozess selbst pumpen (`for _ in 0..60 { netz::pumpen();
-  warte_auf_interrupt(); }`). Fehlt das, sieht es wie ein Netzfehler aus.
+  damit sie MESSBAR ist statt heimlich, und `holes --serie=N` schaltet sie ab
+  — so faellt auf, wenn sie wieder etwas verdecken muesste. (Sie war
+  urspruenglich eingefuehrt worden, um genau den Wettlauf oben zu
+  ueberdecken; seit dessen Behebung feuert sie in den Tests NIE.)
+- **TESTKERNEL-REGEL:** Endet ein Prozess, schliesst seine Handle-Tabelle die
+  Sockets — aber „schliessen" heisst bei TCP FIN, ACK, TIME_WAIT, und dafuer
+  muss jemand den Stack DREHEN. Im Betrieb tun das `netz_task` und der
+  Socket-Takt; ein Testkernel hat keinen Executor und muss nach jedem Prozess
+  selbst pumpen (`for _ in 0..60 { netz::pumpen(); warte_auf_interrupt(); }`).
 - **`hole` WAEHLT DEN WEG SELBST:** `http://` -> Kernel-Klient (kein Prozess),
   `https://` -> Ring-3-Programm `holes` ueber `pipeline_ausfuehren`,
   schemalos -> https. **Die http->https-Weiterleitung ist eine UEBERGABE und

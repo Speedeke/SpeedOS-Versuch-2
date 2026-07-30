@@ -259,26 +259,65 @@ kennt der HTTP-Teil nur `lesen`/`schreiben` — dass unter dem einen Zweig ein
 Handshake steckt und unter dem anderen nichts, ist eine Frage der
 Verbindungsaufnahme, nicht des Protokolls darüber.
 
+### Der Fehler, den dieser Teil gefunden hat: der Wettlauf am Strom-Ende
+
+In schnellen Abrufserien endete etwa **jede fünfte** Verbindung ohne ein
+einziges Byte, obwohl sie angenommen worden war.
+
+**Die Ursache:** `TcpStrom::lesen` fragte `empfange` und `socket_zustand` als
+*zwei* Syscalls ab. Am Ende einer HTTP-Antwort mit `Connection: close` liegen
+Nutzdaten und FIN nur **49 µs** auseinander (nachgemessen im Mitschnitt), und
+unser Stack verarbeitet beide im selben Durchgang:
+
+```
+  1. empfange        -> 0                (die Daten sind noch unterwegs)
+  2. ... der Stack verarbeitet Daten UND FIN ...
+  3. socket_zustand  -> "Peer hat zu"    -> Dateiende gemeldet
+     ... während 345 Byte im Empfangspuffer liegen.
+```
+
+Der Kommentar im Code beschrieb bereits den richtigen Ablauf — *„ein weiterer
+`empfange` holt sie; erst wenn AUCH der 0 liefert, ist wirklich Schluss"* —
+nur führte der Code ihn nicht aus.
+
+**Die Regel:** Ein Zustand, der „zu" sagt, ist kein Dateiende — er ist die
+Aufforderung, den Puffer **noch einmal** zu leeren.
+
+Warum es lange unentdeckt blieb: Der Kernel-Klient pumpt nach jedem Schließen
+60 Ticks (~240 ms) und ist damit zu langsam, um den Wettlauf zu verlieren. Er
+schaffte immer 30/30. Erst ein Ring-3-Programm ohne diese Bremse ist schnell
+genug, ihn zu treffen.
+
+| | vorher | nachher |
+|---|---|---|
+| 30 Abrufe in EINEM Prozess | 24 ok / 6 leer | **30 ok / 0 leer** |
+| 30 Prozesse mit je einem Abruf | 2 Fehlschläge | **0** |
+| Wiederholungen je Testlauf | 6–10 | **0** |
+
+### Wie er gefunden wurde — inklusive der Sackgassen
+
+Zwei Vermutungen waren falsch und stehen deshalb im Code, damit sie niemand
+noch einmal verfolgt:
+
+1. **„Prozess-Start/-Ende"** — widerlegt: 30 Abrufe in *einem* Prozess waren
+   schlechter als 30 Prozesse mit je einem. Also die **Rate**, nicht der
+   Prozess-Wechsel.
+2. **„Listen-Backlog des Testservers"** — widerlegt: von 5 auf 128 erhöht,
+   Fehlerrate unverändert.
+
+Gefunden hat es der **Mitschnitt**: `SPEEDOS_NET_DUMP=1` schreibt ein pcap,
+und ein 30-Zeilen-Leser zeigte, dass auf der Leitung *jede* der 143
+Verbindungen ihre Antwort bekommen hatte. Die Bytes kamen an — sie wurden nur
+nicht ausgeliefert. Damit war der Fehler über dem Treiber lokalisiert.
+
 ### Der eine Fall, der wiederholt wird
 
-`AbrufFehler::LeereAntwort` — Verbindung angenommen, null Bytes, sofort zu.
-Ein GET, bei dem nichts ankam, ist gefahrlos wiederholbar; es kann nichts
-zweimal passiert sein. **Alles andere wird nie wiederholt**, insbesondere kein
-Zertifikatsfehler: Das wäre ein Angreifer, der es einfach nochmal versucht.
-
-Woher der Fall kommt, ist **nicht geklärt** und deshalb so notiert:
-
-| gemessen | Ergebnis |
-|---|---|
-| derselbe Server, vom Host aus | 15 / 15 sauber |
-| derselbe Server, **Kernel-Klient** im Gast (keine Prozesse, kein TLS) | 30 / 30 sauber |
-| über den **Prozess-Pfad**, schnelle Serien | einige Fehlschläge je Lauf |
-
-Es liegt also nicht an TCP. Ein Teil war der Testkernel selbst — endet ein
-Prozess, muss den TCP-Abbau seiner Sockets *jemand zu Ende pumpen*, und ohne
-Executor tut das niemand. Das hat die Läufe beruhigt, aber nicht beseitigt.
-Wer daran weiterarbeitet, fängt bei
-`tests/netz_klient.rs::test_fluechtige_fehlschlaege_zaehlen` an.
+`AbrufFehler::LeereAntwort` bleibt wiederholbar — jetzt aus dem richtigen
+Grund: Netze sind unzuverlässig, und ein GET, bei dem null Bytes ankamen, ist
+gefahrlos wiederholbar; es kann nichts zweimal passiert sein. **Alles andere
+wird nie wiederholt**, insbesondere kein Zertifikatsfehler: Das wäre ein
+Angreifer, der es einfach nochmal versucht. `holes --serie=N` schaltet die
+Wiederholung ab, damit sie nichts verdecken kann.
 
 ### Robustheit, gemessen
 
