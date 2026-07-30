@@ -36,6 +36,7 @@
 use crate::fs;
 use alloc::format;
 use alloc::string::String;
+use spin::Mutex;
 
 /// Ein eingebettetes Programm.
 pub struct Programm {
@@ -112,18 +113,105 @@ pub static PROGRAMME: &[Programm] = &[
     },
 ];
 
-/// Das Verzeichnis, in dem die Programme wohnen — auf der Platte, wenn eine
+// ===========================================================================
+// WO DIE PROGRAMME LIEGEN — und warum das ZWEI Fragen sind
+// ===========================================================================
+//
+// Bis Serie 7 gab es hier nur eine Funktion: „auf der Platte, wenn eine
+// gemountet ist, sonst im RAM". Das ist richtig fuer die Frage WOHIN
+// INSTALLIERT WIRD — und falsch fuer die Frage WO ETWAS LIEGT.
+//
+// Der Fall, an dem der Unterschied auffiel: Beim Boot ist keine Platte
+// gemountet (unformatiert), die Programme landen also im RAM-VFS unter
+// /programme. Mitten in der Sitzung formatiert und mountet man
+// (`mkfs.speedfs JA`, `mount`) — ab da liefert `persistenter_pfad`
+// /platte/programme, und dort liegt NICHTS. `starte hallo` fand sein
+// Programm nicht mehr, obwohl es da war.
+//
+// „Neustart loest es" waere keine Loesung, sondern das Eingestaendnis, dass
+// der Zustand nicht stimmt. Also zwei getrennte Funktionen:
+//
+//   `verzeichnis()` — WOHIN wird installiert (der bevorzugte, persistente
+//                     Ort). Unveraendert.
+//   `pfad(name)`    — WO liegt dieses Programm WIRKLICH (nachgesehen, nicht
+//                     geraten).
+//
+// Und drittens `nach_mount_wechsel()`, damit der Zustand sich von selbst
+// wieder einrenkt: Nach einem Mount wandern die Programme auf die Platte.
+
+/// Der bevorzugte (persistente) Ort.
+const PLATTEN_VERZEICHNIS: &str = "/platte/programme";
+/// Der RAM-Fallback, solange keine Platte gemountet ist.
+const RAM_VERZEICHNIS: &str = "/programme";
+
+/// Das Verzeichnis, in das INSTALLIERT wird — auf der Platte, wenn eine
 /// gemountet ist, sonst im RAM-Dateisystem.
 ///
 /// Dieselbe Orts-Abstraktion wie bei Einstellungen und Papierkorb
 /// (`fs::persistenter_pfad`): EINE Stelle entscheidet, kein if-Wildwuchs.
 pub fn verzeichnis() -> &'static str {
-    fs::persistenter_pfad("/platte/programme", "/programme")
+    fs::persistenter_pfad(PLATTEN_VERZEICHNIS, RAM_VERZEICHNIS)
 }
 
-/// Der volle Pfad eines mitgelieferten Programms.
+/// Der volle Pfad eines Programms — NACHGESEHEN, nicht geraten.
+///
+/// Erst der bevorzugte Ort, dann der jeweils andere. Gibt es die Datei
+/// nirgends, wird der bevorzugte Pfad geliefert: Dann nennt die
+/// Fehlermeldung den Ort, an dem das Programm hingehoert.
 pub fn pfad(name: &str) -> String {
-    fs::pfad_anhaengen(verzeichnis(), name)
+    let bevorzugt = fs::pfad_anhaengen(verzeichnis(), name);
+    if datei_vorhanden(&bevorzugt) {
+        return bevorzugt;
+    }
+    // Der andere Ort. `verzeichnis()` liefert genau einen der beiden,
+    // also ist der Fallback immer der jeweils andere.
+    let anderer = if verzeichnis() == PLATTEN_VERZEICHNIS {
+        RAM_VERZEICHNIS
+    } else {
+        PLATTEN_VERZEICHNIS
+    };
+    let ausweich = fs::pfad_anhaengen(anderer, name);
+    if datei_vorhanden(&ausweich) {
+        return ausweich;
+    }
+    bevorzugt
+}
+
+/// Liegt dort eine DATEI? (Ein Verzeichnis gleichen Namens zaehlt nicht.)
+fn datei_vorhanden(pfad: &str) -> bool {
+    fs::mit_fs(|dateisystem| dateisystem.node_typ(pfad)) == Ok(fs::NodeTyp::Datei)
+}
+
+/// Wohin zuletzt installiert wurde. Nur fuer `nach_mount_wechsel` —
+/// beide Werte sind `&'static str`, es wird also nie alloziert.
+static INSTALLIERT_IN: Mutex<Option<&'static str>> = Mutex::new(None);
+
+/// Ein Mount hat sich geaendert: Liegen die Programme jetzt am falschen
+/// Ort, werden sie neu installiert. Liefert die Zahl der geschriebenen
+/// Dateien (0 = es gab nichts zu tun).
+///
+/// AUFRUFER sind die Stellen, die einen Mount VERAENDERN — die Shell-
+/// Befehle `mount`/`umount` und die Einstellungen-App (die haengt fuer
+/// `pruefe.speedfs` kurz aus). Der Boot-Weg braucht ihn nicht: Dort laeuft
+/// `installieren()` ohnehin nach dem Auto-Mount.
+///
+/// Idempotent und billig: Hat sich der Ort nicht geaendert, kostet es einen
+/// Zeiger-Vergleich.
+pub fn nach_mount_wechsel() -> usize {
+    let ziel = verzeichnis();
+    {
+        let installiert = INSTALLIERT_IN.lock();
+        if *installiert == Some(ziel) {
+            return 0;
+        }
+    }
+    crate::serial_println!(
+        "[programme] Mount-Wechsel: die Programme gehoeren jetzt nach {}.",
+        ziel
+    );
+    let geschrieben = installieren();
+    ca_buendel_installieren();
+    geschrieben
 }
 
 /// Schreibt alle eingebetteten Programme ins Dateisystem, sofern sie fehlen
@@ -148,6 +236,10 @@ pub fn installieren() -> usize {
             return 0;
         }
     }
+
+    // Ab hier steht das Verzeichnis — merken, damit `nach_mount_wechsel`
+    // einen spaeteren Ortswechsel erkennt.
+    *INSTALLIERT_IN.lock() = Some(verzeichnis());
 
     let mut geschrieben = 0usize;
     for programm in PROGRAMME {
@@ -248,11 +340,34 @@ pub fn uebersicht() -> alloc::vec::Vec<String> {
 /// Das eingebettete CA-Buendel (leer, wenn assets/ca-bundle.pem fehlt).
 pub static CA_BUENDEL: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ca-bundle.pem"));
 
-/// Wo das Buendel im Dateisystem liegt.
+const CA_PLATTE: &str = "/platte/system/ca-bundle.pem";
+const CA_RAM: &str = "/system/ca-bundle.pem";
+
+/// Wo das Buendel im Dateisystem liegt — nachgesehen wie bei `pfad`.
+///
+/// Dieselbe Falle wie bei den Programmen: Nach einem Mount mitten in der
+/// Sitzung liegt die Datei noch im RAM-VFS. Ein Vertrauensanker, der
+/// „nicht gefunden" meldet, obwohl er da ist, waere besonders aergerlich —
+/// die Folge ist keine Verbindung.
 pub fn ca_buendel_pfad() -> &'static str {
-    // Ohne Platte landet es im RAM-VFS — dann ist es nach dem Neustart weg,
-    // was fuer einen Vertrauensanker ehrlicher ist als ein halber Zustand.
-    fs::persistenter_pfad("/platte/system/ca-bundle.pem", "/system/ca-bundle.pem")
+    let bevorzugt = ca_buendel_ziel();
+    if datei_vorhanden(bevorzugt) {
+        return bevorzugt;
+    }
+    let anderer = if bevorzugt == CA_PLATTE { CA_RAM } else { CA_PLATTE };
+    if datei_vorhanden(anderer) {
+        return anderer;
+    }
+    bevorzugt
+}
+
+/// WOHIN das Buendel installiert wird (der bevorzugte Ort — im Gegensatz zu
+/// `ca_buendel_pfad`, das nachsieht, wo es LIEGT).
+///
+/// Ohne Platte landet es im RAM-VFS. Dann ist es nach dem Neustart weg, was
+/// fuer einen Vertrauensanker ehrlicher ist als ein halber Zustand.
+fn ca_buendel_ziel() -> &'static str {
+    fs::persistenter_pfad(CA_PLATTE, CA_RAM)
 }
 
 /// Schreibt das CA-Buendel aufs Dateisystem (wie `installieren`, nur fuer
@@ -269,7 +384,7 @@ pub fn ca_buendel_installieren() -> bool {
         );
         return false;
     }
-    let ziel = String::from(ca_buendel_pfad());
+    let ziel = String::from(ca_buendel_ziel());
     if ist_aktuell(&ziel, CA_BUENDEL) {
         crate::serial_println!(
             "[ca] Vertrauensanker {} ist aktuell ({} Byte).",
@@ -347,6 +462,46 @@ mod tests {
                 programm.name
             );
         }
+    }
+
+    /// DER MOUNT-WECHSEL-FEHLER, festgehalten: `pfad` muss ein Programm
+    /// auch dann finden, wenn es im JEWEILS ANDEREN Verzeichnis liegt.
+    ///
+    /// Der reale Fall: Beim Boot war keine Platte gemountet, die Programme
+    /// landeten im RAM-VFS. Mitten in der Sitzung wird formatiert und
+    /// gemountet — `verzeichnis()` zeigt ab da auf die (leere) Platte, und
+    /// `starte hallo` fand nichts mehr. Der Test baut genau diese Lage
+    /// nach, indem er die Datei in das Verzeichnis legt, das gerade NICHT
+    /// das bevorzugte ist.
+    #[test_case]
+    fn test_pfad_findet_das_andere_verzeichnis() {
+        let bevorzugt = verzeichnis();
+        let anderes = if bevorzugt == PLATTEN_VERZEICHNIS {
+            RAM_VERZEICHNIS
+        } else {
+            PLATTEN_VERZEICHNIS
+        };
+        // Das andere Verzeichnis anlegen (mkdir legt keine Elternordner an —
+        // ist /platte nicht gemountet, schlaegt es fehl; dann ist der Test
+        // an dieser Stelle nicht durchfuehrbar und wird uebersprungen).
+        let _ = fs::mit_fs(|dateisystem| dateisystem.mkdir(anderes));
+        if fs::mit_fs(|dateisystem| dateisystem.node_typ(anderes)).is_err() {
+            return;
+        }
+        let datei = fs::pfad_anhaengen(anderes, "pfadprobe");
+        fs::mit_fs(|dateisystem| dateisystem.schreiben(&datei, b"x")).expect("schreiben");
+
+        // GEFUNDEN, obwohl es nicht im bevorzugten Verzeichnis liegt:
+        assert_eq!(pfad("pfadprobe"), datei);
+
+        // Und was es NIRGENDS gibt, bekommt den BEVORZUGTEN Pfad — damit
+        // die Fehlermeldung den Ort nennt, an den es gehoert.
+        assert_eq!(
+            pfad("gibtesnicht"),
+            fs::pfad_anhaengen(bevorzugt, "gibtesnicht")
+        );
+
+        let _ = fs::mit_fs(|dateisystem| dateisystem.loeschen(&datei));
     }
 
     /// `netzhole` hat eine grosse `.bss` (den 64-KiB-Antwortpuffer). Das ist

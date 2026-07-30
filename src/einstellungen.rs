@@ -973,6 +973,10 @@ fn speedfs_pruefen_text(reparieren: bool) -> String {
             ));
         }
     }
+    // Ist die Platte danach NICHT wieder da, liegen die Programme am
+    // falschen Ort — dann werden sie in den RAM zurueckgeholt. Im
+    // Normalfall (alles wieder eingehaengt) kostet das einen Vergleich.
+    crate::programme::nach_mount_wechsel();
     text
 }
 

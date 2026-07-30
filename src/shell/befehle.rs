@@ -934,7 +934,20 @@ impl Befehl for Mount {
             }
         };
         match crate::fs::mounten(PLATTE_MOUNT, Box::new(speedfs)) {
-            Ok(()) => println!("Daten-Platte eingehaengt: {}", PLATTE_MOUNT),
+            Ok(()) => {
+                println!("Daten-Platte eingehaengt: {}", PLATTE_MOUNT);
+                // Die mitgelieferten Programme gehoeren jetzt auf die Platte
+                // (bis eben lagen sie im RAM-VFS). Ohne das zeigte
+                // `programme::verzeichnis()` auf einen leeren Ordner.
+                let geschrieben = crate::programme::nach_mount_wechsel();
+                if geschrieben > 0 {
+                    println!(
+                        "{} Programm(e) nach {} uebernommen.",
+                        geschrieben,
+                        crate::programme::verzeichnis()
+                    );
+                }
+            }
             Err(fehler) => fs_fehler_ausgeben(fehler),
         }
     }
@@ -959,6 +972,9 @@ impl Befehl for Umount {
                     kontext.aktuelles_verzeichnis = String::from("/");
                 }
                 println!("{} ausgehaengt (alles auf der Platte).", PLATTE_MOUNT);
+                // Ohne Platte gilt wieder der RAM-Ort — dorthin gehoeren die
+                // Programme jetzt, sonst laesst sich keines mehr starten.
+                crate::programme::nach_mount_wechsel();
             }
             Err(fehler) => fs_fehler_ausgeben(fehler),
         }
