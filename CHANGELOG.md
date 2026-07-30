@@ -5,6 +5,131 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### Serie 7, Teil 5: TLS WIRD EINE SYSTEMFÄHIGKEIT
+
+Teil 4 hat bewiesen, dass es geht — in **einem** Programm. Teil 5 macht
+daraus etwas, das jedes Programm benutzen kann.
+
+```
+SpeedOS:/> hole example.com
+example.com leitet auf https weiter — uebernommen von `holes`:
+  TLS: TLS 1.3 / TLS13_AES_128_GCM_SHA256 - Handshake in 31 ms
+HTTP 200 OK
+```
+
+#### `libspeed::netz` — „hol mir diese URL", einmal richtig
+
+Der ganze Ablauf (Schema erkennen, DNS, verbinden, Wurzeln laden, Handshake,
+Anfrage bauen, Rumpf einsammeln, Weiterleitungen folgen) stand nach Teil 4 in
+`holes`. Das nächste Programm hätte ihn abgeschrieben, das übernächste auch —
+und beim dritten wären die Fristen verschieden gewesen und das Größenlimit
+vergessen. Jetzt steht er **einmal**:
+
+```rust
+let mut klient = Klient::neu();
+let abruf = klient.holen("https://example.com/")?;
+```
+
+Vier Zusagen, die die Schicht gibt:
+
+* **Sie hängt nie.** Jede Operation hat eine Frist.
+* **Sie frisst keinen Speicher.** `max_bytes` wird **während** des Lesens
+  geprüft, nicht danach — ein endlos sendender Server wird abgeschnitten,
+  bevor der Heap voll ist.
+* **Sie folgt Weiterleitungen, auch über das Schema hinweg** — bis zu einer
+  Grenze und nie im Kreis (der Schleifenschutz vergleicht normalisierte
+  Adressen, sonst wären `https://a/` und `https://a:443/` zwei Stellen).
+* **Sie prüft Zertifikate immer.** Es gibt keinen Parameter dagegen.
+
+`AbrufFehler` trennt bewusst nach der Schicht: URL, DNS, Verbindung, **TLS**,
+HTTP, Größenlimit, Weiterleitungen, Schleife, Frist. `ist_sicherheitsfehler()`
+beantwortet die eine Frage, die zählt — *darf man das nochmal versuchen?*
+
+#### `hole` wählt den Weg selbst
+
+Ein Befehl, zwei Wege, und der Benutzer muss nicht wissen welcher:
+`http://` → Kernel-Klient (kein Prozess, schnell), `https://` → Ring 3,
+schemalos → https. Und der Fall, der im heutigen Web der Normalfall ist:
+**http, das auf https weiterleitet.** Der Kernel-Klient rechnet die
+Zieladresse aus und gibt sie als `KlientFehler::BrauchtTls` heraus — kein
+Fehler, sondern eine Übergabe; die Shell reicht sie an `holes` weiter. Eine
+Zieldatei ohne `/` landet im Zuhause (`/platte/heim`).
+
+Neu in `speedhttp`: `ziel_parsen` und `naechstes_ziel` (Schema + Standard-Port
+an EINER getesteten Stelle, aufgebaut auf den unveränderten
+Serie-5-Funktionen — `url_parsen` lehnt https weiterhin ab und soll das auch).
+
+#### `news` — der Beweis, dass es trägt
+
+```
+starte news https://example.com
+```
+
+Holt eine Seite und zeigt sie als Text. Der Netz-Teil sind drei Zeilen; alles
+andere ist Textaufbereitung. **Kein HTML-Renderer** — kein DOM, kein CSS, kein
+JavaScript. Die Entscheidung, die den Unterschied macht: `<script>`- und
+`<style>`-**Blöcke** fliegen mitsamt Inhalt raus. Wer nur Tags entfernt,
+bekommt bei jeder modernen Seite seitenweise JavaScript zu lesen.
+
+#### Robustheits-Pass (`tests/netz_klient.rs`, 14 Tests)
+
+`tools/tls_testserver.py` benimmt sich jetzt auf Wunsch schlecht: kappt die
+Leitung mitten im Rumpf, sendet ohne Ende, leitet im Kreis, nimmt an und
+schweigt — plus ein Klartext-Port, weil das TLS-Zertifikat ja zu Recht
+abgelehnt wird, *bevor* ein Byte Rumpf fließt.
+
+| Fall | Ergebnis |
+|---|---|
+| Server kappt mitten im Rumpf | `http` (unvollständig), 24 ms |
+| Server sendet ohne Ende, Limit 100 KB | `zu-gross`, 28 ms |
+| Gegenstelle nimmt an und schweigt | `frist`, 8023 ms (Frist war 8000) |
+| DNS liefert nichts | `dns`, 52 ms |
+| Weiterleitung auf sich selbst / im Ring | `schleife`, 25 ms |
+| zehn Weiterleitungen | `zu-viele-weiterleitungen` |
+| Kabel weg mitten im Download | Fehler in Frist, Stack erholt sich |
+
+Und die Bilanz danach: **Sockets byte-exakt gleich, Frame-Differenz 0.**
+
+#### Der flüchtige Fehlschlag — gemessen, nicht wegdefiniert
+
+Beim Robustheits-Pass fiel auf: In schnellen Abrufserien endet gelegentlich
+eine Verbindung, die **angenommen** wurde, sofort ohne ein einziges Byte. Vom
+Host aus ist derselbe Server 15/15 einwandfrei.
+
+Statt zu raten, wurde gemessen (`test_fluechtige_fehlschlaege_zaehlen`): Der
+**Kernel-Klient** — ohne Prozesse, ohne TLS — schafft **30 von 30**. Es liegt
+also nicht an TCP, sondern am Prozess-Pfad bzw. an slirps Sicht darauf. Ein
+Teil davon war der Testkernel selbst: Endet ein Prozess, muss den TCP-Abbau
+seiner Sockets *jemand zu Ende pumpen*; im Betrieb tun das `netz_task` und
+Socket-Takt, in einem Testkernel ohne Executor muss es von Hand passieren.
+
+Das hat die Läufe beruhigt, aber **nicht beseitigt** — ehrlich notiert. Was
+sie durchträgt, ist eine Wiederholung in `libspeed::netz`, und zwar **nur für
+diesen einen Fall**: Ein GET, bei dem null Bytes ankamen, ist gefahrlos
+wiederholbar — es kann nichts zweimal passiert sein. Ein Zertifikatsfehler
+wird **nie** wiederholt (das wäre ein Angreifer, der es nochmal versucht), eine
+abgeschnittene Antwort auch nicht, eine Frist erst recht nicht. Die Zahl der
+Wiederholungen steht im Ergebnis (`Abruf::wiederholungen`), damit sie sich
+messen lässt statt im Verborgenen zu passieren.
+
+#### Nebenbei repariert
+
+* **Der Boot panickte** mit dem 950-KiB-`holes` beim Installieren der
+  Programme (`Layout { size: 844320 }`) — der Vorab-Heap in `main.rs` wächst
+  jetzt auf 8 MiB. Ohne Datenplatte landen *alle* Programme (~2 MiB) im
+  RAM-VFS, also im selben Heap.
+* `holes` sucht den Vertrauensanker in `/platte/system` **und** `/system` —
+  sonst stünde es beim Live-USB-Boot ohne Wurzeln da, und das sähe nicht nach
+  fehlendem Bündel aus, sondern nach kaputtem TLS.
+* `tests/sicherheit.rs`: Die Heap-Bilanz des Dauerbeschusses ist jetzt eine
+  **benannte Schranke** statt exakter Gleichheit. Grund: `heap_ohne_log`
+  zieht die `capacity()` des Log-Puffers ab; zieht der während der Messung um,
+  verschiebt sich die Differenz um einige hundert Byte — gemessen ein
+  *Rückgang* um 368 Byte, und ein Rückgang ist definitiv kein Leck. Ein echtes
+  Leck wäre proportional zur Prozesszahl und läge weit jenseits von 4 KiB.
+
+**159 Tests, 0 Fehlschläge.**
+
 ### Serie 7, Teil 4: DIE ERSTE VERSCHLÜSSELTE VERBINDUNG
 
 ```

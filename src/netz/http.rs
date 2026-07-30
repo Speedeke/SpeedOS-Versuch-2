@@ -60,12 +60,29 @@ const TIMEOUT_MS: u64 = 15_000;
 /// (kommt aus `speedhttp`), `KlientFehler` = das plus, was am WEG scheitert.
 /// Ring 3 hat sein eigenes Gegenstueck dazu (`libspeed::Fehler`) — und genau
 /// so soll es sein, denn dort ist der Weg ein anderer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KlientFehler {
     /// Das Protokoll selbst (URL, Kopf, Rumpf, Weiterleitungen).
     Http(HttpFehler),
     Dns(DnsFehler),
     Socket(SocketFehler),
+    /// **Der Weg geht weiter, aber nur mit TLS.** Enthält die ausgerechnete
+    /// absolute https-Adresse.
+    ///
+    /// ==================================================================
+    /// WARUM DAS EIN EIGENER FALL IST UND KEIN FEHLER
+    ///
+    /// http -> https ist im heutigen Web der NORMALFALL: Fast jeder Server
+    /// antwortet auf eine http-Anfrage mit `301 Location: https://…`. Für
+    /// den Kernel-Klienten ist dort Endstation — er hat kein TLS, und das
+    /// soll auch so bleiben (docs/tls-entscheidung.md).
+    ///
+    /// Aber „geht nicht" wäre die falsche Antwort, denn SpeedOS KANN das
+    /// ja: in Ring 3. Also gibt der Klient das ausgerechnete Ziel heraus,
+    /// und die Shell reicht es an `holes` weiter. Der Benutzer merkt vom
+    /// Wechsel nur, dass in der Ausgabe eine Zeile mehr steht.
+    /// ==================================================================
+    BrauchtTls(alloc::string::String),
 }
 
 impl KlientFehler {
@@ -74,13 +91,25 @@ impl KlientFehler {
             KlientFehler::Http(f) => f.meldung(),
             KlientFehler::Dns(f) => f.meldung(),
             KlientFehler::Socket(f) => f.meldung(),
+            KlientFehler::BrauchtTls(_) => "die Gegenstelle leitet auf https weiter",
         }
     }
 
-    /// Ist das die https-Absage? Die Shell haengt daran ihren Hinweis auf
+    /// Ist das die https-Absage? Die Shell hängt daran ihre Übergabe an
     /// `holes` — der Parser selbst kennt `holes` nicht und soll es auch nicht.
     pub fn ist_tls_absage(&self) -> bool {
-        matches!(self, KlientFehler::Http(HttpFehler::TlsNichtUnterstuetzt))
+        matches!(
+            self,
+            KlientFehler::Http(HttpFehler::TlsNichtUnterstuetzt) | KlientFehler::BrauchtTls(_)
+        )
+    }
+
+    /// Die https-Adresse, auf die weitergeleitet wurde (falls es eine gibt).
+    pub fn tls_ziel(&self) -> Option<&str> {
+        match self {
+            KlientFehler::BrauchtTls(url) => Some(url.as_str()),
+            _ => None,
+        }
     }
 }
 
@@ -175,6 +204,10 @@ fn roh_holen(url: &Url) -> Result<Vec<u8>, KlientFehler> {
 
 /// DER Einstieg: holt eine http-URL und folgt dabei Weiterleitungen (bis
 /// `MAX_WEITERLEITUNGEN`). Liefert die ENDGÜLTIGE URL samt Antwort.
+///
+/// Führt eine Weiterleitung auf **https**, endet der Abruf mit
+/// `KlientFehler::BrauchtTls` und der ausgerechneten Zieladresse — siehe
+/// dort, warum das kein Fehler ist, sondern eine Übergabe.
 pub fn holen(url_text: &str) -> Result<(Url, Antwort), KlientFehler> {
     let mut url = url_parsen(url_text)?;
     let mut verbleibend = MAX_WEITERLEITUNGEN;
@@ -188,7 +221,21 @@ pub fn holen(url_text: &str) -> Result<(Url, Antwort), KlientFehler> {
                     return Err(KlientFehler::Http(HttpFehler::ZuVieleWeiterleitungen));
                 }
                 let ort = ort.to_string();
-                url = naechste_url(&url, &ort)?;
+                url = match naechste_url(&url, &ort) {
+                    Ok(naechste) => naechste,
+                    // Die https-Weiterleitung: nicht abbrechen, sondern das
+                    // Ziel ausrechnen und dem Aufrufer geben. `naechstes_ziel`
+                    // kann das Schema — `naechste_url` (Serie 5) bewusst nicht.
+                    Err(HttpFehler::TlsNichtUnterstuetzt) => {
+                        let basis = Ziel {
+                            tls: false,
+                            url: url.clone(),
+                        };
+                        let ziel = naechstes_ziel(&basis, &ort)?;
+                        return Err(KlientFehler::BrauchtTls(ziel.als_text()));
+                    }
+                    Err(fehler) => return Err(KlientFehler::Http(fehler)),
+                };
                 verbleibend -= 1;
                 continue;
             }

@@ -108,7 +108,9 @@ fn test_http_lan_zehnmal() {
             // den schon gemachten ersten Abruf mitzählen
             match &erster {
                 Ok((_, a)) => Ok(a.clone()),
-                Err(f) => Err(*f),
+                // `KlientFehler` ist seit Serie 7, Teil 5 nicht mehr `Copy`
+                // (die https-Uebergabe traegt die Zieladresse mit sich).
+                Err(f) => Err(f.clone()),
             }
         } else {
             http::holen(LAN_URL).map(|(_, a)| a)

@@ -95,6 +95,10 @@ fn bewerten(ergebnis: &Result<(http::Url, http::Antwort), KlientFehler>) -> (Bef
     match ergebnis {
         Ok(_) => (Befund::TcpOk, "vollstaendige Antwort"),
         Err(KlientFehler::Http(TlsNichtUnterstuetzt)) => (Befund::Umgebung, "Server leitet auf https"),
+        // Seit Serie 7, Teil 5 nennt der Klient das ausgerechnete https-Ziel,
+        // statt nur „geht nicht" zu sagen. Fuer diesen Test bleibt es
+        // dasselbe: kein TCP-Fehler, sondern die Umgebung.
+        Err(KlientFehler::BrauchtTls(_)) => (Befund::Umgebung, "Server leitet auf https"),
         Err(KlientFehler::Dns(_)) => (Befund::Umgebung, "DNS"),
         Err(KlientFehler::Http(UngueltigeUrl)) => (Befund::Umgebung, "URL"),
         Err(KlientFehler::Http(ZuVieleWeiterleitungen)) => (Befund::Umgebung, "zu viele Weiterleitungen"),

@@ -356,6 +356,69 @@
   Der HTTP-Parser prueft gegen `Content-Length` bzw. den 0-Chunk. Die
   Luecken aus Teil 2 (keine Sperrlisten, kein CT, kein Pinning) bleiben.
 
+## DIE ABRUFSCHICHT — „hol mir diese URL" (Serie 7, Teil 5)
+- **`libspeed::netz::Klient` IST DIE STELLE, an der ein User-Programm eine
+  URL holt.** Wer in einem neuen Programm DNS, Socket, Handshake und
+  Rumpf-Schleife selbst schreibt, macht es falsch — `holes` und `news` sind
+  beide nur Bedienoberflaechen darauf (drei Zeilen Netz-Code), und der
+  Browser aus Serie 8 wird es genauso machen. Zusagen: **haengt nie**
+  (Frist je Versuch), **frisst keinen Speicher** (`max_bytes` wird WAEHREND
+  des Lesens geprueft, nicht danach), folgt Weiterleitungen **auch ueber das
+  Schema hinweg**, aber nie im Kreis, und **prueft Zertifikate immer** — es
+  gibt keinen Parameter dagegen.
+- **`AbrufFehler` trennt nach SCHICHT, nicht nach Bequemlichkeit:** Url /
+  Dns / Verbindung / **Tls** / Http(fehler, bytes) / LeereAntwort / ZuGross /
+  ZuVieleWeiterleitungen / Schleife / Frist. `ist_sicherheitsfehler()`
+  beantwortet die eine Frage, die zaehlt (darf man das wiederholen?);
+  `kurz()` liefert das maschinenlesbare Schlagwort, an dem die Tests haengen.
+  `TlsFehler::Netz(..)` wird BEWUSST zu `Verbindung` und NICHT zu `Tls` —
+  sonst saehe ein abgerissenes Kabel wie ein Zertifikatsproblem aus, und das
+  waere eine falsche Sicherheitsaussage.
+- **WIEDERHOLT WIRD GENAU EIN FALL: `LeereAntwort`** (Verbindung angenommen,
+  null Bytes, sofort zu). Ein GET, bei dem nichts ankam, ist gefahrlos
+  wiederholbar — es kann nichts zweimal passiert sein. Ein Zertifikatsfehler
+  wird NIE wiederholt (das waere ein Angreifer, der es nochmal versucht),
+  eine abgeschnittene Antwort auch nicht (dort ist schon etwas passiert),
+  eine Frist erst recht nicht. Die Zahl steht in `Abruf::wiederholungen`,
+  damit sie MESSBAR ist statt heimlich.
+- **DER FLUECHTIGE FEHLSCHLAG, ehrlich notiert und NICHT geloest:** In
+  schnellen Abrufserien endet gelegentlich eine angenommene Verbindung ohne
+  ein einziges Byte. Gemessen statt geraten
+  (`tests/netz_klient.rs::test_fluechtige_fehlschlaege_zaehlen`): Der
+  KERNEL-Klient schafft 30/30, vom Host aus ist der Server 15/15 — es liegt
+  also NICHT an TCP, sondern am Prozess-Pfad bzw. an slirps Sicht darauf.
+  Wer daran weiterarbeitet, faengt bei diesem Test an.
+- **TESTKERNEL-REGEL, hier gelernt:** Endet ein Prozess, schliesst seine
+  Handle-Tabelle die Sockets — aber „schliessen" heisst bei TCP FIN, ACK,
+  TIME_WAIT, und dafuer muss jemand den Stack DREHEN. Im Betrieb tun das
+  `netz_task` und der Socket-Takt; ein Testkernel hat keinen Executor und
+  muss nach jedem Prozess selbst pumpen (`for _ in 0..60 { netz::pumpen();
+  warte_auf_interrupt(); }`). Fehlt das, sieht es wie ein Netzfehler aus.
+- **`hole` WAEHLT DEN WEG SELBST:** `http://` -> Kernel-Klient (kein Prozess),
+  `https://` -> Ring-3-Programm `holes` ueber `pipeline_ausfuehren`,
+  schemalos -> https. **Die http->https-Weiterleitung ist eine UEBERGABE und
+  kein Fehler:** `http::holen` rechnet das Ziel aus und liefert
+  `KlientFehler::BrauchtTls(adresse)`; die Shell reicht es weiter. Eine
+  Zieldatei ohne `/` landet im Zuhause (`explorer::start_ordner`).
+- **`speedhttp::ziel_parsen` / `naechstes_ziel` sind die EINE Stelle fuer
+  Schema und Standard-Port.** Sie sind ERGAENZUNGEN und bauen auf den
+  unveraenderten Serie-5-Funktionen auf: `url_parsen` nimmt schemalose
+  Eingaben an und lehnt `https://` weiterhin ab — das bleibt so, es ist der
+  transportfreie Unterbau. `Ziel::als_text` NORMALISIERT (Standard-Port
+  weggelassen), und genau davon lebt der Schleifenschutz.
+- **`news` ist KEIN HTML-Renderer** und soll auch keiner werden (das ist
+  Serie 8). Ein Zeichen-Automat mit drei Zustaenden, damit er auch kaputtes
+  HTML uebersteht. DIE Entscheidung: `<script>`/`<style>`/`<head>` fliegen
+  MITSAMT INHALT raus — wer nur Tags entfernt, bekommt seitenweise
+  JavaScript zu lesen und haelt das Ergebnis fuer kaputt.
+- **`tools/tls_testserver.py` benimmt sich auf Wunsch schlecht** (`/abbruch`
+  kappt mitten im Rumpf, `/endlos` sendet ohne Ende, `/schleife` und
+  `/ringelreihen` leiten im Kreis, `/kette` zehnmal, `/nach-tls` wechselt das
+  Schema, Port 8444 nimmt an und schweigt) und hat einen KLARTEXT-Port
+  (8080). Der ist noetig, weil das TLS-Zertifikat zu Recht abgelehnt wird,
+  BEVOR je ein Byte Rumpf fliesst — die Rumpf-Fehlerfaelle laufen deshalb
+  ueber http, es ist dieselbe Zustandsmaschine ohne Verschluesselung.
+
 ## Platten-Sicherheits-Regel (Juli 2026)
 - Der ATA-Treiber weigert sich PER KONSTRUKTION, auf das Boot-Laufwerk
   zu schreiben: Das Feld `beschreibbar` ist privat, Laufwerke entstehen

@@ -37,10 +37,13 @@ import argparse
 import http.server
 import os
 import shutil
+import socket
 import ssl
+import struct
 import subprocess
 import sys
 import threading
+import time
 
 HIER = os.path.dirname(os.path.abspath(__file__))
 ZERT_ORDNER = os.path.join(HIER, "testcert")
@@ -58,6 +61,29 @@ KLEIN = b"SpeedOS TLS-Testserver: dieser Text kommt ueber ein SELBST\r\n" \
         b"uebersprungen -- und genau das darf nicht passieren.\r\n"
 GROSS_BYTES = 512 * 1024
 
+# Eine kleine HTML-Seite fuer `news` -- mit allem, woran eine naive
+# Tag-Entfernung scheitert: <script>, <style>, Entities, Einrueckung.
+HTML = b"""<!DOCTYPE html>
+<html lang="de"><head>
+<title>SpeedOS &ndash; Testseite</title>
+<style>body { color: #123; } /* das hier darf NICHT im Text landen */</style>
+<script>var geheim = "auch das nicht";</script>
+</head>
+<body>
+  <h1>Willkommen bei SpeedOS</h1>
+  <p>Dieser Absatz kommt &uuml;ber eine <b>verschl&uuml;sselte</b>
+     Verbindung &ndash; und er ist absichtlich lang genug, damit der
+     Zeilenumbruch etwas zu tun bekommt und man sieht, ob er an
+     Wortgrenzen trennt.</p>
+  <ul><li>Erstens</li><li>Zweitens</li><li>Drittens &amp; Schluss</li></ul>
+  <p>Sonderzeichen: &lt;spitz&gt; &quot;doppelt&quot; &#228;&#246;&#252;</p>
+</body></html>
+"""
+
+# Der Port des TLS-Servers -- als Liste, damit `main` ihn setzen kann und
+# der Handler ihn fuer die /nach-tls-Weiterleitung kennt.
+TLS_PORT = [8443]
+
 
 def gross_erzeugen(n):
     """Ein deterministisches Muster der Laenge n."""
@@ -70,13 +96,73 @@ class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "SpeedOS-TLS-Testserver/1.0"
 
-    def _antworten(self, koerper, typ="text/plain"):
-        self.send_response(200)
+    def _antworten(self, koerper, typ="text/plain", status=200, extra=()):
+        self.send_response(status)
         self.send_header("Content-Type", typ)
+        self.send_header("Content-Length", str(len(koerper)))
+        self.send_header("Connection", "close")
+        for name, wert in extra:
+            self.send_header(name, wert)
+        self.end_headers()
+        self.wfile.write(koerper)
+
+    def _weiterleiten(self, ziel, status=302):
+        koerper = b"weiter\r\n"
+        self.send_response(status)
+        self.send_header("Location", ziel)
+        self.send_header("Content-Type", "text/plain")
         self.send_header("Content-Length", str(len(koerper)))
         self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(koerper)
+
+    # -- Die BOESARTIGEN Endpunkte (Serie 7, Teil 5) --------------------
+    #
+    # Sie sind der Grund, warum dieser Server existiert und nicht
+    # `python -m http.server` reicht: Ein braver Server kann nicht
+    # beweisen, dass ein Klient mit einem unbraven zurechtkommt.
+
+    def _abbrechen(self):
+        """Kopf mit grosser Content-Length, dann MITTENDRIN die Leitung kappen.
+
+        Das ist der Fall 'Server bricht mitten im Strom ab'. Aus Sicht des
+        Klienten endet der Strom vorzeitig -- er MUSS das bemerken (der
+        Rumpf ist kuerzer als angekuendigt) und darf nicht haengen.
+        """
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(GROSS_BYTES))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(b"A" * 4096)
+        self.wfile.flush()
+        # Hart schliessen (RST statt sauberem FIN, kein TLS-close_notify).
+        try:
+            self.connection.setsockopt(
+                socket.SOL_SOCKET, socket.SO_LINGER,
+                struct.pack("ii", 1, 0))
+            self.connection.close()
+        except OSError:
+            pass
+        self.close_connection = True
+
+    def _endlos(self):
+        """Sendet ohne Ende (chunked, ohne Abschluss) -- der Test fuers Limit.
+
+        Ein Klient ohne Groessenlimit laedt hier, bis der Heap voll ist.
+        """
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        stueck = b"X" * 4096
+        try:
+            while True:
+                self.wfile.write(b"1000\r\n" + stueck + b"\r\n")
+        except OSError:
+            pass          # Klient hat abgebrochen -- genau so soll es sein
+        self.close_connection = True
 
     def do_GET(self):
         pfad = self.path.split("?")[0]
@@ -95,17 +181,41 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 stueck = KLEIN[i:i + 17]
                 self.wfile.write(b"%x\r\n" % len(stueck) + stueck + b"\r\n")
             self.wfile.write(b"0\r\n\r\n")
+        elif pfad == "/html":
+            self._antworten(HTML, "text/html; charset=utf-8")
+        # --- Weiterleitungen ---
+        elif pfad == "/weiter1":
+            self._weiterleiten("/weiter2")
+        elif pfad == "/weiter2":
+            self._weiterleiten("/klein.txt")
+        elif pfad == "/schleife":
+            self._weiterleiten("/schleife")          # zeigt auf sich selbst
+        elif pfad == "/ringelreihen":
+            self._weiterleiten("/ringelreihen2")     # zwei, die sich kreuzen
+        elif pfad == "/ringelreihen2":
+            self._weiterleiten("/ringelreihen")
+        elif pfad == "/kette":
+            # Laenger als jedes vernuenftige Limit: /kette9 .. /kette0
+            self._weiterleiten("/kette9")
+        elif pfad.startswith("/kette"):
+            nummer = pfad[len("/kette"):]
+            if nummer.isdigit() and int(nummer) > 0:
+                self._weiterleiten("/kette%d" % (int(nummer) - 1))
+            else:
+                self._antworten(b"Ende der Kette\r\n")
+        elif pfad == "/nach-tls":
+            # SCHEMA-WECHSEL: http -> https (im Web der Normalfall).
+            self._weiterleiten("https://10.0.2.2:%d/klein.txt" % TLS_PORT[0])
+        # --- Boesartiges ---
+        elif pfad == "/abbruch":
+            self._abbrechen()
+        elif pfad == "/endlos":
+            self._endlos()
         else:
-            koerper = b"nicht gefunden\r\n"
-            self.send_response(404)
-            self.send_header("Content-Type", "text/plain")
-            self.send_header("Content-Length", str(len(koerper)))
-            self.send_header("Connection", "close")
-            self.end_headers()
-            self.wfile.write(koerper)
+            self._antworten(b"nicht gefunden\r\n", status=404)
 
     def log_message(self, format, *args):
-        sys.stderr.write("  [tls-testserver] %s\n" % (format % args))
+        sys.stderr.write("  [testserver] %s\n" % (format % args))
 
 
 def _openssl(*argumente):
@@ -189,35 +299,91 @@ def zertifikat_sicherstellen():
                 ziel.write(quelle.read())
 
 
+def stummer_lauscher(host, port):
+    """Nimmt Verbindungen an und sagt dann NICHTS.
+
+    Das ist der Testfall 'Handshake-Timeout': TCP steht, aber die
+    Gegenstelle schickt nie ein ServerHello. Ein Klient ohne Frist wartet
+    hier bis zum Sankt-Nimmerleins-Tag -- genau das soll nicht passieren.
+
+    Die angenommenen Verbindungen werden bewusst FESTGEHALTEN (Liste), denn
+    ein geschlossener Socket waere ein sauberes Dateiende und damit ein
+    anderer Fall.
+    """
+    lauscher = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    lauscher.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    lauscher.bind((host, port))
+    lauscher.listen(8)
+    gehalten = []
+    while True:
+        try:
+            verbindung, _ = lauscher.accept()
+            gehalten.append(verbindung)
+            # Nicht mehr als noetig festhalten.
+            if len(gehalten) > 32:
+                gehalten.pop(0).close()
+        except OSError:
+            time.sleep(0.1)
+
+
 def main():
     zerleger = argparse.ArgumentParser(description=__doc__)
-    zerleger.add_argument("--port", type=int, default=8443)
+    zerleger.add_argument("--port", type=int, default=8443, help="HTTPS-Port")
+    zerleger.add_argument("--klarport", type=int, default=8080,
+                          help="derselbe Server OHNE TLS (fuer die Rumpf-Testfaelle)")
+    zerleger.add_argument("--stummport", type=int, default=8444,
+                          help="nimmt an und schweigt (Handshake-Timeout)")
     zerleger.add_argument("--host", default="0.0.0.0")
     argumente = zerleger.parse_args()
 
     zertifikat_sicherstellen()
+    TLS_PORT[0] = argumente.port
 
     kontext = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     kontext.load_cert_chain(certfile=ZERT, keyfile=SCHLUESSEL)
 
-    server = http.server.ThreadingHTTPServer((argumente.host, argumente.port), Handler)
-    server.socket = kontext.wrap_socket(server.socket, server_side=True)
+    tls_server = http.server.ThreadingHTTPServer((argumente.host, argumente.port), Handler)
+    tls_server.socket = kontext.wrap_socket(tls_server.socket, server_side=True)
+
+    # DERSELBE Handler ohne TLS. Warum das noetig ist: Die Rumpf-Testfaelle
+    # (Abbruch mitten im Strom, endlose Antwort, Weiterleitungsketten)
+    # brauchen einen Server, dessen ANTWORT der Klient auch annimmt -- und
+    # das TLS-Zertifikat hier wird ja zu Recht abgelehnt, bevor je ein Byte
+    # Rumpf fliesst. Ueber Klartext laesst sich derselbe Klient-Code
+    # deterministisch pruefen.
+    klar_server = http.server.ThreadingHTTPServer((argumente.host, argumente.klarport), Handler)
+
+    for ziel, name in ((tls_server.serve_forever, "https"),
+                       (klar_server.serve_forever, "http")):
+        faden = threading.Thread(target=ziel, name=name, daemon=True)
+        faden.start()
+    threading.Thread(target=stummer_lauscher,
+                     args=(argumente.host, argumente.stummport),
+                     name="stumm", daemon=True).start()
 
     print("=" * 70)
-    print(" SpeedOS TLS-Testserver -- SELBST AUSGESTELLTES Zertifikat")
+    print(" SpeedOS-Testserver")
     print("=" * 70)
-    print("  https://%s:%d/klein.txt   (%d Byte)" % (argumente.host, argumente.port, len(KLEIN)))
-    print("  https://%s:%d/gross.bin   (%d Byte)" % (argumente.host, argumente.port, GROSS_BYTES))
-    print("  https://%s:%d/chunked     (chunked kodiert)" % (argumente.host, argumente.port))
-    print()
-    print("  Aus SpeedOS heraus (QEMU-slirp zeigt den Host als 10.0.2.2):")
-    print("      starte holes https://10.0.2.2:%d/klein.txt" % argumente.port)
-    print()
-    print("  ERWARTETES ERGEBNIS: ABLEHNUNG (unbekannte Zertifizierungsstelle).")
-    print("  Wenn holes hier eine Seite anzeigt, ist die Pruefung kaputt.")
+    print("  https://10.0.2.2:%d/...   SELBST AUSGESTELLTES Zertifikat" % argumente.port)
+    print("      -> MUSS abgelehnt werden (unbekannte Zertifizierungsstelle)")
+    print("  http://10.0.2.2:%d/...    derselbe Server im Klartext" % argumente.klarport)
+    print("      /klein.txt      %d Byte" % len(KLEIN))
+    print("      /gross.bin      %d Byte" % GROSS_BYTES)
+    print("      /html           eine Seite fuer `news`")
+    print("      /chunked        chunked kodiert")
+    print("      /weiter1        -> /weiter2 -> /klein.txt")
+    print("      /nach-tls       -> https://10.0.2.2:%d/klein.txt (Schema-Wechsel)" % argumente.port)
+    print("      /schleife       -> sich selbst          (Schleifenschutz)")
+    print("      /ringelreihen   -> und zurueck          (Schleifenschutz)")
+    print("      /kette          10 Weiterleitungen      (Zaehler-Grenze)")
+    print("      /abbruch        kappt die Leitung MITTEN im Rumpf")
+    print("      /endlos         sendet ohne Ende        (Groessenlimit)")
+    print("  10.0.2.2:%d              nimmt an und schweigt (Handshake-Timeout)"
+          % argumente.stummport)
     print("=" * 70)
     try:
-        server.serve_forever()
+        while True:
+            time.sleep(3600)
     except KeyboardInterrupt:
         print("\n  beendet.")
 

@@ -121,6 +121,13 @@ path = "src/bin/tlsspike.rs"
 name = "holes"
 path = "src/bin/holes.rs"
 
+# Der Beweis, dass die Abrufschicht traegt (Serie 7, Teil 5): eine Seite
+# holen und als Text zeigen. Der Netz-Teil sind drei Zeilen; der Rest ist
+# Textaufbereitung. AUSDRUECKLICH KEIN HTML-Renderer.
+[[bin]]
+name = "news"
+path = "src/bin/news.rs"
+
 # panic = "abort" ist Pflicht: Abwickeln (unwinding) bräuchte eine
 # Personality-Funktion und Landing Pads — beides gibt es ohne std nicht.
 # Ein panickendes SpeedOS-Programm beendet sich per exit(101).

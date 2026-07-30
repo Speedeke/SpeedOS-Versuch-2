@@ -1653,10 +1653,82 @@ impl Befehl for Nslookup {
     }
 }
 
-/// hole — laedt eine http-Ressource ueber den eigenen Netz-Stack (Socket-API
-/// -> HTTP-Client). Aufruf: hole <url> [zieldatei]
-/// Ohne Zieldatei wird Text direkt angezeigt; mit Zieldatei wandert der Rumpf
-/// aufs Dateisystem (z. B. nach /platte) — Netz und Persistenz zusammen.
+/// hole — DIE EINE ADRESSE FÜR „lade mir das".
+///
+/// ==========================================================================
+/// EIN BEFEHL, ZWEI WEGE — und der Benutzer muss nicht wissen, welcher
+///
+/// SpeedOS kann http im KERNEL (Serie 5) und https in RING 3 (Serie 7). Das
+/// ist eine Architektur-Entscheidung und keine Laune: Ein Fehler in 30k
+/// Zeilen fremdem TLS-Code soll einen Prozess treffen, nicht den Kernel
+/// (docs/tls-entscheidung.md). Nur — den Benutzer geht das nichts an. Er
+/// tippt eine Adresse.
+///
+/// Also entscheidet dieser Befehl:
+///   * `http://…`  -> der Kernel-Klient. Kein Prozess, kein TLS, schnell.
+///   * `https://…` -> das Ring-3-Programm `holes`, Ausgabe durchgereicht.
+///   * schemalos   -> https (2026 ist Klartext die Ausnahme).
+///   * **http, das auf https weiterleitet** -> der Kernel-Klient meldet das
+///     ausgerechnete Ziel (`KlientFehler::BrauchtTls`), und wir übergeben
+///     mitten im Lauf an Ring 3. Dieser Fall ist im heutigen Web der
+///     Normalfall, nicht die Ausnahme.
+///
+/// ZIELDATEI: Ein Name ohne `/` landet im Zuhause (`/platte/heim`), alles
+/// andere wird wie gewohnt gegen das aktuelle Verzeichnis aufgelöst.
+/// Löst eine Zieldatei auf: ein blosser Name landet im ZUHAUSE, alles mit
+/// `/` wie gewohnt gegen das aktuelle Verzeichnis.
+///
+/// `hole example.com seite.html` soll nicht davon abhängen, wo man gerade
+/// steht — heruntergeladene Dateien gehören ins Zuhause. Wer es anders will,
+/// schreibt einen Pfad hin, und dann gilt der.
+fn ziel_im_zuhause(kontext: &ShellKontext, wunsch: &str) -> String {
+    if wunsch.contains('/') {
+        kontext.aufloesen(wunsch)
+    } else {
+        fs::pfad_anhaengen(crate::explorer::start_ordner(), wunsch)
+    }
+}
+
+/// Übergibt den Abruf an das Ring-3-Programm `holes`.
+///
+/// Warum ein PROZESS und nicht eine Kernel-Funktion: Weil TLS im User-Space
+/// lebt und dort bleiben soll. Die Shell startet dafür kein Sonderkonstrukt,
+/// sondern benutzt dieselbe Pipeline-Maschinerie wie `starte` — inklusive
+/// Ausgabe-Durchreichung, Strg+C und Exit-Code.
+fn an_ring3_uebergeben(
+    kontext: &mut ShellKontext,
+    url: &str,
+    zieldatei: Option<&str>,
+    von_http: Option<&str>,
+) {
+    if let Some(vorher) = von_http {
+        konsole::set_color(Color::Yellow, Color::Black);
+        println!("{} leitet auf https weiter — uebernommen von `holes`:", vorher);
+        konsole::set_color(Color::LightGray, Color::Black);
+    }
+    if !crate::scheduler::aktiv() {
+        println!("Fuer https braucht es einen Prozess, und der Scheduler ist nicht aktiv.");
+        return;
+    }
+    // Der Abruf läuft im Programm `holes` — die Adresse steht dabei in der
+    // Kommandozeile, also darf sie keine Leerzeichen enthalten. URLs haben
+    // keine (und wenn doch, wäre die Adresse ohnehin kaputt).
+    if url.split_whitespace().count() != 1 {
+        println!("Die Adresse darf keine Leerzeichen enthalten.");
+        return;
+    }
+    let mut zeile = alloc::format!("holes {}", url);
+    if let Some(ziel) = zieldatei {
+        if ziel.split_whitespace().count() != 1 {
+            println!("Der Zielpfad darf keine Leerzeichen enthalten.");
+            return;
+        }
+        zeile.push(' ');
+        zeile.push_str(ziel);
+    }
+    pipeline_ausfuehren(kontext, &zeile);
+}
+
 struct Hole;
 
 impl Befehl for Hole {
@@ -1664,7 +1736,7 @@ impl Befehl for Hole {
         "hole"
     }
     fn beschreibung(&self) -> &'static str {
-        "Laedt eine http-Seite: hole <url> [zieldatei]"
+        "Laedt eine Seite (http UND https): hole <url> [zieldatei]"
     }
     fn ausfuehren(&self, argumente: &str, kontext: &mut ShellKontext, _registry: &[Box<dyn Befehl>]) {
         if keine_nic() {
@@ -1675,29 +1747,43 @@ impl Befehl for Hole {
             Some(u) => u,
             None => {
                 println!("Benutzung: hole <url> [zieldatei]");
-                println!("  Beispiele: hole http://example.com");
-                println!("             hole http://10.0.2.2:8000/datei.txt /platte/heim/datei.txt");
+                println!("  hole example.com                       (ohne Schema: https)");
+                println!("  hole https://example.com seite.html    (-> /platte/heim/seite.html)");
+                println!("  hole http://10.0.2.2:8000/datei.txt /platte/heim/datei.txt");
                 return;
             }
         };
-        let zieldatei = teile.next();
+        let zieldatei = teile.next().map(|wunsch| ziel_im_zuhause(kontext, wunsch));
 
-        println!("Hole {} ...", url_text);
-        let (end_url, antwort) = match crate::netz::http::holen(url_text) {
-            Ok(paar) => paar,
+        // --- Schema erkennen (EINE getestete Stelle: speedhttp) ---
+        let ziel = match crate::netz::http::ziel_parsen(url_text) {
+            Ok(ziel) => ziel,
             Err(fehler) => {
                 konsole::set_color(Color::LightRed, Color::Black);
                 println!("Fehler: {}", fehler.meldung());
                 konsole::set_color(Color::LightGray, Color::Black);
-                // TLS gibt es in SpeedOS, aber in RING 3 und nicht im Kernel
-                // (docs/tls-entscheidung.md). Der Hinweis steht hier in der
-                // Bedienoberflaeche — der Parser kennt `holes` nicht.
-                if fehler.ist_tls_absage() {
-                    println!("Fuer https gibt es das Ring-3-Programm:");
-                    konsole::set_color(Color::LightCyan, Color::Black);
-                    println!("  starte holes {}", url_text);
-                    konsole::set_color(Color::LightGray, Color::Black);
-                }
+                return;
+            }
+        };
+        if ziel.tls {
+            // Direkt der Ring-3-Weg.
+            an_ring3_uebergeben(kontext, &ziel.als_text(), zieldatei.as_deref(), None);
+            return;
+        }
+
+        println!("Hole {} ...", url_text);
+        let (end_url, antwort) = match crate::netz::http::holen(url_text) {
+            Ok(paar) => paar,
+            // DIE ÜBERGABE: Der Server hat auf https weitergeleitet.
+            Err(fehler) if fehler.tls_ziel().is_some() => {
+                let neu = String::from(fehler.tls_ziel().expect("gerade geprüft"));
+                an_ring3_uebergeben(kontext, &neu, zieldatei.as_deref(), Some(url_text));
+                return;
+            }
+            Err(fehler) => {
+                konsole::set_color(Color::LightRed, Color::Black);
+                println!("Fehler: {}", fehler.meldung());
+                konsole::set_color(Color::LightGray, Color::Black);
                 return;
             }
         };
@@ -1723,9 +1809,9 @@ impl Befehl for Hole {
         println!("Rumpf: {} Byte", antwort.rumpf.len());
 
         match zieldatei {
-            // Speichern (Netz + Persistenz zusammen).
-            Some(datei) => {
-                let pfad = kontext.aufloesen(datei);
+            // Speichern (Netz + Persistenz zusammen). Der Pfad ist schon
+            // aufgeloest — `ziel_im_zuhause` hat das erledigt.
+            Some(pfad) => {
                 match fs::mit_fs(|f| f.schreiben(&pfad, &antwort.rumpf)) {
                     Ok(()) => {
                         // "Gespeichert" heisst "auf dem Medium" -> sync.

@@ -457,6 +457,16 @@ impl TlsFehler {
 // DER VERTRAUENSANKER
 // ===========================================================================
 
+/// Wo der Vertrauensanker liegen kann (Serie 7, Teil 2).
+///
+/// ZWEI Orte, in dieser Reihenfolge — das ist die Ring-3-Entsprechung von
+/// `fs::persistenter_pfad` im Kernel: Ist eine Platte gemountet, liegt das
+/// Buendel dort; ohne Platte (Live-USB, RAM-VFS) unter /system. Ein
+/// festverdrahtetes /platte/... liesse ein Programm beim USB-Boot ohne
+/// Vertrauensanker dastehen — und das saehe nicht wie ein fehlendes Buendel
+/// aus, sondern wie ein kaputtes TLS.
+pub const BUENDEL_ORTE: &[&str] = &["/platte/system/ca-bundle.pem", "/system/ca-bundle.pem"];
+
 /// Das Ergebnis des Wurzel-Ladens.
 pub struct Wurzelbestand {
     /// Wie viele PEM-Bloecke unser Parser lesen konnte.
@@ -516,6 +526,33 @@ pub fn konfig_bauen(wurzeln: rustls::RootCertStore) -> Result<Arc<rustls::Client
         .with_root_certificates(wurzeln)
         .with_no_client_auth();
     Ok(Arc::new(konfig))
+}
+
+/// Laedt den Vertrauensanker vom Datentraeger und baut die ClientConfig.
+///
+/// Der bequeme Weg: Puffer auf dem Heap, Orte aus `BUENDEL_ORTE`. Wer die
+/// ~190 KiB Datei NICHT auf dem Heap haben will (weil er dessen Spitze
+/// misst), laedt selbst und nimmt `konfig_bauen` — `holes` tut genau das.
+///
+/// Der Datei-Puffer wird beim Verlassen wieder frei: `RootCertStore`
+/// behaelt nur die Vertrauensanker (Name, Schluessel, Namensgrenzen), nicht
+/// die vollstaendigen Zertifikate.
+pub fn konfig_vom_datentraeger() -> Result<Arc<rustls::ClientConfig>, TlsFehler> {
+    let mut wurzeln = rustls::RootCertStore::empty();
+    let mut gefunden = false;
+    for ort in BUENDEL_ORTE {
+        let Ok(inhalt) = crate::netz::datei_lesen(ort) else {
+            continue;
+        };
+        let mut arbeitspuffer = alloc::vec![0u8; crate::pem::MAX_DER_BYTES];
+        wurzeln_laden(&inhalt, &mut arbeitspuffer, &mut wurzeln);
+        gefunden = true;
+        break;
+    }
+    if !gefunden {
+        return Err(TlsFehler::KeineWurzeln);
+    }
+    konfig_bauen(wurzeln)
 }
 
 // ===========================================================================

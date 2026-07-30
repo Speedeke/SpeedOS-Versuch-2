@@ -231,6 +231,71 @@ Bedarf von TLS. Der reine TLS-Anteil ist die 121 KiB der kleinen Seite.
 
 ---
 
+## 6a. Teil 5: aus der Demo wird eine Systemfähigkeit
+
+Teil 4 konnte TLS — aber nur `holes` konnte es. Teil 5 zieht den Ablauf eine
+Schicht tiefer, damit ihn jedes Programm benutzen kann.
+
+```
+  holes    news    (Serie 8: der Browser)
+     \       |      /
+      libspeed::netz::Klient      <- „hol mir diese URL", EINMAL
+             |
+      Strom { Klar(TcpStrom) | Sicher(TlsStrom) }
+             |
+      libspeed::tls  /  die Socket-Syscalls
+```
+
+Der Netz-Teil eines Programms sieht seitdem so aus:
+
+```rust
+let mut klient = Klient::neu();
+klient.max_bytes = 512 * 1024;
+let abruf = klient.holen("https://example.com/")?;
+```
+
+**`Strom` ist die Stelle, an der der Unterschied verschwindet.** Darüber
+kennt der HTTP-Teil nur `lesen`/`schreiben` — dass unter dem einen Zweig ein
+Handshake steckt und unter dem anderen nichts, ist eine Frage der
+Verbindungsaufnahme, nicht des Protokolls darüber.
+
+### Der eine Fall, der wiederholt wird
+
+`AbrufFehler::LeereAntwort` — Verbindung angenommen, null Bytes, sofort zu.
+Ein GET, bei dem nichts ankam, ist gefahrlos wiederholbar; es kann nichts
+zweimal passiert sein. **Alles andere wird nie wiederholt**, insbesondere kein
+Zertifikatsfehler: Das wäre ein Angreifer, der es einfach nochmal versucht.
+
+Woher der Fall kommt, ist **nicht geklärt** und deshalb so notiert:
+
+| gemessen | Ergebnis |
+|---|---|
+| derselbe Server, vom Host aus | 15 / 15 sauber |
+| derselbe Server, **Kernel-Klient** im Gast (keine Prozesse, kein TLS) | 30 / 30 sauber |
+| über den **Prozess-Pfad**, schnelle Serien | einige Fehlschläge je Lauf |
+
+Es liegt also nicht an TCP. Ein Teil war der Testkernel selbst — endet ein
+Prozess, muss den TCP-Abbau seiner Sockets *jemand zu Ende pumpen*, und ohne
+Executor tut das niemand. Das hat die Läufe beruhigt, aber nicht beseitigt.
+Wer daran weiterarbeitet, fängt bei
+`tests/netz_klient.rs::test_fluechtige_fehlschlaege_zaehlen` an.
+
+### Robustheit, gemessen
+
+| Fall | Grund | Dauer |
+|---|---|---|
+| Server kappt mitten im Rumpf | `http` (unvollständig) | 24 ms |
+| Server sendet ohne Ende, Limit 100 KB | `zu-gross` | 28 ms |
+| Gegenstelle nimmt an und schweigt | `frist` | 8023 ms (Frist 8000) |
+| DNS liefert nichts | `dns` | 52 ms |
+| Weiterleitung auf sich selbst / im Ring | `schleife` | 25 ms |
+| zehn Weiterleitungen | `zu-viele-weiterleitungen` | — |
+| Kabel weg mitten im Download | Fehler in Frist, Stack erholt sich | — |
+
+Danach: Sockets byte-exakt gleich, Frame-Differenz 0.
+
+---
+
 ## 7. Was als Nächstes ansteht
 
 * **`close_notify` erzwingen**, sobald die Gegenstelle es schickt — heute

@@ -401,3 +401,155 @@ pub fn anfrage_bauen_mit_host(url: &Url, host_kopf: &str) -> String {
         pfad: url.pfad.clone(),
     })
 }
+
+// ===========================================================================
+// SCHEMA-BEWUSSTE ZIELE (Serie 7, Teil 5)
+// ===========================================================================
+//
+// Bis Teil 4 hat sich JEDER Aufrufer das Schema selbst abgeschnitten:
+// `holes` tat es, der Kernel-Klient tat es anders, und die Standard-Ports
+// (80 gegen 443) standen an drei Stellen. Das ist genau die Sorte
+// Verdopplung, die irgendwann auseinanderlaeuft — deshalb jetzt EINE
+// getestete Stelle.
+//
+// `Ziel` ist bewusst `Url` PLUS ein Bit, statt eines neuen URL-Typs: Der
+// ganze Rest des Parsers arbeitet auf `Url`, und der soll so bleiben, wie
+// er seit Serie 5 ist. Die Serie-5-Funktionen `url_parsen`/`naechste_url`
+// bleiben unveraendert und lehnen `https://` weiterhin ab — sie sind der
+// Unterbau, nicht die Fassade.
+
+/// Ein Abruf-Ziel: wohin, und ob verschluesselt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ziel {
+    /// `true` = https (TLS), `false` = http.
+    pub tls: bool,
+    /// Host, Port und Pfad. Der Port ist IMMER gesetzt (80 bzw. 443).
+    pub url: Url,
+}
+
+impl Ziel {
+    /// Das Ziel wieder als Text — die Umkehrung von `ziel_parsen`.
+    ///
+    /// Der Port wird weggelassen, wenn er der Standard des Schemas ist.
+    /// Diese Form ist auch der SCHLUESSEL fuer den Schleifenschutz: Zwei
+    /// Weiterleitungen auf dieselbe Stelle ergeben denselben Text.
+    pub fn als_text(&self) -> String {
+        let schema = if self.tls { "https" } else { "http" };
+        if self.port_ist_standard() {
+            format!("{}://{}{}", schema, self.url.host, self.url.pfad)
+        } else {
+            format!(
+                "{}://{}:{}{}",
+                schema, self.url.host, self.url.port, self.url.pfad
+            )
+        }
+    }
+
+    /// Ist der Port der Standard des Schemas (80 bzw. 443)?
+    pub fn port_ist_standard(&self) -> bool {
+        self.url.port == standard_port(self.tls)
+    }
+
+    /// Der Text fuer den `Host:`-Kopf: Der Standard-Port gehoert NICHT hinein.
+    pub fn host_kopf(&self) -> String {
+        if self.port_ist_standard() {
+            self.url.host.clone()
+        } else {
+            format!("{}:{}", self.url.host, self.url.port)
+        }
+    }
+
+    /// Baut die GET-Anfrage fuer dieses Ziel.
+    pub fn anfrage(&self) -> String {
+        anfrage_bauen_mit_host(&self.url, &self.host_kopf())
+    }
+}
+
+/// Der Standard-Port eines Schemas.
+pub fn standard_port(tls: bool) -> u16 {
+    if tls {
+        443
+    } else {
+        80
+    }
+}
+
+/// Zerlegt `http://…` oder `https://…` in ein `Ziel`.
+///
+/// OHNE SCHEMA wird **https** angenommen. Das ist eine bewusste Umkehrung
+/// gegenueber `url_parsen` (dort ist es http): 2026 ist unverschluesselt die
+/// Ausnahme, und wer `hole example.com` tippt, meint nicht „bitte im
+/// Klartext". Wer wirklich http will, schreibt es hin.
+///
+/// Der Port ist danach IMMER gesetzt: der angegebene, sonst 80 bzw. 443.
+pub fn ziel_parsen(text: &str) -> Result<Ziel, HttpFehler> {
+    let t = text.trim();
+    let (tls, rest) = if let Some(rest) = t.strip_prefix("https://") {
+        (true, rest)
+    } else if let Some(rest) = t.strip_prefix("http://") {
+        (false, rest)
+    } else if t.contains("://") {
+        return Err(HttpFehler::UngueltigeUrl); // fremdes Schema
+    } else {
+        (true, t)
+    };
+    ziel_aus_autoritaet(tls, rest)
+}
+
+/// Der gemeinsame Rumpf von `ziel_parsen` und `naechstes_ziel`: `rest` ist
+/// alles HINTER dem Schema, also `host[:port][/pfad]`.
+fn ziel_aus_autoritaet(tls: bool, rest: &str) -> Result<Ziel, HttpFehler> {
+    if rest.is_empty() {
+        return Err(HttpFehler::UngueltigeUrl);
+    }
+    // HIER LAEUFT DIE SERIE-5-ZERLEGUNG: `url_parsen` nimmt schemalose
+    // Eingaben an und kann Host, Port und Pfad. Sie wird NICHT nachgebaut.
+    let mut url = url_parsen(rest)?;
+    // `url_parsen` setzt mangels Schema 80 ein, wenn kein Port dastand.
+    // Ob wirklich einer dastand, sieht man nur am Text — also nachsehen.
+    let autoritaet = rest.split('/').next().unwrap_or("");
+    if !autoritaet.contains(':') {
+        url.port = standard_port(tls);
+    }
+    Ok(Ziel { tls, url })
+}
+
+/// Loest ein `Location:`-Ziel gegen das aktuelle auf — **inklusive
+/// Schema-Wechsel**.
+///
+/// ==========================================================================
+/// WARUM DAS EINE EIGENE FUNKTION IST UND NICHT `naechste_url`
+///
+/// `naechste_url` (Serie 5) lehnt eine absolute `https://`-Weiterleitung ab,
+/// weil sie fuer einen Klienten ohne TLS geschrieben wurde. In der Praxis
+/// ist http -> https aber der NORMALFALL: Fast jeder Server antwortet auf
+/// http mit `301 Location: https://…`. Ein Klient, der das nicht mitgeht,
+/// kommt im heutigen Web nirgends an.
+///
+/// Diese Funktion geht ihn mit — und benutzt fuer die beiden anderen Faelle
+/// (absoluter Pfad, relativer Pfad) das unveraenderte `naechste_url`.
+/// ==========================================================================
+pub fn naechstes_ziel(basis: &Ziel, location: &str) -> Result<Ziel, HttpFehler> {
+    let ort = location.trim();
+    if ort.is_empty() {
+        return Err(HttpFehler::UngueltigeUrl);
+    }
+    // Absolut mit Schema: neues Ziel, neues Schema.
+    if let Some(rest) = ort.strip_prefix("https://") {
+        return ziel_aus_autoritaet(true, rest);
+    }
+    if let Some(rest) = ort.strip_prefix("http://") {
+        return ziel_aus_autoritaet(false, rest);
+    }
+    if ort.contains("://") {
+        return Err(HttpFehler::UngueltigeUrl); // fremdes Schema
+    }
+    // Alles Uebrige ist schema-los und damit Sache der Serie-5-Funktion:
+    // absoluter Pfad (/…) oder relativ zum Verzeichnis der Basis. Schema,
+    // Host und Port bleiben, wie sie sind.
+    let url = naechste_url(&basis.url, ort)?;
+    Ok(Ziel {
+        tls: basis.tls,
+        url,
+    })
+}

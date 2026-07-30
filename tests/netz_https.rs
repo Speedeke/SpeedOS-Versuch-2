@@ -31,7 +31,9 @@
 //
 // VORBEREITUNG fuer den vollstaendigen Lauf:
 //     python tools/tls_testserver.py
-//     python -m http.server 8000      (fuer den Parser-Vergleich, optional)
+//
+// (Der Testserver bringt seit Serie 7, Teil 5 einen Klartext-Port auf
+//  8080 mit — ein zweiter Server ist nicht mehr noetig.)
 
 #![no_std]
 #![no_main]
@@ -98,10 +100,10 @@ const FRIST_MS: u64 = 180_000;
 
 /// Der lokale Testserver (der Host, wie slirp ihn dem Gast zeigt).
 const SELBST_SIGNIERT: &str = "https://10.0.2.2:8443/klein.txt";
-const LAN_HTTP: &str = "http://10.0.2.2:8000/probe.txt";
+const LAN_HTTP: &str = "http://10.0.2.2:8080/klein.txt";
 /// Dieselbe Datei wie `ECHT_GROSS`, aber lokal und OHNE TLS — der
 /// Vergleichswert fuer die Durchsatz-Messung.
-const LAN_GROSS: &str = "http://10.0.2.2:8000/gross.pem";
+const LAN_GROSS: &str = "http://10.0.2.2:8080/gross.bin";
 
 /// Die einfache, bekannte HTTPS-Seite.
 const ECHT_KLEIN: &str = "https://example.com/";
@@ -185,6 +187,13 @@ fn starten_und_lesen(name: &str, argumente: &[&str]) -> (Option<ProzessEnde>, St
     }
     pipe::ende_schliessen(leitung, pipe::Ende::Lesen);
     scheduler::aufraeumen();
+    // Den TCP-Abbau der Prozess-Sockets zu Ende pumpen. Im laufenden System
+    // erledigen das netz_task und Socket-Takt; ein Testkernel hat keinen
+    // Executor (ausfuehrlich in tests/netz_klient.rs).
+    for _ in 0..60 {
+        speed_os::netz::pumpen();
+        zeit::warte_auf_interrupt();
+    }
     (ende, String::from_utf8_lossy(&gesammelt).into_owned())
 }
 
@@ -231,7 +240,7 @@ fn test_selbst_signiert_wird_abgelehnt() {
     ausgabe_zeigen("holes gegen den selbst signierten Testserver", &ausgabe, &ende);
 
     if ausgabe.contains("Die Verbindung kam nicht zustande")
-        || ausgabe.contains("TCP-Verbindung fehlgeschlagen")
+        || ausgabe.contains("(verbindung)")
     {
         serial_println!(
             "  (uebersprungen: auf {} lauscht nichts — \
@@ -351,7 +360,7 @@ fn badssl_fall(url: &str, grund: &str, ueberschrift: &str) {
     let (ende, ausgabe) = starten_und_lesen("holes", &["holes", url]);
     ausgabe_zeigen(ueberschrift, &ausgabe, &ende);
 
-    if ausgabe.contains("DNS fuer") || ausgabe.contains("TCP-Verbindung fehlgeschlagen") {
+    if ausgabe.contains("DNS fuer") || ausgabe.contains("(verbindung)") {
         serial_println!("  (uebersprungen: {} nicht erreichbar)", url);
         return;
     }
@@ -444,11 +453,11 @@ fn test_kein_tls_auf_der_gegenseite() {
     }
     zufall_bereitmachen();
 
-    let (ende, ausgabe) = starten_und_lesen("holes", &["holes", "https://10.0.2.2:8000/"]);
+    let (ende, ausgabe) = starten_und_lesen("holes", &["holes", "https://10.0.2.2:8080/"]);
     ausgabe_zeigen("FEHLERFALL: https gegen einen http-Server", &ausgabe, &ende);
 
-    if ausgabe.contains("TCP-Verbindung fehlgeschlagen") {
-        serial_println!("  (uebersprungen: auf 10.0.2.2:8000 lauscht nichts)");
+    if ausgabe.contains("(verbindung)") {
+        serial_println!("  (uebersprungen: auf 10.0.2.2:8080 lauscht nichts)");
         return;
     }
     assert_eq!(ende, Some(HOLES_TLS), "das haette abbrechen muessen");
@@ -625,7 +634,7 @@ fn vergleich_ohne_tls() {
         }
         Err(fehler) => serial_println!(
             "  VERGLEICH ohne TLS: nicht moeglich ({}) — \
-             `python -m http.server 8000` mit gross.pem im Ordner starten.",
+             `python tools/tls_testserver.py` starten.",
             fehler.meldung()
         ),
     }

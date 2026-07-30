@@ -16,6 +16,17 @@ Vertrauensanker geprüft (119 Wurzeln), Hostname abgeglichen — und darüber
 HTTP/1.1 mit **demselben Parser, den auch der Kernel benutzt**.
 Details: [`docs/tls-verbindung.md`](docs/tls-verbindung.md).*
 
+![hole waehlt den Weg selbst](docs/screenshots/serie7-hole-vereinheitlicht.png)
+*Und seit Serie 7, Teil 5 muss man das nicht mehr wissen: `hole example.com`
+erkennt, dass hier https gemeint ist, übergibt an das Ring-3-Programm und
+zeigt Status, Header und Inhalt. http bleibt im Kernel, https läuft in
+Ring 3 — die Entscheidung trifft der Befehl.*
+
+![news](docs/screenshots/serie7-news.png)
+*`starte news https://example.com` — dieselbe Abrufschicht
+(`libspeed::netz`), drei Zeilen Netz-Code, und eine Seite als Text. Noch
+**kein** HTML-Renderer; der Vorgeschmack auf Serie 8.*
+
 ![Abgelehnt](docs/screenshots/serie7-https-abgelehnt.png)
 *Und die andere Hälfte, die erst beweist, dass wirklich geprüft wird: ein
 selbst ausgestelltes Zertifikat wird abgelehnt, mit Begründung. **Es gibt
@@ -284,7 +295,10 @@ userland/            DIE ANDERE SEITE DER GRENZE — eigener Workspace ohne
 │                    jede Kernel-Abhängigkeit:
 ├── src/lib.rs       libspeed: Syscall-Wrapper, print!, Panic, _start
 ├── src/tls.rs       TcpStrom + TlsStrom (rustls), SpeedUhr, deutsche Fehler
-├── src/bin/         hallo, kopiere, netzhole, holes, zaehle, filter, ...
+├── src/netz.rs      DIE ABRUFSCHICHT: „hol mir diese URL" (http wie https,
+│                    Weiterleitungen, Frist, Groessenlimit) — der Unterbau
+│                    des Browsers aus Serie 8
+├── src/bin/         hallo, kopiere, netzhole, holes, news, zaehle, filter, ...
 └── speedos.ld       Linker-Skript (ET_EXEC ab 0x80_0000_0000, 4-KiB-Segmente)
 speedhttp/           DER HTTP-PARSER, ohne jeden Transport und ohne jede
                      Abhängigkeit — benutzt vom Kernel (über TCP) UND von
@@ -306,10 +320,11 @@ starte hallo                       # Text + argv + PID, Exit-Code 0
 starte hallo --code=7              # beweist, dass Exit-Codes durchkommen
 starte kopiere /platte/heim/a.txt /platte/heim/b.txt
 starte netzhole http://example.com          # der Meilenstein von Serie 6
-starte netzhole http://example.com /platte/heim/seite.html
 starte holes https://example.com/           # DER MEILENSTEIN VON SERIE 7
 starte holes https://example.com/ --info    # Version, Ciphersuite, Kette
-starte holes https://example.com/ /platte/heim/seite.html
+starte news https://example.com             # die Seite als Text im Terminal
+hole example.com                            # waehlt http/https selbst
+hole example.com seite.html                 # -> /platte/heim/seite.html
 starte zaehle 20 | filter 7        # eine echte PIPELINE -> 7, 17
 starte zaehle 100 50               # laeuft lange — Strg+C beendet es
 starte elternprobe 500             # ein Prozess startet ein Kind (Ring 3)

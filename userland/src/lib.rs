@@ -112,6 +112,9 @@ pub const STAT_BYTES: usize = 32;
 // ---------------------------------------------------------------------------
 
 pub mod heap;
+/// Die wiederverwendbare Abruf-Schicht (Serie 7, Teil 5): „hol mir diese
+/// URL" — http wie https, mit Weiterleitungen, Frist und Groessenlimit.
+pub mod netz;
 pub mod pem;
 pub mod tls;
 
