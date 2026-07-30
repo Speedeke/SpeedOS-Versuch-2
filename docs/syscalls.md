@@ -1,9 +1,10 @@
 # Die Syscall-ABI von SpeedOS
 
-Stand: Juli 2026, **Serie 6 abgeschlossen**. Dieses Dokument ist die
+Stand: Juli 2026, **Serie 8, Teil 1**. Dieses Dokument ist die
 Schnittstelle zwischen Kernel und User-Space.
 
-Die ABI umfasst **31 Syscalls** in drei Gruppen. Sie ist unter Feuer
+Die ABI umfasst **36 Syscalls** in vier Gruppen (Prozess/Ausgabe, Dateien,
+Netz, Fenster). Sie ist unter Feuer
 geprüft: `tests/sicherheit.rs` lässt ein absichtlich böswilliges Programm
 (`userland/angreifer`) systematisch dagegen anrennen — jeder Versuch endet
 mit einem Fehlercode oder dem Tod des Angreifers, nie mit einem Schaden am
@@ -81,6 +82,10 @@ zusätzlich `WRITABLE`).
 | Datenpuffer je Aufruf | 65 536 Byte | `MAX_PUFFER` |
 | Datei-Offset | 1 GiB | (`datei::usize_aus`) |
 | Handles je Prozess | 32 | `handle::MAX_HANDLES` |
+| Fenster-Breite | 16 .. 4096 | `fenster::MAX_FENSTER_BREITE` |
+| Fenster-Höhe | 16 .. 2304 | `fenster::MAX_FENSTER_HOEHE` |
+| Fenstertitel | 64 Byte | `fenster::MAX_TITEL` |
+| Wartende Fenster-Ereignisse | 64 | `prozessfenster::MAX_EREIGNISSE` |
 
 ---
 
@@ -368,6 +373,86 @@ Fehler des Aufrufers.
   Der Aufrufer ruft nochmal — statt dass der Kernel intern schleift und dabei
   unbegrenzt blockiert.
 - **`aufloesen` BLOCKIERT** (bis 3 Versuche à 1,2 s, siehe `netz::dns`).
+
+---
+
+## 6b. Gruppe 3 — Fenster (Serie 8, Teil 1)
+
+Ab hier kann ein Ring-3-Prozess ein **Fenster besitzen**. Entwurf,
+Begründungen und die Messzahlen: `docs/fenster-syscalls.md`.
+
+| Nr | Name | Argumente | Rückgabe | Fehler |
+|---:|---|---|---|---|
+| 48 | `fenster_oeffnen` | `titel_ptr, titel_len, breite, hoehe` | Handle | 2, 3, 4, 6, 18 |
+| 49 | `fenster_zeichnen` | `handle, pixel_ptr, len, rechteck` | gesetzte Pixel | 2, 3, 4, 5, 7 |
+| 50 | `fenster_ereignis` | `handle, ziel_ptr, frist_ms` | Ereignis-Art | 3, 5, 7 |
+| 51 | `fenster_titel_setzen` | `handle, titel_ptr, titel_len` | 0 | 2, 3, 4, 5, 7 |
+| 52 | `fenster_schliessen` | `handle` | 0 | 2, 5 |
+
+`fenster_schliessen` tut genau dasselbe wie `schliesse` (19) auf einem
+Fenster-Handle — es gibt die Nummer, damit der Name in einem
+Fenster-Programm lesbar ist.
+
+**Grenzen:** Breite 16..4096, Höhe 16..2304, Titel ≤ 64 Byte (und ohne
+Steuerzeichen — die Titelleiste gehört dem Kernel). Ohne laufenden
+Fenster-Manager liefert `fenster_oeffnen` `NichtKonfiguriert` (18).
+
+### Das gepackte Rechteck (Argument 3 von `fenster_zeichnen`)
+
+```
+(x << 48) | (y << 32) | (breite << 16) | hoehe        — je 16 Bit
+```
+
+`len` **muss genau** `breite × hoehe × 4` sein. Ein Rechteck, das über den
+Fensterrand hinausragt, wird **geklemmt** (die Rückgabe sagt, wie viele
+Pixel wirklich gesetzt wurden); eines ganz ausserhalb ist ein Fehler.
+Begründung: `docs/fenster-syscalls.md` §2.
+
+### Das Pixelformat
+
+4 Byte je Pixel: **Byte 0 = Blau, Byte 1 = Grün, Byte 2 = Rot, Byte 3
+ungenutzt.** Als Little-Endian-`u32` gelesen ist das `0x00RRGGBB`.
+
+### `EreignisDaten` (16 Byte, geschrieben von `fenster_ereignis`)
+
+| Offset | Grösse | Feld | Bedeutung |
+|---:|---:|---|---|
+| 0 | 4 | `art` | siehe Tabelle unten |
+| 4 | 4 | `x` | Maus-X (**fensterlokal**) bzw. neue Breite |
+| 8 | 4 | `y` | Maus-Y (fensterlokal) bzw. neue Höhe |
+| 12 | 4 | `wert` | Maustaste, Rad-Delta, Unicode-Zeichen, Sondertaste, Fokus-Flag |
+
+| `art` | Bedeutung | `x`/`y` | `wert` |
+|---:|---|---|---|
+| 0 | **Keins** — die Frist lief ab (kein Fehler!) | – | – |
+| 1 | Maus bewegt | Position | – |
+| 2 | Maustaste gedrückt | Position | 0 links, 1 rechts, 2 mitte |
+| 3 | Maustaste losgelassen | Position | wie oben |
+| 4 | Mausrad | Position | Delta (positiv = hoch) |
+| 5 | Taste | – | Unicode-Codepoint |
+| 6 | Sondertaste | – | 1 hoch, 2 runter, 3 links, 4 rechts, 5 Pos1, 6 Ende, 7 Bild↑, 8 Bild↓, 9 Entf, 20..31 F1..F12 |
+| 7 | Fokus | – | 1 bekommen, 0 verloren |
+| 8 | **Grösse** | neue Breite/Höhe | – |
+| 9 | **Schliessen-Wunsch** | – | – |
+
+### Drei Zusagen der Ereignis-Schicht
+
+- **`fenster_ereignis` BLOCKIERT** bis zu `frist_ms` (0 = Standardfrist 1 s,
+  Obergrenze 10 s). Eine abgelaufene Frist liefert `Keins` und **keinen
+  Fehler** — ein Programm, dessen Normalfall ein Fehlercode wäre, schreibt
+  seine Schleife falsch herum.
+- **Grösse und Schliessen gehen nie verloren**, auch nicht bei voller
+  Warteschlange: Sie sind Felder, keine Queue-Einträge. Die Eingabe-Queue ist
+  auf 64 gedeckelt, Mausbewegungen verschmelzen, Verworfenes wird gezählt.
+- **Nach `Grösse` ist der Fenster-Puffer LEER.** Der Kernel hat ihn neu
+  angelegt; wer nicht neu zeichnet, sieht nichts.
+
+### Was der Prozess NICHT bekommt
+
+Seine Bildschirmposition, ein eigenes Icon, das Verschieben/Maximieren seines
+Fensters, Modifikatortasten, Doppelklick-Erkennung und die Zwischenablage.
+Die Geometrie und die Dekoration gehören dem Fenster-Manager — ein Programm
+soll sich in der Titelleiste nicht als etwas anderes ausgeben können.
 
 ---
 

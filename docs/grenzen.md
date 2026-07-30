@@ -173,9 +173,23 @@ Keine Threads. Kein SMP — SpeedOS läuft auf **einem** Kern.
 
 ## 6. Oberfläche
 
-* Die Fenster- und Widget-Schicht lebt **im Kernel**. Ein User-Space-Prozess
-  kann kein Fenster besitzen — das ist genau die Naht, die Serie 8 aufmachen
-  muss (`docs/serie8-bestandsaufnahme.md`).
+* Die **Widget-Schicht** lebt im Kernel. Ein User-Space-Prozess kann seit
+  Serie 8, Teil 1 zwar ein **Fenster besitzen** und Pixel hineinmalen
+  (`docs/fenster-syscalls.md`), aber er bekommt keine Knöpfe, keine Listen
+  und keine Textfelder — die gibt es nur kernel-seitig. Ob das Toolkit in
+  den User-Space wandert, ist DIE offene Architekturfrage für Serie 8
+  (`docs/serie8-bestandsaufnahme.md`).
+* **Ein Fenster über den ganzen 4K-Schirm passt nicht in den User-Heap.**
+  Der Pixelpuffer eines Programms liegt auf dessen eigenem Heap, und der ist
+  auf 12 MiB gedeckelt (`prozess::HEAP_MAX_BYTES`, in der 16-MiB-Lücke
+  zwischen Programm-Image und Stack). 3840 × 2088 × 4 Byte sind **32,1 MiB**
+  — fast das Dreifache. Ein Browser bei 4K braucht deshalb entweder ein
+  grösseres Prozess-Layout (eine ABI-Änderung) oder er hält seinen Inhalt in
+  Streifen. Gemessen und ausgerechnet in `docs/fenster-syscalls.md` §6.
+* Ein Prozess-Fenster bekommt **keine Schrift vom Kernel** (die
+  vorgerasterten Fonts sind Kernel-Daten, es gibt keinen Syscall dafür),
+  **kein eigenes Icon**, **keine Zwischenablage** und **keine
+  Modifikatortasten** in der Ereignis-ABI.
 * Die Framebuffer-Konsole ist **Latin-1**: Gedankenstriche und typografische
   Anführungszeichen werden zu `?`.
 * **Der Terminal-Rückblick hat Grenzen** (Bild auf/ab, Mausrad): 1000 Zeilen
@@ -222,5 +236,6 @@ fehlen **mit Absicht**, und sie sollen fehlen:
 | TCP: Umfang, Lücken, Reißleine | `docs/tcp-scope.md` |
 | SpeedFS: Format, Ordering, fsck | `docs/speedfs-format.md` |
 | Syscall-ABI | `docs/syscalls.md` |
+| Fenster aus Ring 3, Messzahlen, Umstiegskriterium | `docs/fenster-syscalls.md` |
 | unsafe-Flächen | `docs/unsafe-audit-serie6.md`, `docs/unsafe-audit-serie7.md` |
 | Echte Hardware | `docs/hardware-log.md`, `docs/usb-boot.md` |

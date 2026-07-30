@@ -71,8 +71,12 @@ fn haupt(argumente: &Argumente) -> i32 {
             argumente.get(3).and_then(zahl_lesen).unwrap_or(9) as u16,
             argumente.get(4).and_then(zahl_lesen).unwrap_or(1000),
         ),
+        7 => fenster_kosten(
+            argumente.get(2).and_then(zahl_lesen).unwrap_or(1280) as usize,
+            argumente.get(3).and_then(zahl_lesen).unwrap_or(680) as usize,
+        ),
         _ => {
-            println!("Benutzung: {} <1..6> [argumente]", argumente.programm());
+            println!("Benutzung: {} <1..7> [argumente]", argumente.programm());
             2
         }
     }
@@ -261,6 +265,149 @@ fn abgabe_schleife() -> i32 {
     loop {
         libspeed::abgeben();
     }
+}
+
+/// MODUS 7: Was kostet `fenster_zeichnen` (Serie 8, Teil 1)?
+///
+/// ==========================================================================
+/// DIE ZAHLEN, AUF DENEN DAS UMSTIEGSKRITERIUM STEHT
+///
+/// Gemessen wird DIESELBE Operation in zwei Groessen:
+///
+///   * EIN STREIFEN (volle Breite, 16 Zeilen) — das, was eine Cursorzeile,
+///     eine Statuszeile oder eine nachgezogene Textzeile kostet.
+///   * DAS GANZE FENSTER — das, was ein Scroll oder ein Neuaufbau kostet.
+///
+/// Und getrennt davon der reine ZEICHEN-Aufwand im eigenen Puffer (ohne
+/// Syscall). Erst der Vergleich beider sagt etwas: Wenn ein Vollbild-Frame
+/// ueber ~8 ms braucht UND die KOPIE mehr als die Haelfte davon ausmacht,
+/// wird geteilter Speicher neu bewertet (docs/fenster-syscalls.md §5). Ohne
+/// die zweite Bedingung waere das Kriterium wertlos — ein langsamer Frame
+/// kann genauso gut am Malen liegen, und geteilter Speicher wuerde daran
+/// nichts aendern.
+///
+/// Die Fenstergroesse kommt als Argument, damit derselbe Lauf bei 720p und
+/// bei 4K stattfinden kann (`messung 7 1280 680`, `messung 7 3840 2100`).
+/// ==========================================================================
+fn fenster_kosten(breite: usize, gewuenschte_hoehe: usize) -> i32 {
+    use libspeed::fenster::Fenster;
+
+    // ======================================================================
+    // EIN BEFUND, DER BEIM MESSEN AUFFIEL — und der stehen bleibt:
+    //
+    // Der Pixelpuffer eines Programms liegt auf dem USER-HEAP, und der ist
+    // auf 12 MiB gedeckelt (prozess::HEAP_MAX_BYTES; er wohnt in der
+    // 16-MiB-Luecke zwischen Programm-Image und Stack). Ein Fenster in
+    // voller 4K-Groesse waere 3840 x 2100 x 4 Byte = 32,2 MiB — es PASST
+    // NICHT.
+    //
+    // Statt das zu umgehen, wird es GEMESSEN und GEMELDET: Die Hoehe wird
+    // auf das gekuerzt, was hineinpasst, und `HOEHE_GEKUERZT=1` sagt es.
+    // Der Umgang damit gehoert zu Serie 8 und steht in
+    // docs/fenster-syscalls.md §6.
+    // ======================================================================
+    const HEAP_FUER_PIXEL: usize = 10 * 1024 * 1024;
+    let max_hoehe = (HEAP_FUER_PIXEL / (breite.max(1) * 4)).max(16);
+    let hoehe = gewuenschte_hoehe.min(max_hoehe);
+    println!("HOEHE_GEKUERZT={}", (hoehe != gewuenschte_hoehe) as u8);
+    if hoehe != gewuenschte_hoehe {
+        println!("HOEHE_GEWUENSCHT={}", gewuenschte_hoehe);
+        libspeed::diagnoseln!(
+            "[messung] {}x{} braeuchte {} KiB Pixelpuffer — der User-Heap kann \
+             hoechstens {} KiB. Gekuerzt auf {}x{}.",
+            breite,
+            gewuenschte_hoehe,
+            breite * gewuenschte_hoehe * 4 / 1024,
+            HEAP_FUER_PIXEL / 1024,
+            breite,
+            hoehe
+        );
+    }
+
+    let mut f = match Fenster::oeffnen("messung", breite, hoehe) {
+        Ok(f) => f,
+        Err(fehler) => {
+            println!("FENSTER_FEHLER={}", fehler.0);
+            libspeed::diagnoseln!(
+                "[messung] Fenster {}x{} liess sich nicht oeffnen: {}",
+                breite,
+                hoehe,
+                fehler.text()
+            );
+            return 3;
+        }
+    };
+    let breite = f.breite();
+    let hoehe = f.hoehe();
+    println!("FENSTER_BREITE={}", breite);
+    println!("FENSTER_HOEHE={}", hoehe);
+
+    // --- (a) Reines MALEN im eigenen Puffer, ohne Syscall ---
+    // DIE RUNDENZAHL IST EINE MESSFRAGE, keine Geschmackssache: Die Uhr
+    // (`zeit_jetzt`) hat MILLISEKUNDEN-Aufloesung. Bei 20 Runden a 250 us
+    // waeren das 5 ms Gesamtzeit — die Aufloesung je Runde betruege 50 us,
+    // also ein Fuenftel des Messwerts. Mit 100 Runden sind es 10 us.
+    let runden = 1000u64;
+    let start = libspeed::zeit_jetzt();
+    for runde in 0..runden {
+        f.fuellen(0x102040 + runde as u32);
+    }
+    let malen_ms = libspeed::zeit_jetzt().saturating_sub(start);
+    println!("MALEN_US={}", malen_ms * 1000 / runden);
+
+    // --- (b) VOLLBILD-UEBERTRAGUNG ---
+    let start = libspeed::zeit_jetzt();
+    let mut pixel_gesamt = 0u64;
+    for _ in 0..runden {
+        pixel_gesamt += f.zeigen().unwrap_or(0);
+    }
+    let voll_ms = libspeed::zeit_jetzt().saturating_sub(start);
+    let voll_us = voll_ms * 1000 / runden;
+    println!("VOLLBILD_US={}", voll_us);
+    println!("VOLLBILD_PIXEL={}", pixel_gesamt / runden);
+
+    // --- (c) EIN STREIFEN (volle Breite, 16 Zeilen) ---
+    // Volle Breite ist der guenstigste Teilbereich: Der Ausschnitt liegt
+    // schon zusammenhaengend im Puffer, es faellt kein Umkopieren an.
+    let streifen_hoehe = 16.min(hoehe);
+    // Ein Streifen kostet nur Mikrosekunden — entsprechend mehr Runden,
+    // damit die Millisekunden-Uhr ueberhaupt etwas zu zaehlen hat.
+    let runden_streifen = 5000u64;
+    let start = libspeed::zeit_jetzt();
+    for _ in 0..runden_streifen {
+        let _ = f.zeigen_bereich(0, 0, breite, streifen_hoehe);
+    }
+    let streifen_ms = libspeed::zeit_jetzt().saturating_sub(start);
+    println!("STREIFEN_US={}", streifen_ms * 1000 / runden_streifen);
+    println!("STREIFEN_NS={}", streifen_ms * 1_000_000 / runden_streifen);
+    println!("STREIFEN_ZEILEN={}", streifen_hoehe);
+
+    // --- (d) EIN KLEINER BLOCK (32x32, also mit Umkopieren) ---
+    let block = 32.min(breite).min(hoehe);
+    let start = libspeed::zeit_jetzt();
+    for _ in 0..runden_streifen {
+        let _ = f.zeigen_bereich(0, 0, block, block);
+    }
+    let block_ms = libspeed::zeit_jetzt().saturating_sub(start);
+    println!("BLOCK_US={}", block_ms * 1000 / runden_streifen);
+    println!("BLOCK_NS={}", block_ms * 1_000_000 / runden_streifen);
+    println!("BLOCK_KANTE={}", block);
+
+    libspeed::diagnoseln!(
+        "[messung] Fenster {}x{}: malen {} us, Vollbild {} us, \
+         Streifen({} Zeilen) {} us, Block {}x{} {} us",
+        breite,
+        hoehe,
+        malen_ms * 1000 / runden,
+        voll_us,
+        streifen_hoehe,
+        streifen_ms * 1000 / runden_streifen,
+        block,
+        block,
+        block_ms * 1000 / runden_streifen
+    );
+    let _ = f.schliessen();
+    0
 }
 
 fn zahl_lesen(text: &str) -> Option<u64> {

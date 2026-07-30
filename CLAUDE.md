@@ -477,6 +477,98 @@
   neue Breite zu lang ist, wird rechts abgeschnitten. Steht in
   docs/grenzen.md.
 
+## FENSTER AUS RING 3 (Serie 8, Teil 1 — die Naht zum Browser)
+- **DIE ENTSCHEIDUNG: PIXELPUFFER PER SYSCALL** (Empfehlung (a) der
+  Bestandsaufnahme), vollstaendig in `docs/fenster-syscalls.md`. Begruendung
+  ist NICHT „am schnellsten", sondern: Es kostet KEINE Sicherheitszusage —
+  der Prozess uebergibt Bytes, der Kernel prueft mit demselben
+  `copy_in`-Apparat und KOPIERT. Bei geteiltem Speicher laege dieselbe Seite
+  in zwei Adressraeumen, und „pruefen, dann kopieren" gaelte nicht mehr.
+  Verbaut ist geteilter Speicher damit NICHT (die ABI redet ueber Zeiger,
+  Laenge, Rechteck).
+- **FUENF SYSCALLS (48..52)**, Tabelle in docs/syscalls.md §6b:
+  `fenster_oeffnen/zeichnen/ereignis/titel_setzen/schliessen`.
+  **DAS FENSTER IST EIN HANDLE** (`KernelObjekt::Fenster`) — daraus folgt von
+  selbst: aus fremdem Prozess unerreichbar, mit `schliesse` schliessbar, und
+  der `Drop` der Handle-Tabelle raeumt es beim Prozess-Ende ab. Kein Pfad
+  kann es vergessen.
+- **DER KERNEL BLEIBT HERR UEBER DIE DEKORATION.** Titelleiste, Rahmen,
+  Schatten, Verschieben, Snap, Alt+Tab, Taskleisten-Eintrag gelten fuer
+  Prozess-Fenster wie fuer Kernel-Apps; der Prozess malt NUR den Inhalt und
+  kennt seine Bildschirmposition nicht. Icon ist fest das Logo — ein Programm
+  soll sich in der Titelleiste nicht als etwas anderes ausgeben koennen.
+- **DAS RECHTECK STEHT IM SYSCALL** (gepackt in ein u64, je 16 Bit
+  x/y/Breite/Hoehe — vier Argumentregister, fuenf Zahlen, dasselbe Argument
+  wie bei `pipe()`). Damit zeichnet ein Programm STREIFEN nach, und der
+  Kernel meldet genau den Streifen als Schaden. GEMESSEN: eine Textzeile bei
+  4K kostet 11 us statt 509 us fuer ein Vollbild — Faktor 45.
+- **GEKLEMMT, NICHT ABGELEHNT:** Ein Rechteck ueber den Fensterrand wird
+  geschnitten, die Rueckgabe sagt, wie viele Pixel wirklich gesetzt wurden.
+  Grund ist ein unvermeidbares WETTRENNEN (der Benutzer zieht am Rand,
+  waehrend der Prozess zeichnet) — ein Fehler daraus zu machen hiesse, jedes
+  Programm muesste den Normalfall als Fehler behandeln. Ganz ausserhalb ist
+  dagegen ein Fehler. Ueber den Puffer hinaus wird NIE geschrieben
+  (Kanarienvogel-Test).
+- **DIE EREIGNIS-QUEUE VERLIERT NIE SCHLIESSEN UND GROESSE.** Beides sind
+  FELDER, keine Queue-Eintraege: Eine Groessenaenderung ist ein ZUSTAND (der
+  letzte Wert gilt), und ein Schliessen-Wunsch, der in einer vollen Queue
+  verschwindet, waere ein Fenster, das sich nicht schliessen laesst. Queue
+  auf 64 gedeckelt, Mausbewegungen verschmelzen am Ende, Verworfenes wird
+  GEZAEHLT. Reihenfolge beim Abholen: Groesse -> Schliessen -> Eingaben.
+  **NACH `Groesse` IST DER PUFFER LEER** — der Kernel hat ihn neu angelegt.
+- **DER SCHLIESSEN-KNOPF BITTET, ER BEFIEHLT NICHT.** Erster Klick = Ereignis
+  `Schliessen`, ZWEITER Klick erzwingt. Kein Zeitgeber, keine Frist, die man
+  erklaeren muesste.
+- **BLOCKIEREND MIT FRIST** ueber den Weck-Pfad aus Serie 7, Teil 0 (neuer
+  Grund `Warteauf::Fenster(id)`; `Ausgang::Blockieren` traegt jetzt einen
+  Weckzeitpunkt). Eine abgelaufene Frist ist KEIN Fehler, sondern `Keins`.
+  **DIE FRIST LIEGT IM FENSTER, nicht im Syscall** — ein blockierender
+  Syscall wird NEU GESTARTET, eine lokal berechnete Frist begaenne jedes Mal
+  von vorn. Gesetzt wird sie nur, wenn noch keine steht.
+- **LOCK-ORDNUNG, die Falle dieses Teils:** `scheduler::wecken` nimmt die
+  TABELLE, der Timer nimmt TABELLE und danach (ueber `warter_wecken` ->
+  `prozess_fenster_lage`) den MANAGER. Aus dem gehaltenen MANAGER zu wecken
+  waere ein ABBA. Der Weckruf wird deshalb UNTER dem Lock nur VORGEMERKT
+  (`wecken_faellig`) und DANACH ausgeloest — **`mit_manager_wecken` ist der
+  Helfer, den JEDE Funktion benutzt, die Ereignisse erzeugen kann.** Dasselbe
+  Muster wie bei den Pipes. `prozess_fenster_lage` liefert vier Faelle und
+  nicht `Option<bool>`: „Fenster weg" MUSS wecken, „Lock belegt" darf liegen
+  lassen.
+- **`ring3::copy_in_scheibe`** kopiert in einen SCHON VORHANDENEN
+  Kernel-Puffer. Ohne sie entstuende je Bildzeile ein frischer `Vec` (2160
+  Allokationen fuer EINEN 4K-Syscall). Pruefung unveraendert dreistufig,
+  64-KiB-Grenze unangetastet — eine 4K-Zeile sind 15 KiB.
+- **`starte <name> &` IST FUER FENSTER-PROGRAMME PFLICHT.** Solange ein
+  Shell-Befehl synchron laeuft, kommt kein anderer Kernel-Task dran — auch
+  der COMPOSITOR nicht. Ohne `&` zeichnet das Programm brav, und niemand
+  sieht es (die Uhr bleibt stehen, bis es endet). Ein Hintergrund-Prozess
+  bekommt KEINE Ausgabe-Pipe, sondern die Standard-Ausgabe der Shell — eine
+  Pipe ohne Leser blockierte nach 64 KiB fuer immer.
+- **OFFENE GRENZE, gemessen und in docs/grenzen.md eingetragen: EIN
+  4K-VOLLBILD-FENSTER PASST NICHT IN DEN USER-HEAP** (32,1 MiB gegen 12 MiB
+  `HEAP_MAX_BYTES`). Der Browser braucht entweder ein groesseres
+  Prozess-Layout (ABI-Aenderung) oder Streifen. Die Messung KUERZT und MELDET
+  es, statt die Zahl zu umgehen.
+- **UMSTIEGSKRITERIUM, VORHER festgelegt** (Muster der TCP-Reissleine):
+  geteilter Speicher wird neu bewertet, wenn ein Scroll-Frame > ~8 ms braucht
+  UND die Kopie mehr als die Haelfte davon ausmacht. BEIDE Bedingungen, weil
+  ein langsamer Frame genauso gut am Malen liegen kann. Stand: 190 us/68 %
+  (720p), 692 us/73 % (4K) — nicht erfuellt. `tests/fenster_messung.rs`
+  rechnet es bei jedem Lauf aus.
+- **MESSFALLE, wieder dieselbe:** Die erste Fassung des Weck-Tests mass
+  36 ms, weil die Testschleife nackt `hlt`-te statt
+  `zeit::warte_auf_interrupt()` (dem Reschedule-Punkt) zu nehmen — gemessen
+  wurde die Zeitscheibe von PID 0, nicht die Weck-Latenz.
+- **`programme::pfad()` SIEHT NACH, `verzeichnis()` SAGT WOHIN.** Eine
+  Funktion beantwortete zwei Fragen; nach einem Mount mitten in der Sitzung
+  zeigte der Pfad auf ein leeres Verzeichnis. `nach_mount_wechsel()`
+  installiert neu (gerufen von `mount`, `umount`, Einstellungen-App).
+- **`tools/qmp_steuern.py`** steuert QEMU fern (tippen/klicken/Zeiger/
+  scrollen/Foto). Drei Fallen im Kopfkommentar: `sendkey` gibt es in QMP
+  nicht mehr; QEMU schickt US-TASTENPOSITIONEN, SpeedOS dekodiert QWERTZ
+  (aus „type" wird sonst „tzpe"); absolute Mauspositionen gibt es bei PS/2
+  nicht — relativ in 100-Pixel-Schritten, weil ein Paket nur +-255 traegt.
+
 ## SERIE-7-ABSCHLUSS (Juli 2026) — Angriffe, Zahlen, Grenzen, Serie-8-Naht
 - **DIE EINE STELLE FUER ALLE LUECKEN: `docs/grenzen.md`.** Keine
   Sperrlisten-Pruefung (OCSP/CRL), manueller Root-Store OHNE Signatur, kein

@@ -5,6 +5,194 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### SERIE 8, TEIL 1: Ein Ring-3-Prozess besitzt ein Fenster
+
+Bis hierher lebte die gesamte Fenster-Schicht im Kernel. Ein Programm in
+Ring 3 konnte rechnen, Dateien lesen und HTTPS sprechen — aber es konnte
+**kein Fenster besitzen**. Das war die erste Lücke, die
+`docs/serie8-bestandsaufnahme.md` für den Browser zu schliessen empfiehlt,
+und sie ist zu.
+
+`starte fenstertest` öffnet jetzt ein Fenster mit Titelleiste,
+Taskleisten-Eintrag, Alt+Tab und Snap wie jedes Kernel-Fenster — nur den
+**Inhalt** malt ein unprivilegierter Prozess in seinem eigenen Adressraum.
+
+#### Fünf neue Syscalls (48–52)
+
+```
+fenster_oeffnen(titel, breite, hoehe)        -> Handle
+fenster_zeichnen(handle, ptr, len, rechteck) -> gesetzte Pixel
+fenster_ereignis(handle, ziel, frist_ms)     -> Ereignis-Art (BLOCKIEREND)
+fenster_titel_setzen, fenster_schliessen
+```
+
+Umgesetzt ist die Empfehlung **(a) Pixelpuffer per Syscall** — nicht, weil
+sie am schnellsten wäre, sondern weil sie **keine Sicherheitszusage kostet**:
+Der Prozess übergibt Bytes, der Kernel prüft sie mit demselben
+`copy_in`-Apparat wie jedes andere Argument und **kopiert**. Bei geteiltem
+Speicher läge dieselbe Seite in zwei Adressräumen, und „prüfen, dann
+kopieren" gälte nicht mehr — der Prozess könnte die Pixel ändern, während
+der Compositor sie liest. Verbaut ist geteilter Speicher damit nicht: Die
+ABI redet über (Zeiger, Länge, Rechteck), ein späterer geteilter Puffer wäre
+ein zweiter Weg, kein anderer Vertrag.
+
+**Das Fenster ist ein Handle**, kein Sonderfall. Daraus folgt dreierlei von
+selbst: Ein fremdes Fenster ist unerreichbar (aus einem anderen Prozess führt
+keine Zahl dorthin), `schliesse` schliesst es, und der `Drop` der
+Handle-Tabelle räumt es beim Prozess-Ende automatisch ab — auch nach einem
+Absturz.
+
+**Das Rechteck steht im Syscall**, gepackt in ein `u64` (je 16 Bit
+x/y/Breite/Höhe, weil vier Argumentregister fünf Zahlen tragen müssen).
+Damit kann ein Programm einen *Streifen* nachzeichnen, und der Kernel meldet
+genau diesen Streifen als Schaden — die Dirty-Rect-Mechanik aus Serie 4 zahlt
+sich unmittelbar aus. Wie sehr, steht unten in Zahlen.
+
+#### Drei Entscheidungen, die Denkarbeit waren
+
+**Geklemmt, nicht abgelehnt.** Ein Rechteck über den Fensterrand hinaus wird
+geschnitten, und der Syscall liefert die Zahl der wirklich gesetzten Pixel.
+Grund ist ein unvermeidbares Wettrennen: Zwischen dem Augenblick, in dem ein
+Prozess seine Grösse erfährt, und dem, in dem er zeichnet, kann der Benutzer
+am Fensterrand gezogen haben. Ein Fehler daraus zu machen hiesse, jedes
+Programm müsste den Normalfall als Fehler behandeln. Geschrieben wird dabei
+**nie** über den Puffer hinaus — das ist die Zusage, auf die es ankommt.
+
+**Die Ereignis-Queue verliert nie Schliessen und Grösse.** Beides sind
+*Felder*, keine Queue-Einträge: Eine Grössenänderung ist ein Zustand (der
+letzte Wert gilt), und ein Schliessen-Wunsch, der in einer vollen Queue
+verschwindet, wäre ein Fenster, das sich nicht schliessen lässt. Die
+Eingabe-Queue ist auf 64 gedeckelt, Mausbewegungen verschmelzen am Ende (eine
+Maus liefert 200 Pakete je Sekunde), und was verworfen wird, wird **gezählt**.
+
+**Der Schliessen-Knopf bittet, er befiehlt nicht.** Der Prozess besitzt den
+Puffer und darf aufräumen. Reagiert er nicht, schliesst der **zweite** Klick
+— kein Zeitgeber, keine Frist, die man erklären muss.
+
+#### Blockieren, Wecken, und die Lock-Falle
+
+`fenster_ereignis` blockiert mit Frist über den Weck-Pfad aus Serie 7,
+Teil 0 (neuer Grund `Warteauf::Fenster(id)`, Timer als Sicherheitsnetz).
+Gemessene Weck-Latenz: **0 ms**. Eine abgelaufene Frist ist **kein Fehler**,
+sondern `Keins` — ein Programm, dessen Normalfall ein Fehlercode wäre,
+schreibt seine Schleife falsch herum.
+
+Die Frist liegt **im Fenster**, nicht im Syscall: Ein blockierender Syscall
+wird bei uns neu gestartet, eine lokal berechnete Frist begänne jedes Mal von
+vorn.
+
+Die Falle dieses Teils war die Lock-Ordnung: `scheduler::wecken` nimmt die
+Prozess-Tabelle, und der Timer nimmt sie **vor** dem MANAGER. Aus dem
+gehaltenen MANAGER zu wecken wäre ein ABBA. Der Weckruf wird deshalb unter
+dem Lock nur **vorgemerkt** und danach ausgelöst — `mit_manager_wecken` ist
+der Helfer, damit keine Aufrufstelle es vergessen kann. Dasselbe Muster wie
+bei den Pipes.
+
+#### Eine Ergänzung in `ring3.rs`
+
+`copy_in_scheibe` kopiert in einen **schon vorhandenen** Kernel-Puffer. Ohne
+sie entstünde je Bildzeile ein frischer `Vec` — bei einem vollen 4K-Fenster
+2160 Allokationen für **einen** Syscall. Die Prüfung ist unverändert dieselbe
+(alle drei Stufen, dieselbe 64-KiB-Grenze); zeilenweise kopiert passt eine
+4K-Zeile mit 15 KiB bequem darunter, und die Grenze musste für Pixel nicht
+aufgeweicht werden.
+
+#### DIE ZAHLEN (aus Ring 3 gemessen, QEMU/WHPX)
+
+| Vorgang | 720p (1360 × 696) | 4K (3840 × 682) |
+|---|---:|---:|
+| Malen im **eigenen** Puffer (kein Syscall) | 57 µs | 183 µs |
+| `fenster_zeichnen`, **volles Fenster** | **128 µs** | **509 µs** |
+| `fenster_zeichnen`, **Streifen** (volle Breite, 16 Zeilen) | **3,2 µs** | **11,2 µs** |
+| `fenster_zeichnen`, **Block** 32 × 32 | 0,4 µs | 0,6 µs |
+
+Durchsatz ~5–7 Mio. Pixel je Millisekunde, linear in der Fläche (bei 10× der
+Rundenzahl änderte sich das Ergebnis um 2 %). **Die wichtige Zahl:** Eine
+nachgezogene Textzeile kostet bei 4K **11 µs statt 509 µs** — Faktor 45. Das
+ist der Grund, warum das Rechteck im Syscall steht.
+
+**DAS UMSTIEGSKRITERIUM, vorher festgelegt** (Muster der TCP-Reissleine,
+`docs/fenster-syscalls.md` §5): *Geteilter Speicher wird neu bewertet, wenn
+ein Scroll-Frame über ~8 ms braucht UND die Kopie mehr als die Hälfte davon
+ausmacht.* Beide Bedingungen, weil ein langsamer Frame genauso gut am Malen
+liegen kann — dann würde geteilter Speicher nichts ändern. Stand heute:
+190 µs / 68 % bei 720p, 692 µs / 73 % bei 4K — **nicht erfüllt**, die
+absolute Schranke fehlt um Faktor vier. Der Test rechnet es bei jedem Lauf
+aus.
+
+#### `starte … &` — der Befund aus dem ersten Live-Versuch
+
+`starte fenstertest` meldete über die serielle Schnittstelle „Fenster offen
+(420×280)" — und auf dem Bildschirm passierte **nichts**. Sechzig Sekunden
+lang, samt stehengebliebener Uhr. Erst als das Programm endete, kam das Bild
+zurück.
+
+Kein Deadlock, sondern eine bekannte Eigenschaft, die hier zum ersten Mal
+weh tut: Solange ein Shell-Befehl synchron läuft, kommt **kein anderer
+Kernel-Task** dran — auch der Compositor nicht (die Shell-Sitzung ist selbst
+ein Task im kooperativen Executor von PID 0). Für `hallo` ist das
+gleichgültig; ein Fenster-Programm zeichnet dagegen brav, und niemand sieht
+es.
+
+Deshalb neu: **`starte <name> &`** — einplanen, PID melden, zurück. Der
+Hintergrund-Prozess bekommt keine Ausgabe-Pipe, sondern die Standard-Ausgabe
+der Shell (eine Pipe ohne Leser würde nach 64 KiB für immer blockieren).
+Erst damit sind auch **zwei Instanzen gleichzeitig** möglich — vorher hätte
+die Shell nach der ersten gewartet.
+
+#### Ein Befund, der beim Messen auffiel
+
+**Ein Fenster über den ganzen 4K-Schirm passt nicht in den User-Heap.** Der
+Pixelpuffer liegt auf dem Prozess-Heap, und der ist auf 12 MiB gedeckelt;
+3840 × 2088 × 4 Byte sind 32,1 MiB. Die Messung kürzt die Höhe und **meldet
+es**, statt die Zahl zu umgehen. Für den Browser ist das eine Entscheidung,
+die an den Anfang gehört und nicht mittenhinein — eingetragen in
+`docs/grenzen.md`.
+
+#### Beweis-Programm und Tests
+
+`userland/fenstertest`: Farbverlauf, Klick-Punkte, Tastenanzeige,
+Fokus-Rahmen, folgt Grössenänderungen, beendet sich beim Schliessen-Wunsch.
+Es sendet den Klick-Punkt als 17 × 17-Streifen statt des ganzen Fensters —
+genau die Ersparnis, um die es geht. Zwei Instanzen laufen unabhängig.
+
+`tests/fenster.rs` (7 Tests, alle in QEMU aus Ring 3): Erfolgsfall; **5 böse
+Zeiger, 4 falsche Längen, 4 kaputte Rechtecke** — alle abgelehnt, und
+Kanarienvögel beweisen, dass kein Pixel daneben landet; fremdes Handle (B
+probiert alle 32 Zahlen); volle Queue (128 verworfen und gezählt, Grösse und
+Schliessen kamen durch); Blockieren mit Frist und Weckruf; Prozess-Ende
+räumt 5 Fenster ab, Frame-Bilanz byte-exakt null, dasselbe über 10 Runden.
+
+**Messfalle, gleich wieder hineingelaufen:** Die erste Fassung des
+Weck-Tests mass 36 ms — weil die Testschleife nackt `hlt`-te statt
+`zeit::warte_auf_interrupt()` zu nehmen. Gemessen wurde damit nicht die
+Weck-Latenz, sondern die Zeitscheibe von PID 0. Dieselbe Falle wie beim
+Kontext-Wechsel in Serie 6.
+
+### Vorarbeit: Programm-Pfade überleben einen Mount
+
+`programme::pfad()` zeigte nach einem Mount **mitten in der Sitzung** ins
+Leere: Beim Boot ohne Platte landen die Programme im RAM-VFS, nach
+`mkfs.speedfs JA` + `mount` lieferte `persistenter_pfad` ab da
+`/platte/programme` — und dort lag nichts. Die Ursache war, dass **eine**
+Funktion zwei verschiedene Fragen beantwortete. Jetzt sind es zwei:
+`verzeichnis()` sagt, wohin installiert wird, `pfad(name)` sieht **nach**, wo
+es wirklich liegt. Dazu `nach_mount_wechsel()`, das Programme und CA-Bündel
+nach einem Mount neu installiert — gerufen von `mount`, `umount` und der
+Einstellungen-App. „Neustart löst es" wäre keine Lösung gewesen, sondern das
+Eingeständnis, dass der Zustand nicht stimmt.
+
+### Werkzeug: `tools/qmp_steuern.py`
+
+Das Fernsteuer-Werkzeug für QEMU (tippen, klicken, Zeiger setzen, scrollen,
+fotografieren) lebte bisher im Scratchpad. Es trägt die drei Fallen im
+Kopfkommentar, die es überhaupt nötig machen: `sendkey` gibt es in QMP nicht
+mehr (`input-send-event`, Drücken und Loslassen einzeln); QEMU schickt
+**US-Tastenpositionen**, während SpeedOS deutsches QWERTZ dekodiert (aus
+„type" würde sonst „tzpe"); und absolute Mauspositionen gibt es bei einer
+PS/2-Maus nicht — gefahren wird relativ in 100-Pixel-Schritten, weil ein
+PS/2-Paket nur ±255 trägt und der Treiber Overflow-Pakete verwirft.
+
 ### Terminal: ZURÜCKBLÄTTERN (Scrollback)
 
 Eine lange Ausgabe lief bisher oben aus dem Bild und war **weg**. Jetzt

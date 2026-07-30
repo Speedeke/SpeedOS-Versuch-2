@@ -2347,6 +2347,7 @@ impl Befehl for Starte {
         if argumente.trim().is_empty() {
             println!("Benutzung: starte <pfad|name> [argumente ...]");
             println!("           starte <a> [args] | <b> [args]     (Pipeline)");
+            println!("           starte <name> &                    (im Hintergrund)");
             println!();
             println!("Mitgelieferte Programme (auch ohne Pfad aufrufbar):");
             for zeile in crate::programme::uebersicht() {
@@ -2354,6 +2355,8 @@ impl Befehl for Starte {
             }
             println!();
             println!("Strg+C beendet das laufende Programm.");
+            println!("Ein '&' am Ende startet, ohne zu warten — noetig fuer Programme");
+            println!("mit eigenem FENSTER (siehe unten).");
             return;
         }
         if !crate::scheduler::aktiv() {
@@ -2393,6 +2396,39 @@ fn pipeline_ausfuehren(kontext: &mut ShellKontext, eingabe: &str) {
     use crate::pipe::{self, Ende};
     use crate::syscall::handle::KernelObjekt;
 
+    // ======================================================================
+    // DER HINTERGRUND-START (Serie 8, Teil 1) — und warum es ihn braucht
+    //
+    // Ein `&` am Zeilenende heisst: einplanen, PID melden, ZURUECKKEHREN.
+    // Ohne Warten, ohne Ausgabe-Pumpe.
+    //
+    // Bis Serie 7 war das nur Bequemlichkeit. Mit Fenstern ist es eine
+    // NOTWENDIGKEIT, und der Grund ist die kooperative Natur von PID 0:
+    // Solange ein Shell-Befehl synchron laeuft, kommt KEIN anderer
+    // Kernel-Task dran — auch der COMPOSITOR nicht. Ein Programm mit
+    // eigenem Fenster wuerde also brav zeichnen, und niemand wuerde es je
+    // sehen; die Uhr in der Taskleiste bliebe stehen, bis das Programm
+    // fertig ist. (Genau so ist es beim ersten Versuch passiert.)
+    //
+    // Die Alternative waere gewesen, die Pump-Schleife den Compositor
+    // treiben zu lassen. Das ginge nicht: Der Compositor ist ein
+    // async-Task im Executor, und ein synchroner Befehl kann den Executor
+    // nicht betreten — deshalb steht das seit Serie 6 so in CLAUDE.md.
+    //
+    // Ein Hintergrund-Prozess bekommt KEINE Ausgabe-Pipe, sondern die
+    // Standard-Ausgabe der Shell. Sonst muesste jemand seine Pipe leeren,
+    // und genau den gibt es dann nicht mehr — nach 64 KiB Ausgabe wuerde
+    // er fuer immer blockieren.
+    // ======================================================================
+    let (eingabe, hintergrund) = match eingabe.trim().strip_suffix('&') {
+        Some(rest) => (rest.trim(), true),
+        None => (eingabe, false),
+    };
+    if hintergrund && eingabe.is_empty() {
+        println!("Was soll im Hintergrund starten? (starte <name> &)");
+        return;
+    }
+
     // --- 1. Die Eingabe in Stufen zerlegen ---
     let mut stufen: Vec<Stufe> = Vec::new();
     for abschnitt in eingabe.split('|') {
@@ -2413,6 +2449,15 @@ fn pipeline_ausfuehren(kontext: &mut ShellKontext, eingabe: &str) {
     }
     if stufen.len() > MAX_PIPELINE {
         println!("Höchstens {} Stufen je Pipeline.", MAX_PIPELINE);
+        return;
+    }
+    if hintergrund {
+        if stufen.len() > 1 {
+            println!("Eine Pipeline laesst sich (noch) nicht in den Hintergrund schicken —");
+            println!("dafuer muesste jemand die Zwischen-Pipes leeren.");
+            return;
+        }
+        hintergrund_starten(&stufen[0]);
         return;
     }
 
@@ -2536,6 +2581,44 @@ fn pipeline_ausfuehren(kontext: &mut ShellKontext, eingabe: &str) {
                          name, pid, pid);
                 konsole::set_color(Color::LightGray, Color::Black);
             }
+        }
+    }
+}
+
+/// Startet EIN Programm im Hintergrund: einplanen, PID melden, zurück.
+///
+/// Keine Pipe, keine Pump-Schleife, kein Warten — die Shell ist sofort
+/// wieder da, und damit läuft der Executor weiter (Compositor, Uhr,
+/// Netz-Task). Der Prozess erbt die Standard-Ausgabe der Shell; seine
+/// Ausgabe erscheint also mitten im Terminal, wo der Benutzer gerade
+/// tippt. Das ist unschön und ehrlich — die Alternative wäre eine Pipe
+/// ohne Leser, und die würde nach 64 KiB für immer blockieren.
+fn hintergrund_starten(stufe: &Stufe) {
+    let argumente: Vec<&str> = stufe.argumente.iter().map(|s| s.as_str()).collect();
+    match crate::prozess::prozess_starten_mit(
+        &stufe.pfad,
+        &argumente,
+        None,
+        None,
+        // `None` = nicht umleiten: Das Kind bekommt den Kernel-Standard,
+        // also Bildschirm UND seriell.
+        None,
+        false,
+    ) {
+        Ok(pid) => {
+            konsole::set_color(Color::DarkGray, Color::Black);
+            println!("[PID {} im Hintergrund: {}]", pid, stufe.pfad);
+            println!("[Beenden mit: prozess-stop {}]", pid);
+            konsole::set_color(Color::LightGray, Color::Black);
+        }
+        Err(fehler) => {
+            konsole::set_color(Color::LightRed, Color::Black);
+            println!(
+                "'{}' konnte nicht gestartet werden: {}",
+                stufe.pfad,
+                fehler.meldung()
+            );
+            konsole::set_color(Color::LightGray, Color::Black);
         }
     }
 }

@@ -8,6 +8,18 @@ ist alles selbst gebaut (auf Basis der bewährten Architektur aus
 > Lernprojekt: Der Code ist bewusst ausführlich auf Deutsch kommentiert —
 > jede Datei erklärt, *was* sie tut und *warum* es so funktioniert.
 
+![Ein Ring-3-Prozess mit eigenem Fenster](docs/screenshots/serie8-prozess-fenster.png)
+*Der Meilenstein von Serie 8, Teil 1: `starte fenstertest &` — ein
+**unprivilegierter Prozess besitzt ein Fenster**. Verlauf, Klick-Punkte und
+Tastenanzeige malt er selbst in seinen eigenen Pixelpuffer und schickt ihn
+per Syscall hinüber; Titelleiste, Rahmen, Taskleisten-Eintrag, Alt+Tab und
+Snap bleiben Sache des Kernels. Details und Messzahlen:
+[`docs/fenster-syscalls.md`](docs/fenster-syscalls.md).*
+
+![Zwei Prozess-Fenster](docs/screenshots/serie8-zwei-fenster.png)
+*Zwei Instanzen desselben Programms, zwei Fenster, zwei Adressräume, zwei
+Ereignis-Warteschlangen — und keine kann die andere erreichen.*
+
 ![HTTPS aus SpeedOS](docs/screenshots/serie7-https-meilenstein.png)
 *Der Meilenstein von Serie 7: `starte holes https://example.com/ --info` —
 eine **verschlüsselte Verbindung** aus einem Ring-3-Programm. TLS 1.3 über
@@ -534,11 +546,19 @@ könnte — die unteren Schichten und die Socket-API blieben dabei unsere.
       Weitergabe beim Start und `starte zaehle 20 | filter 7` als echte
       Pipeline. Strg+C beendet den Vordergrund.
       *Noch offen:* `fork` (Prozesse entstehen immer aus einer Datei),
-      `select`/`poll`, blockierendes `empfange` auf Sockets, Fenster-Syscalls
-      (ein Ring-3-Programm kann noch nicht zeichnen) — siehe
+      `select`/`poll`, blockierendes `empfange` auf Sockets — siehe
       [docs/syscalls.md §10](docs/syscalls.md)
-- [ ] Ferner: HTML-Text-Browser (Kernel-App), TLS/HTTPS (geprüfte Krypto),
-      Sound
+- [x] **Fenster aus Ring 3 (Serie 8, Teil 1): EIN PROZESS BESITZT EIN
+      FENSTER.** Fünf Syscalls (48–52), Pixelpuffer per `copy_in`,
+      Ereignisse mit fensterlokalen Koordinaten, blockierend mit Frist.
+      Der Kernel behält Titelleiste, Snap, Alt+Tab und Taskleiste; der
+      Prozess malt nur den Inhalt — und `starte fenstertest &` zeigt es.
+      Entwurf, Messzahlen und das **vorher festgelegte Umstiegskriterium**
+      für geteilten Speicher: [docs/fenster-syscalls.md](docs/fenster-syscalls.md).
+      *Noch offen:* das Widget-Toolkit im User-Space, Schriften über eine
+      Syscall-Naht, ein 4K-Vollbild-Fenster (passt nicht in den User-Heap —
+      [docs/grenzen.md](docs/grenzen.md))
+- [ ] Ferner: HTML-Renderer und Browser V1 (Serie 8), Sound
 
 ## Lizenz
 
