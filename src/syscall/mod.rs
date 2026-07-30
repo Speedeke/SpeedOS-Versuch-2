@@ -59,6 +59,7 @@
 // ==========================================================================
 
 pub mod datei;
+pub mod fenster;
 pub mod handle;
 pub mod netz;
 pub mod prozess;
@@ -146,7 +147,22 @@ pub const SYS_AUFLOESEN: u64 = 36;
 /// `socket_zustand(handle)` -> Zustand als Zahl (siehe docs/syscalls.md).
 pub const SYS_SOCKET_ZUSTAND: u64 = 37;
 
-// ----- Gruppe 3: nur für Tests (240..) -----
+// ----- Gruppe 3: Fenster (48..63) — Serie 8 -----
+/// `fenster_oeffnen(titel_ptr, titel_len, breite, hoehe)` -> Handle.
+pub const SYS_FENSTER_OEFFNEN: u64 = 48;
+/// `fenster_zeichnen(handle, ptr, len, rechteck)` -> gesetzte Pixel.
+/// Das Rechteck steckt gepackt in einem u64 (siehe syscall/fenster.rs).
+pub const SYS_FENSTER_ZEICHNEN: u64 = 49;
+/// `fenster_ereignis(handle, ziel_ptr, frist_ms)` -> Ereignis-Art.
+/// BLOCKIEREND mit Frist; `0` (= Keins) heisst „nichts passiert".
+pub const SYS_FENSTER_EREIGNIS: u64 = 50;
+/// `fenster_titel_setzen(handle, titel_ptr, titel_len)`.
+pub const SYS_FENSTER_TITEL: u64 = 51;
+/// `fenster_schliessen(handle)` — dasselbe wie `schliesse` auf einem
+/// Fenster-Handle, nur mit dem Namen, der im Programm lesbar ist.
+pub const SYS_FENSTER_SCHLIESSEN: u64 = 52;
+
+// ----- Gruppe 9: nur für Tests (240..) -----
 /// Kopiert den eingehenden Trap-Rahmen weg (Kontext-Sicherungs-Test).
 pub const SYS_KONTEXT_TEST: u64 = 240;
 
@@ -661,6 +677,14 @@ pub fn ausfuehren(nummer: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> SysErgebni
         SYS_AUFLOESEN => netz::sys_aufloesen(a0, a1),
         SYS_SOCKET_ZUSTAND => netz::sys_socket_zustand(a0),
 
+        // ----- Gruppe 3: Fenster (Serie 8) -----
+        // `fenster_ereignis` fehlt hier: Es BLOCKIERT und braucht deshalb
+        // den Trap-Rahmen — es steht im Dispatcher unten.
+        SYS_FENSTER_OEFFNEN => fenster::sys_oeffnen(a0, a1, a2, a3),
+        SYS_FENSTER_ZEICHNEN => fenster::sys_zeichnen(a0, a1, a2, a3),
+        SYS_FENSTER_TITEL => fenster::sys_titel_setzen(a0, a1, a2),
+        SYS_FENSTER_SCHLIESSEN => fenster::sys_schliessen(a0),
+
         // Unbekannt: sauberer Fehler, NIE eine Panik.
         _ => Err(Fehler::UnbekannterSyscall),
     }
@@ -723,9 +747,9 @@ fn blockierend_behandeln(
             ergebnis_eintragen(f, ergebnis);
             rahmen
         }
-        prozess::Ausgang::Blockieren(grund) => {
+        prozess::Ausgang::Blockieren(grund, wach_ab_ms) => {
             f.rip -= INT_0X80_LAENGE;
-            scheduler::blockieren(rahmen, grund)
+            scheduler::blockieren(rahmen, grund, wach_ab_ms)
         }
     }
 }
@@ -806,6 +830,10 @@ extern "C" fn syscall_dispatch(rahmen: *mut TrapFrame) -> *mut TrapFrame {
         }
         SYS_WARTE => {
             let neu = blockierend_behandeln(rahmen, f, prozess::sys_warte(a0));
+            return umplanen_falls_noetig(rahmen, neu);
+        }
+        SYS_FENSTER_EREIGNIS => {
+            let neu = blockierend_behandeln(rahmen, f, fenster::sys_ereignis(a0, a1, a2));
             return umplanen_falls_noetig(rahmen, neu);
         }
 
@@ -889,6 +917,11 @@ mod tests {
         assert_eq!(SYS_EMPFANGE, 35);
         assert_eq!(SYS_AUFLOESEN, 36);
         assert_eq!(SYS_SOCKET_ZUSTAND, 37);
+        assert_eq!(SYS_FENSTER_OEFFNEN, 48);
+        assert_eq!(SYS_FENSTER_ZEICHNEN, 49);
+        assert_eq!(SYS_FENSTER_EREIGNIS, 50);
+        assert_eq!(SYS_FENSTER_TITEL, 51);
+        assert_eq!(SYS_FENSTER_SCHLIESSEN, 52);
         // Und die Fehlercodes.
         assert_eq!(Fehler::Ok.code(), 0);
         assert_eq!(Fehler::UnbekannterSyscall.code(), 1);
@@ -904,7 +937,7 @@ mod tests {
     /// auch die Lücken zwischen den Gruppen und u64::MAX.
     #[test_case]
     fn test_unbekannte_nummern() {
-        for nummer in [15u64, 25, 31, 38, 100, 239, 241, u64::MAX] {
+        for nummer in [15u64, 25, 31, 38, 47, 53, 100, 239, 241, u64::MAX] {
             assert_eq!(
                 ausfuehren(nummer, 0, 0, 0, 0),
                 Err(Fehler::UnbekannterSyscall),

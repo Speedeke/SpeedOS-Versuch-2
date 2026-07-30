@@ -18,6 +18,7 @@
 //     Tastatur -> fokussiertes Fenster. Alt+Tab -> Fensterwechsler.
 //     Ziehen an den Bildschirmrand -> halbe Fläche (Snap).
 
+pub mod prozessfenster;
 pub mod terminal;
 
 use crate::framebuffer::{self, Farbe};
@@ -67,6 +68,41 @@ impl FensterPuffer {
             hoehe,
             pixel: vec![fuellung; breite * hoehe],
         }
+    }
+
+    /// Schreibt EINE Zeile aus dem Pixel-Format der Fenster-ABI
+    /// (4 Byte je Pixel) in den Puffer.
+    ///
+    /// DAS FORMAT, ausdruecklich in BYTES beschrieben, damit es keine
+    /// Endianness-Frage gibt:
+    ///
+    ///     Byte 0 = Blau, Byte 1 = Gruen, Byte 2 = Rot, Byte 3 = ungenutzt
+    ///
+    /// Als Little-Endian-`u32` gelesen ist das `0x00RRGGBB` — also genau
+    /// die Schreibweise, die jeder aus HTML kennt. Vier Byte statt drei,
+    /// weil eine Zeile dann ausgerichtet bleibt und der Prozess mit
+    /// `u32`-Feldern arbeiten kann.
+    ///
+    /// WARUM UMGERECHNET UND NICHT GECASTET: `Farbe` ist ein gewoehnliches
+    /// Rust-Struct ohne `repr(C)` — seine Feldreihenfolge ist NICHT
+    /// zugesichert. Aus User-Bytes einen `&[Farbe]` zu machen waere eine
+    /// Annahme ueber den Compiler an einer Stelle, an der fremde Daten
+    /// hereinkommen. Die Umrechnung ist zugleich der Posten, den das
+    /// Umstiegskriterium in docs/fenster-syscalls.md misst.
+    ///
+    /// Ueberstehende Bytes werden IGNORIERT, es wird nie ueber die
+    /// Zeile hinaus geschrieben. Liefert die Zahl der gesetzten Pixel.
+    pub(crate) fn zeile_aus_pixelbytes(&mut self, x: usize, y: usize, bytes: &[u8]) -> usize {
+        if y >= self.hoehe || x >= self.breite {
+            return 0;
+        }
+        let anzahl = (bytes.len() / 4).min(self.breite - x);
+        let basis = y * self.breite + x;
+        for i in 0..anzahl {
+            let b = &bytes[i * 4..i * 4 + 4];
+            self.pixel[basis + i] = Farbe::neu(b[2], b[1], b[0]);
+        }
+        anzahl
     }
 }
 
@@ -124,6 +160,11 @@ pub enum Inhalt {
     /// vom Enum zum Trait. Jede NEUE App implementiert das Trait;
     /// das Enum bleibt für Terminal und die alten Demos.
     App(crate::ui::AppFenster),
+    /// EIN FENSTER, DAS EINEM RING-3-PROZESS GEHOERT (Serie 8).
+    /// Der Kernel malt hier NICHTS — der Puffer gehoert dem Prozess, der
+    /// ihn per `fenster_zeichnen` fuellt. Was der Kernel behaelt: Deko,
+    /// Fokus, Snap, Taskleiste und die Eingabe-Warteschlange.
+    Prozess(prozessfenster::ProzessFenster),
     Uhr,
     TastaturEcho { text: String },
     Malflaeche { klicks: Vec<(i32, i32)> },
@@ -519,6 +560,10 @@ pub struct FensterManager {
     /// Zuletzt in der Taskleiste angezeigte Sekunde — nur bei einem
     /// Wechsel wird neu komponiert (nicht bei jedem Uhr-Task-Lauf).
     letzte_uhr_sekunde: u64,
+    /// Prozess-Fenster, deren Besitzer geweckt werden muss, sobald der
+    /// MANAGER-Lock wieder los ist (Lock-Ordnung — siehe
+    /// `prozess_ereignis`). Wird von `wecken_abholen` geleert.
+    wecken_faellig: Vec<FensterId>,
     /// Über welchem Ui-Fenster schwebt der Cursor? (für MausRaus)
     ui_hover_fenster: Option<FensterId>,
     /// Der Desktop-Verlauf muss (neu) in den Framebuffer-Hintergrund-
@@ -564,6 +609,7 @@ impl FensterManager {
             bildschirm_breite,
             bildschirm_hoehe,
             letzte_uhr_sekunde: 0,
+            wecken_faellig: Vec::new(),
             ui_hover_fenster: None,
             hintergrund_neu: true,
             dirty_rects: Vec::new(),
@@ -709,6 +755,15 @@ impl FensterManager {
             let fenster = self.fenster.remove(index);
             self.fenster.push(fenster);
             self.fokus = Some(id);
+            // Prozess-Fenster erfahren vom Fokus: Nur das fokussierte
+            // bekommt Tasten, und ein Programm soll seinen Cursor blinken
+            // lassen koennen, ohne zu raten.
+            if fokus_vorher != Some(id) {
+                if let Some(alt) = fokus_vorher {
+                    self.prozess_fokus_melden(alt, false);
+                }
+                self.prozess_fokus_melden(id, true);
+            }
             // Gehobenes Fenster + alter Fokus (Titel dimmt) +
             // Taskleiste (Knopf-Highlight wandert):
             self.fenster_dirty_melden(id);
@@ -722,12 +777,21 @@ impl FensterManager {
 
     /// Nach Minimieren/Schließen: das oberste sichtbare Fenster fokussieren.
     fn fokus_neu_bestimmen(&mut self) {
+        let vorher = self.fokus;
         self.fokus = self
             .fenster
             .iter()
             .rev()
             .find(|f| !f.minimiert)
             .map(|f| f.id);
+        if vorher != self.fokus {
+            if let Some(alt) = vorher {
+                self.prozess_fokus_melden(alt, false);
+            }
+            if let Some(neu) = self.fokus {
+                self.prozess_fokus_melden(neu, true);
+            }
+        }
     }
 
     // ----- Taskleiste -----
@@ -1431,12 +1495,100 @@ impl FensterManager {
         NachLock::Keine
     }
 
+    // -----------------------------------------------------------------
+    // PROZESS-FENSTER: Ereignisse einspeisen (Serie 8)
+    // -----------------------------------------------------------------
+
+    /// Legt ein Ereignis im Prozess-Fenster `index` ab — und MERKT SICH,
+    /// dass dessen Besitzer geweckt werden muss.
+    ///
+    /// DIE LOCK-FALLE, die hier gemieden wird: Der Weckruf
+    /// (`scheduler::wecken`) nimmt die Prozess-TABELLE, und der Timer
+    /// nimmt TABELLE und danach — ueber `warter_wecken` — den MANAGER.
+    /// Von hier aus, also UNTER dem MANAGER, zu wecken waere die
+    /// umgekehrte Reihenfolge und damit ein ABBA. Deshalb wird der
+    /// Weckruf nur VORGEMERKT und erst ausgeloest, wenn der Lock
+    /// wieder los ist (`nach_lock_ausfuehren` -> `wecken_faellig`).
+    /// Dasselbe Muster wie bei den Pipes (Serie 7, Teil 0).
+    fn prozess_ereignis(&mut self, index: usize, ereignis: prozessfenster::EreignisDaten) -> bool {
+        let id = self.fenster[index].id;
+        if let Inhalt::Prozess(pf) = &mut self.fenster[index].inhalt {
+            pf.ereignis_ablegen(ereignis);
+            self.wecken_faellig.push(id);
+            return true;
+        }
+        false
+    }
+
+    /// Ist das Fenster an diesem Index ein Prozess-Fenster?
+    fn ist_prozess_fenster(&self, index: usize) -> bool {
+        matches!(self.fenster[index].inhalt, Inhalt::Prozess(_))
+    }
+
+    /// Meldet dem Prozess die AKTUELLE Inhaltsgroesse seines Fensters.
+    ///
+    /// Wird nach JEDER Groessenaenderung gerufen (Ziehen am Rand,
+    /// Maximieren, Wiederherstellen, Snap). Der Kernel hat den Puffer
+    /// dabei neu angelegt — er ist also leer, und nur der Prozess kann
+    /// ihn wieder fuellen. Deshalb ist diese Meldung nicht optional.
+    fn prozess_groesse_melden(&mut self, index: usize) {
+        let id = self.fenster[index].id;
+        let (breite, hoehe) = (
+            self.fenster[index].puffer.breite as i32,
+            self.fenster[index].puffer.hoehe as i32,
+        );
+        if let Inhalt::Prozess(pf) = &mut self.fenster[index].inhalt {
+            pf.groesse_melden(breite, hoehe);
+            self.wecken_faellig.push(id);
+        }
+    }
+
+    /// Meldet einen Fokus-Wechsel (bekommen/verloren).
+    fn prozess_fokus_melden(&mut self, id: FensterId, bekommen: bool) {
+        let Some(index) = self.index_von(id) else {
+            return;
+        };
+        if let Inhalt::Prozess(pf) = &mut self.fenster[index].inhalt {
+            pf.ereignis_ablegen(prozessfenster::EreignisDaten::fokus(bekommen));
+            self.wecken_faellig.push(id);
+        }
+    }
+
+    /// Holt die vorgemerkten Weckrufe ab. **Nur ausserhalb des
+    /// MANAGER-Locks auswerten** — siehe `prozess_ereignis`.
+    fn wecken_abholen(&mut self) -> Vec<FensterId> {
+        core::mem::take(&mut self.wecken_faellig)
+    }
+
+    /// Reicht ein Maus-Ereignis an ein Prozess-Fenster weiter (in
+    /// FENSTERINHALT-Koordinaten — der Prozess kennt seine
+    /// Bildschirm-Position nicht und soll sie auch nicht kennen).
+    /// `true` = verarbeitet.
+    fn prozess_maus(&mut self, index: usize, px: i32, py: i32, art: u32, wert: i32) -> bool {
+        if !self.ist_prozess_fenster(index) {
+            return false;
+        }
+        let Some((lx, ly)) = self.fenster[index].lokal(px, py) else {
+            return false;
+        };
+        self.prozess_ereignis(index, prozessfenster::EreignisDaten::maus(art, lx, ly, wert))
+    }
+
     /// Scrollrad: geht an den Ui-Inhalt unter dem Cursor.
     fn maus_scroll(&mut self, px: i32, py: i32, delta: i8) -> NachLock {
         if let Some(index) = self
             .fenster_unter(px, py)
             .and_then(|id| self.index_von(id))
         {
+            if self.prozess_maus(
+                index,
+                px,
+                py,
+                prozessfenster::ART_MAUS_RAD,
+                delta as i32,
+            ) {
+                return NachLock::Keine;
+            }
             // TERMINALS ZUERST: Sie haben keinen Widget-Baum, der ein
             // Scroll-Ereignis verarbeiten könnte — bei ihnen blättert das
             // Rad im Rückblick. Drei Zeilen je Rasterung, wie überall.
@@ -1493,6 +1645,15 @@ impl FensterManager {
                 start_breite: f.breite(),
                 start_hoehe: f.hoehe(),
             };
+        } else if self.prozess_maus(
+            index,
+            px,
+            py,
+            prozessfenster::ART_MAUS_AB,
+            prozessfenster::KNOPF_LINKS,
+        ) {
+            // Klick in ein Prozess-Fenster: nur weiterreichen, der
+            // Kernel zeichnet und interpretiert hier nichts.
         } else if let Some((lx, ly)) = self.fenster[index].lokal(px, py) {
             // Klick in den Inhalt -> an die "App".
             if let Inhalt::Malflaeche { klicks } = &mut self.fenster[index].inhalt {
@@ -1529,6 +1690,15 @@ impl FensterManager {
         // beim LOSLASSEN) — aber nicht nach einem Fenster-Drag/Resize.
         if !hatte_interaktion {
             if let Some(index) = self.fenster_unter(px, py).and_then(|id| self.index_von(id)) {
+                if self.prozess_maus(
+                    index,
+                    px,
+                    py,
+                    prozessfenster::ART_MAUS_AUF,
+                    prozessfenster::KNOPF_LINKS,
+                ) {
+                    return NachLock::Keine;
+                }
                 if let Some((lx, ly)) = self.fenster[index].lokal(px, py) {
                     return self.ui_maus(index, crate::ui::UiEreignis::Losgelassen { x: lx, y: ly });
                 }
@@ -1611,6 +1781,7 @@ impl FensterManager {
                     f.y = ny;
                     f.groesse_setzen(nb as usize, nh as usize);
                     inhalt_zeichnen(f);
+                    self.prozess_groesse_melden(index);
                     let neu = self.fenster_flaeche(index);
                     self.dirty_melden(neu);
                 }
@@ -1647,6 +1818,19 @@ impl FensterManager {
             if matches!(self.fenster[index].inhalt, Inhalt::Ui(_)) {
                 self.ui_hover_fenster = Some(id);
                 let _ = self.ui_maus(index, crate::ui::UiEreignis::Bewegt { x: lx, y: ly });
+            } else if self.ist_prozess_fenster(index) {
+                // Prozess-Fenster bekommen jede Bewegung — die Queue fasst
+                // sie zusammen, es entsteht also hoechstens EIN wartendes
+                // Bewegungs-Ereignis (siehe prozessfenster.rs).
+                self.prozess_ereignis(
+                    index,
+                    prozessfenster::EreignisDaten::maus(
+                        prozessfenster::ART_MAUS_BEWEGT,
+                        lx,
+                        ly,
+                        0,
+                    ),
+                );
             }
         }
     }
@@ -1678,6 +1862,21 @@ impl FensterManager {
                     // Some(reaktion) = nicht schließen, Reaktion
                     // umsetzen (die App schließt später selbst über
                     // AppReaktion.schliessen).
+                    // PROZESS-FENSTER werden GEBETEN, nicht zugemacht: Der
+                    // Prozess besitzt den Puffer und darf noch aufraeumen.
+                    // Erst ein zweiter Klick erzwingt es (Begruendung in
+                    // prozessfenster::schliessen_wuenschen).
+                    if let Inhalt::Prozess(pf) = &mut self.fenster[index].inhalt {
+                        let erzwingen = pf.schliessen_wuenschen();
+                        self.wecken_faellig.push(id);
+                        if erzwingen {
+                            crate::serial_println!(
+                                "[fenster] Prozess-Fenster reagiert nicht — zweiter Klick schliesst es."
+                            );
+                            self.fenster_schliessen(index);
+                        }
+                        return NachLock::Keine;
+                    }
                     let hook = match &mut self.fenster[index].inhalt {
                         Inhalt::App(app_fenster) => app_fenster.app.schliessen_abfragen(),
                         _ => None,
@@ -1698,6 +1897,14 @@ impl FensterManager {
     /// das nächste offene Terminal). Fenster + Puffer-Vec werden
     /// gedroppt — der Heap-Speicher geht sauber zurück.
     fn fenster_schliessen(&mut self, index: usize) {
+        // Ein Prozess-Fenster verschwindet, waehrend sein Besitzer
+        // womoeglich gerade auf ein Ereignis wartet. Ihn wecken — sein
+        // Syscall laeuft neu und meldet dann ein ungueltiges Handle.
+        // Ohne das wartete er auf ein Ereignis, das nie kommt.
+        if self.ist_prozess_fenster(index) {
+            let id = self.fenster[index].id;
+            self.wecken_faellig.push(id);
+        }
         if let Inhalt::Terminal { sitzung, .. } = self.fenster[index].inhalt {
             crate::shell::sitzung::austragen(sitzung);
             self.fenster.remove(index);
@@ -1731,6 +1938,7 @@ impl FensterManager {
             let hoehe = (bh - metrik().titel_hoehe - metrik().taskleiste_hoehe).max(metrik().min_fenster_hoehe as i32) as usize;
             f.groesse_setzen(breite, hoehe);
             inhalt_zeichnen(f);
+            self.prozess_groesse_melden(index);
         }
         self.alles_dirty = true;
     }
@@ -1753,6 +1961,7 @@ impl FensterManager {
                     }
                 }
                 inhalt_zeichnen(f);
+                self.prozess_groesse_melden(index);
             }
         }
         self.alles_dirty = true;
@@ -1773,6 +1982,7 @@ impl FensterManager {
             f.y = 0;
             f.groesse_setzen(breite, hoehe);
             inhalt_zeichnen(f);
+            self.prozess_groesse_melden(index);
         }
         self.alles_dirty = true;
     }
@@ -1783,6 +1993,15 @@ impl FensterManager {
             None => return NachLock::Keine,
         };
         if let Some(index) = self.index_von(fokus) {
+            // PROZESS-FENSTER bekommen die Taste unveraendert: Der Kernel
+            // deutet nichts, er reicht durch (Unicode-Zeichen ODER
+            // Sondertasten-Code — siehe prozessfenster.rs).
+            if self.ist_prozess_fenster(index) {
+                if let Some(ereignis) = prozessfenster::taste_uebersetzen(taste) {
+                    self.prozess_ereignis(index, ereignis);
+                }
+                return NachLock::Keine;
+            }
             // Trait-Apps bekommen die Taste ZUERST angeboten
             // (App-Shortcuts, Eingabemodi wie die Explorer-Adresszeile):
             let hook = match &mut self.fenster[index].inhalt {
@@ -2245,6 +2464,12 @@ fn inhalt_icon(inhalt: &Inhalt) -> &'static crate::grafik::Icon {
         Inhalt::Uhr => &crate::grafik::ICON_UHR,
         Inhalt::TastaturEcho { .. } => &crate::grafik::ICON_TASTATUR,
         Inhalt::Malflaeche { .. } => &crate::grafik::ICON_PINSEL,
+        // Ein Prozess-Fenster traegt das SpeedOS-Logo. Bewusst kein vom
+        // Programm waehlbares Icon: Die Titelleiste gehoert dem Kernel,
+        // und ein Programm soll sich dort nicht als etwas anderes ausgeben
+        // koennen (dieselbe Ueberlegung wie beim Titel, der zwar setzbar,
+        // aber laengenbegrenzt und immer als Fenstertitel erkennbar ist).
+        Inhalt::Prozess(_) => &crate::grafik::ICON_LOGO,
     }
 }
 
@@ -2357,6 +2582,14 @@ fn inhalt_zeichnen(fenster: &mut Fenster) {
         app_fenster.ui.zeichnen(&mut fenster.puffer);
         return;
     }
+    // PROZESS-FENSTER: Der Kernel zeichnet hier NICHTS. Der Puffer gehoert
+    // dem Prozess; was drinsteht, hat er per `fenster_zeichnen` geliefert.
+    // Ihn hier zu uebermalen (etwa bei einem Theme-Wechsel) waere ein
+    // Datenverlust, den der Prozess nicht kommen sieht — er bekommt statt
+    // dessen ein Groesse-Ereignis und malt selbst neu.
+    if let Inhalt::Prozess(_) = &fenster.inhalt {
+        return;
+    }
     // Terminal: Rastergröße an die Fenstergröße anpassen, dann rendern.
     // (&mut fenster.inhalt und &mut fenster.puffer sind verschiedene
     // Felder — der Borrow-Checker erlaubt beides gleichzeitig.)
@@ -2384,7 +2617,7 @@ fn inhalt_zeichnen(fenster: &mut Fenster) {
 
     match &fenster.inhalt {
         // Oben schon behandelt (frühe returns):
-        Inhalt::Terminal { .. } | Inhalt::Ui(_) | Inhalt::App(_) => {}
+        Inhalt::Terminal { .. } | Inhalt::Ui(_) | Inhalt::App(_) | Inhalt::Prozess(_) => {}
         Inhalt::Uhr => {
             let ticks = zeit::ticks();
             let ms = zeit::ms_seit_boot();
@@ -2432,6 +2665,20 @@ pub fn desktop_aktiv() -> bool {
 
 fn mit_manager<T>(f: impl FnOnce(&mut FensterManager) -> T) -> Option<T> {
     x86_64::instructions::interrupts::without_interrupts(|| MANAGER.lock().as_mut().map(f))
+}
+
+/// Wie `mit_manager`, aber die vorgemerkten Weckrufe an Prozess-Fenster
+/// werden danach AUSGELÖST — mit losgelassenem Lock.
+///
+/// Es gibt diesen Helfer, damit die Regel nicht an jeder Aufrufstelle neu
+/// beachtet werden muss: `scheduler::wecken` nimmt die Prozess-Tabelle,
+/// der Timer nimmt sie VOR dem MANAGER. Wer aus dem gehaltenen MANAGER
+/// heraus weckt, baut ein ABBA (siehe `prozess_ereignis`). Jede Funktion,
+/// die Ereignisse erzeugen KANN, benutzt deshalb diese hier.
+fn mit_manager_wecken<T>(f: impl FnOnce(&mut FensterManager) -> T) -> Option<T> {
+    let (wert, wecken) = mit_manager(|m| (f(m), m.wecken_abholen()))?;
+    besitzer_wecken(&wecken);
+    Some(wert)
 }
 
 pub fn desktop_starten() {
@@ -2490,13 +2737,24 @@ pub fn maus_event(event: &MausEvent) {
     // App-Starts und Ui-Nachrichten werden ERST HIER ausgeführt —
     // nach dem Loslassen des MANAGER-Locks (Deadlock-Regel: Starts
     // nehmen den Lock selbst, Handler drucken womöglich).
-    let nach = mit_manager(|m| m.maus_event(event, px, py)).unwrap_or(NachLock::Keine);
+    let nach = mit_manager_wecken(|m| m.maus_event(event, px, py)).unwrap_or(NachLock::Keine);
     nach_lock_ausfuehren(nach);
 }
 
 pub fn taste_event(taste: DecodedKey) {
-    let nach = mit_manager(|m| m.taste_event(taste)).unwrap_or(NachLock::Keine);
+    let nach = mit_manager_wecken(|m| m.taste_event(taste)).unwrap_or(NachLock::Keine);
     nach_lock_ausfuehren(nach);
+}
+
+/// Weckt die Besitzer der Fenster, für die Ereignisse angefallen sind.
+///
+/// **Nur mit LOSGELASSENEM MANAGER-Lock aufzurufen** (die Begründung steht
+/// bei `FensterManager::prozess_ereignis`): `scheduler::wecken` nimmt die
+/// Prozess-Tabelle, und der Timer nimmt sie VOR dem MANAGER.
+fn besitzer_wecken(fenster: &[FensterId]) {
+    for id in fenster {
+        crate::scheduler::wecken(crate::prozess::Warteauf::Fenster(id.0));
+    }
 }
 
 // ----- Startmenü (Startknopf in der Taskleiste oder Super-Taste) -----
@@ -2577,6 +2835,378 @@ pub fn terminal_blaettern(zeilen: isize, seitenweise: bool) -> bool {
 /// Springt im fokussierten Terminal ans Ende (beim Tippen).
 pub fn terminal_zum_ende() {
     let _ = mit_manager(|m| m.fokus_terminal_zum_ende());
+}
+
+// ---------------------------------------------------------------------------
+// DIE SCHNITTSTELLE FÜR DIE FENSTER-SYSCALLS (Serie 8)
+//
+// Alles hier wird aus einem SYSCALL gerufen, also aus dem Kontext eines
+// Ring-3-Prozesses mit ausgeschalteten Interrupts. Das ist erlaubt, weil
+// MANAGER ausschliesslich mit `without_interrupts` gehalten wird: Wenn der
+// Syscall läuft, hält ihn niemand (Lock-Disziplin, docs/syscalls.md §8).
+//
+// KEINE dieser Funktionen ruft `scheduler::wecken` selbst — sie geben die
+// fälligen Weckrufe zurück oder der Aufrufer holt sie mit
+// `wecken_und_ausfuehren`. Der Grund ist immer derselbe: die Lock-Ordnung.
+// ---------------------------------------------------------------------------
+
+/// Legt ein Fenster an, dessen Inhalt ein PROZESS malt. `None` = es gibt
+/// keinen Desktop (der Fenster-Manager läuft nicht).
+pub fn prozess_fenster_oeffnen(
+    besitzer: crate::prozess::Pid,
+    titel: &str,
+    breite: usize,
+    hoehe: usize,
+) -> Option<FensterId> {
+    mit_manager_wecken(|m| {
+        let versatz = (m.fenster.len() as i32 % 5) * 40;
+        let inhalt = Inhalt::Prozess(prozessfenster::ProzessFenster::neu(besitzer));
+        let id = m.fenster_erstellen(titel, 120 + versatz, 90 + versatz, breite, hoehe, inhalt);
+        // Die Startgröße ist eine Meldung wert: Der Prozess erfährt sie so
+        // über denselben Weg wie jede spätere Änderung und braucht keinen
+        // Sonderfall „beim ersten Mal weiß ich es aus dem Rückgabewert".
+        if let Some(index) = m.index_von(id) {
+            m.prozess_groesse_melden(index);
+        }
+        id
+    })
+}
+
+/// Die aktuelle Inhaltsgröße eines Prozess-Fensters — `None`, wenn es das
+/// Fenster nicht (mehr) gibt oder es keinem Prozess gehört.
+pub fn prozess_fenster_groesse(id: FensterId) -> Option<(usize, usize)> {
+    mit_manager(|m| {
+        let index = m.index_von(id)?;
+        if !m.ist_prozess_fenster(index) {
+            return None;
+        }
+        Some((m.fenster[index].puffer.breite, m.fenster[index].puffer.hoehe))
+    })
+    .flatten()
+}
+
+/// Was `pixel_schreiben` zurückliefert.
+pub struct ZeichenErgebnis {
+    /// Wie viele Pixel wirklich gesetzt wurden (nach dem Klemmen).
+    pub pixel: usize,
+    /// Der betroffene Bereich in Fensterinhalt-Koordinaten (schon geklemmt).
+    pub bereich: Rechteck,
+}
+
+/// Überträgt Pixel in den Fenster-Puffer — die Kernhälfte von
+/// `fenster_zeichnen`.
+///
+/// ZEILENWEISE, und das ist der Kern des Entwurfs: `zeilen_puffer` ist ein
+/// vom Aufrufer bereitgestellter Kernel-Puffer für EINE Zeile,
+/// `zeile_lesen(quellzeile, ziel)` füllt ihn aus dem User-Speicher (mit
+/// aller Prüfung — das gehört in den Syscall, nicht hierher).
+///
+/// So bleibt beides klein: Der MANAGER-Lock wird EINMAL genommen (nicht je
+/// Zeile), und es entsteht NIE ein megabytegrosser Zwischenpuffer im
+/// Kernel — ein volles 4K-Fenster wären 33 MiB, mehr als unser Heap für so
+/// etwas übrig hat. Eine Zeile sind selbst bei 4K 15 KiB und passt damit
+/// unter die 64-KiB-Grenze von `copy_in`, die dadurch unangetastet bleibt.
+///
+/// GEKLEMMT, NICHT ABGELEHNT: Ein Rechteck, das über den Fensterrand
+/// hinausragt, wird auf das Fenster geschnitten. Der Grund ist ein
+/// unvermeidbares Wettrennen — zwischen dem Augenblick, in dem ein Prozess
+/// seine Größe erfährt, und dem, in dem er zeichnet, kann der Benutzer am
+/// Fensterrand gezogen haben. Würde das einen Fehler geben, müsste jedes
+/// Programm den Normalfall „der Benutzer zieht gerade" als Fehler behandeln.
+/// Geschrieben wird dabei NIE über den Puffer hinaus; das ist die Zusage,
+/// auf die es ankommt.
+///
+/// `None` = Fenster gibt es nicht (mehr) oder es gehört keinem Prozess.
+pub fn pixel_schreiben(
+    id: FensterId,
+    x: i32,
+    y: i32,
+    breite: i32,
+    hoehe: i32,
+    zeilen_puffer: &mut [u8],
+    mut zeile_lesen: impl FnMut(i32, &mut [u8]) -> bool,
+) -> Option<ZeichenErgebnis> {
+    mit_manager(|m| {
+        let index = m.index_von(id)?;
+        if !m.ist_prozess_fenster(index) {
+            return None;
+        }
+        let fenster_breite = m.fenster[index].puffer.breite as i32;
+        let fenster_hoehe = m.fenster[index].puffer.hoehe as i32;
+        let ziel = Rechteck::neu(0, 0, fenster_breite, fenster_hoehe);
+        let geklemmt = Rechteck::neu(x, y, breite, hoehe).schneiden(&ziel)?;
+
+        // Wie viele Pixel am linken/oberen Rand abgeschnitten wurden —
+        // genau so weit muss in die Quelle hineingesprungen werden.
+        let versatz_links = (geklemmt.x - x).max(0) as usize;
+        let versatz_oben = (geklemmt.y - y).max(0) as usize;
+        let zeilen_bytes = (breite as usize * 4).min(zeilen_puffer.len());
+
+        let mut gesetzt = 0usize;
+        for zeile in 0..geklemmt.hoehe {
+            let quellzeile = zeile + versatz_oben as i32;
+            if !zeile_lesen(quellzeile, &mut zeilen_puffer[..zeilen_bytes]) {
+                break;
+            }
+            let ab = (versatz_links * 4).min(zeilen_bytes);
+            gesetzt += m.fenster[index].puffer.zeile_aus_pixelbytes(
+                geklemmt.x as usize,
+                (geklemmt.y + zeile) as usize,
+                &zeilen_puffer[ab..zeilen_bytes],
+            );
+        }
+
+        // Dem Compositor GENAU den Streifen melden — das ist der Grund,
+        // warum der Bereich überhaupt im Syscall steht (die Dirty-Rect-
+        // Mechanik aus Serie 4 zahlt sich hier unmittelbar aus).
+        let (fx, fy) = (m.fenster[index].x, m.fenster[index].y);
+        let titel_h = metrik().titel_hoehe;
+        m.dirty_melden(Rechteck::neu(
+            fx + geklemmt.x,
+            fy + titel_h + geklemmt.y,
+            geklemmt.breite,
+            geklemmt.hoehe,
+        ));
+        Some(ZeichenErgebnis {
+            pixel: gesetzt,
+            bereich: geklemmt,
+        })
+    })
+    .flatten()
+}
+
+/// Holt das nächste Ereignis eines Prozess-Fensters.
+///
+/// `Some(None)` = das Fenster gibt es, aber es liegt nichts an.
+/// `None` = das Fenster gibt es nicht (mehr).
+pub fn prozess_ereignis_holen(id: FensterId) -> Option<Option<prozessfenster::EreignisDaten>> {
+    mit_manager(|m| {
+        let index = m.index_von(id)?;
+        match &mut m.fenster[index].inhalt {
+            Inhalt::Prozess(pf) => Some(pf.ereignis_holen()),
+            _ => None,
+        }
+    })
+    .flatten()
+}
+
+/// Was der Timer über ein Prozess-Fenster erfahren kann.
+///
+/// VIER Fälle und nicht `Option<bool>`, weil zwei davon zwar beide „ich
+/// weiss es nicht" heissen, aber GEGENTEILIGE Folgen haben: Ein Fenster,
+/// das es nicht mehr gibt, MUSS seinen Warter wecken (sonst wartet er auf
+/// ein Ereignis, das nie kommt) — ein Lock, der gerade belegt ist, darf ihn
+/// dagegen ruhig liegen lassen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FensterLage {
+    /// Es liegt etwas an.
+    Ereignis,
+    /// Es liegt nichts an.
+    Leer,
+    /// Das Fenster gibt es nicht mehr (geschlossen, Prozess beendet).
+    Weg,
+    /// Konnte nicht nachsehen — im nächsten Tick erneut.
+    Unbekannt,
+}
+
+/// Liegt ein Ereignis an? Für das Sicherheitsnetz im Timer.
+///
+/// `try_lock`: Aus dem TIMER gerufen, und der hält dabei die Prozess-
+/// Tabelle. Auf den MANAGER zu WARTEN wäre dort verboten.
+pub fn prozess_fenster_lage(fenster_id: u64) -> FensterLage {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let Some(mut wache) = MANAGER.try_lock() else {
+            return FensterLage::Unbekannt;
+        };
+        let Some(m) = wache.as_mut() else {
+            return FensterLage::Weg;
+        };
+        let Some(index) = m.index_von(FensterId(fenster_id)) else {
+            return FensterLage::Weg;
+        };
+        match &m.fenster[index].inhalt {
+            Inhalt::Prozess(pf) if pf.hat_ereignis() => FensterLage::Ereignis,
+            Inhalt::Prozess(_) => FensterLage::Leer,
+            // Die Id gibt es, aber sie gehört keinem Prozess — für den
+            // Warter dasselbe wie „weg".
+            _ => FensterLage::Weg,
+        }
+    })
+}
+
+/// Setzt/liest die Wartefrist eines Prozess-Fensters.
+///
+/// Die Frist liegt im Fenster und nicht im Syscall, weil ein blockierender
+/// Syscall NEU GESTARTET wird (Serie 6, Teil 6): Beim zweiten Durchlauf
+/// würde sie sonst wieder von vorn beginnen. Gesetzt wird nur, wenn noch
+/// keine steht — der Neustart ändert damit nichts.
+pub fn prozess_frist(id: FensterId, vorschlag_ms: u64) -> Option<u64> {
+    mit_manager(|m| {
+        let index = m.index_von(id)?;
+        match &mut m.fenster[index].inhalt {
+            Inhalt::Prozess(pf) => {
+                if pf.frist_bis_ms == 0 {
+                    pf.frist_bis_ms = vorschlag_ms;
+                }
+                Some(pf.frist_bis_ms)
+            }
+            _ => None,
+        }
+    })
+    .flatten()
+}
+
+/// Löscht die Wartefrist (der Syscall kehrt zurück).
+pub fn prozess_frist_loeschen(id: FensterId) {
+    let _ = mit_manager(|m| {
+        if let Some(index) = m.index_von(id) {
+            if let Inhalt::Prozess(pf) = &mut m.fenster[index].inhalt {
+                pf.frist_bis_ms = 0;
+            }
+        }
+    });
+}
+
+/// Ändert den Titel eines Prozess-Fensters. `false` = gibt es nicht.
+pub fn prozess_titel_setzen(id: FensterId, titel: &str) -> bool {
+    mit_manager(|m| {
+        let Some(index) = m.index_von(id) else {
+            return false;
+        };
+        if !m.ist_prozess_fenster(index) {
+            return false;
+        }
+        m.fenster[index].titel = String::from(titel);
+        // Titelleiste UND Taskleisten-Knopf zeigen ihn:
+        m.fenster_dirty_melden(id);
+        let leiste = m.taskleiste_rechteck();
+        m.dirty_melden(leiste);
+        true
+    })
+    .unwrap_or(false)
+}
+
+/// Schliesst ein Prozess-Fenster (der Prozess selbst oder sein Ende).
+///
+/// Wird auch von `KernelObjekt::schliessen` gerufen — also beim Aufräumen
+/// eines beendeten Prozesses. Genau dadurch räumt die Handle-Tabelle aus
+/// Serie 6 die Fenster automatisch ab: Es gibt keinen Pfad, der es
+/// vergessen könnte.
+pub fn prozess_fenster_schliessen(id: FensterId) {
+    let _ = mit_manager_wecken(|m| {
+        if let Some(index) = m.index_von(id) {
+            if m.ist_prozess_fenster(index) {
+                m.fenster_schliessen(index);
+            }
+        }
+    });
+}
+
+/// Wie viele Prozess-Fenster gibt es? (Leak-Tests.)
+pub fn prozess_fenster_anzahl() -> usize {
+    mit_manager(|m| m.fenster.iter().filter(|f| matches!(f.inhalt, Inhalt::Prozess(_))).count())
+        .unwrap_or(0)
+}
+
+/// Wie viele Ereignisse hat das Fenster verworfen? (Diagnose/Tests.)
+pub fn prozess_verworfen(id: FensterId) -> Option<u64> {
+    mit_manager(|m| {
+        let index = m.index_von(id)?;
+        match &m.fenster[index].inhalt {
+            Inhalt::Prozess(pf) => Some(pf.verworfen),
+            _ => None,
+        }
+    })
+    .flatten()
+}
+
+/// Der ABI-Zahlenwert einer FensterId (das Handle zeigt darauf).
+impl FensterId {
+    pub fn wert(self) -> u64 {
+        self.0
+    }
+    pub fn aus_wert(wert: u64) -> FensterId {
+        FensterId(wert)
+    }
+}
+
+/// NUR FÜR TESTS: legt den Fenster-Manager an, OHNE den Desktop-Modus
+/// einzuschalten.
+///
+/// Der Unterschied ist wichtig: `desktop_starten` leitet `print!` in ein
+/// Terminal-Fenster um, und ein Testkernel würde damit seine eigene
+/// Ausgabe verlieren. So gibt es Fenster, aber die Ausgabe bleibt, wo sie
+/// hingehört. `false` = kein Framebuffer (dann gibt es nichts zu testen).
+pub fn manager_fuer_test_starten() -> bool {
+    let Some(info) = framebuffer::mit_framebuffer(|fb| fb.info()) else {
+        return false;
+    };
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut wache = MANAGER.lock();
+        if wache.is_none() {
+            *wache = Some(FensterManager::neu(info.width as i32, info.height as i32));
+        }
+    });
+    true
+}
+
+/// NUR FÜR TESTS: liest EIN Pixel aus dem Fenster-Puffer zurück (als
+/// `0x00RRGGBB`, also im Format der Fenster-ABI).
+///
+/// Damit lässt sich nachweisen, was ein `fenster_zeichnen` wirklich
+/// bewirkt hat — und vor allem, was es NICHT bewirkt hat: Ein Testfall
+/// legt Kanarienvögel neben den Zielbereich und prüft, dass sie
+/// unverändert sind.
+pub fn test_pixel_lesen(id: FensterId, x: usize, y: usize) -> Option<u32> {
+    mit_manager(|m| {
+        let index = m.index_von(id)?;
+        let farbe = m.fenster[index].puffer.flaeche_lesen(x, y)?;
+        Some(((farbe.r as u32) << 16) | ((farbe.g as u32) << 8) | farbe.b as u32)
+    })
+    .flatten()
+}
+
+/// NUR FÜR TESTS: ein Ereignis von Hand einspeisen (Maus/Tastatur kommen
+/// im Testkernel nicht von echter Hardware).
+pub fn test_ereignis_einspeisen(id: FensterId, ereignis: prozessfenster::EreignisDaten) -> bool {
+    mit_manager_wecken(|m| {
+        let Some(index) = m.index_von(id) else {
+            return false;
+        };
+        m.prozess_ereignis(index, ereignis)
+    })
+    .unwrap_or(false)
+}
+
+/// NUR FÜR TESTS: den Schliessen-Knopf betätigen.
+pub fn test_schliessen_klicken(id: FensterId) -> bool {
+    mit_manager_wecken(|m| {
+        let Some(index) = m.index_von(id) else {
+            return false;
+        };
+        if let Inhalt::Prozess(pf) = &mut m.fenster[index].inhalt {
+            let erzwingen = pf.schliessen_wuenschen();
+            if erzwingen {
+                m.fenster_schliessen(index);
+            }
+            return true;
+        }
+        false
+    })
+    .unwrap_or(false)
+}
+
+/// NUR FÜR TESTS: die Fenstergröße ändern (wie ein Zug am Fensterrand).
+pub fn test_groesse_aendern(id: FensterId, breite: usize, hoehe: usize) -> bool {
+    mit_manager_wecken(|m| {
+        let Some(index) = m.index_von(id) else {
+            return false;
+        };
+        m.fenster[index].groesse_setzen(breite, hoehe);
+        m.prozess_groesse_melden(index);
+        true
+    })
+    .unwrap_or(false)
 }
 
 // ----- Schnittstelle für die App-Registry (apps.rs) -----

@@ -282,6 +282,14 @@ pub enum Warteauf {
     PipeLesen(crate::pipe::PipeId),
     /// `schreibe` auf einer vollen Pipe.
     PipeSchreiben(crate::pipe::PipeId),
+    /// `fenster_ereignis` auf einem Fenster ohne wartendes Ereignis
+    /// (Serie 8). Der Wert ist die `FensterId` als Zahl — `prozess.rs`
+    /// kennt die Fenster-Schicht nicht und soll sie auch nicht kennen.
+    ///
+    /// Der ZEITPUNKT der Frist steht nicht hier, sondern im Fenster: Ein
+    /// blockierender Syscall wird bei uns NEU GESTARTET, und `wach_ab_ms`
+    /// würde beim zweiten Durchlauf neu berechnet.
+    Fenster(u64),
 }
 
 /// Der Prozess-Kontrollblock.

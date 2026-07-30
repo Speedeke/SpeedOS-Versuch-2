@@ -91,6 +91,15 @@ pub enum KernelObjekt {
     PipeLesen(crate::pipe::PipeId),
     /// Das SCHREIB-Ende einer Pipe.
     PipeSchreiben(crate::pipe::PipeId),
+    /// EIN FENSTER, das diesem Prozess gehört (Serie 8).
+    ///
+    /// Dass es hier steht und nicht in einer eigenen Fenster-Tabelle, ist
+    /// die ganze Pointe: Ein Fenster ist damit ein Handle wie jedes andere
+    /// — es lässt sich mit `schliesse` schliessen, es ist aus einem
+    /// FREMDEN Prozess nicht erreichbar (dort führt keine Zahl dorthin),
+    /// und der `Drop` dieser Tabelle räumt es beim Prozess-Ende
+    /// automatisch ab. Kein Pfad kann das vergessen.
+    Fenster(crate::fenster::FensterId),
 }
 
 impl KernelObjekt {
@@ -104,6 +113,7 @@ impl KernelObjekt {
             KernelObjekt::Socket(_) => "Socket",
             KernelObjekt::PipeLesen(_) => "Pipe (lesen)",
             KernelObjekt::PipeSchreiben(_) => "Pipe (schreiben)",
+            KernelObjekt::Fenster(_) => "Fenster",
         }
     }
 
@@ -123,6 +133,11 @@ impl KernelObjekt {
             KernelObjekt::PipeSchreiben(id) => {
                 crate::pipe::ende_schliessen(id, crate::pipe::Ende::Schreiben)
             }
+            // Das Fenster verschwindet vom Bildschirm und sein Pixel-
+            // Puffer vom Heap. Laeuft aus TASK-Kontext (der Aufraeum-Task
+            // laesst den Prozess fallen), nie im Interrupt — der
+            // MANAGER-Lock ist hier also erlaubt.
+            KernelObjekt::Fenster(id) => crate::fenster::prozess_fenster_schliessen(id),
             // Dateien sind pfadbasiert, die Standard-Kanäle gehören dem
             // Kernel — da gibt es nichts zu tun.
             KernelObjekt::Eingabe | KernelObjekt::Ausgabe | KernelObjekt::Diagnose => {}
@@ -226,6 +241,15 @@ impl HandleTabelle {
             .filter(|objekt| matches!(objekt, KernelObjekt::Socket(_)))
             .count()
     }
+
+    /// Wie viele FENSTER hält dieser Prozess? (für den Leak-Test)
+    pub fn anzahl_fenster(&self) -> usize {
+        self.eintraege
+            .iter()
+            .flatten()
+            .filter(|objekt| matches!(objekt, KernelObjekt::Fenster(_)))
+            .count()
+    }
 }
 
 impl Default for HandleTabelle {
@@ -249,7 +273,10 @@ impl Drop for HandleTabelle {
         for objekt in self.eintraege.iter_mut().filter_map(|platz| platz.take()) {
             let zaehlt = matches!(
                 objekt,
-                KernelObjekt::Socket(_) | KernelObjekt::PipeLesen(_) | KernelObjekt::PipeSchreiben(_)
+                KernelObjekt::Socket(_)
+                    | KernelObjekt::PipeLesen(_)
+                    | KernelObjekt::PipeSchreiben(_)
+                    | KernelObjekt::Fenster(_)
             );
             objekt.schliessen();
             if zaehlt {
@@ -258,7 +285,7 @@ impl Drop for HandleTabelle {
         }
         if geschlossen > 0 {
             crate::serial_println!(
-                "[handles] {} Socket(s)/Pipe-Ende(n) beim Prozess-Ende automatisch geschlossen.",
+                "[handles] {} Socket(s)/Pipe-Ende(n)/Fenster beim Prozess-Ende automatisch geschlossen.",
                 geschlossen
             );
         }
@@ -377,8 +404,10 @@ pub fn schreib_ziel(handle: u64) -> Result<SchreibZiel, Fehler> {
         }
         KernelObjekt::Socket(h) => Ok(SchreibZiel::Socket(*h)),
         KernelObjekt::PipeSchreiben(id) => Ok(SchreibZiel::Pipe(*id)),
-        // Auf das LESE-Ende zu schreiben ist ein Typ-Fehler.
-        KernelObjekt::PipeLesen(_) => Err(Fehler::FalscherHandleTyp),
+        // Auf das LESE-Ende zu schreiben ist ein Typ-Fehler — und in ein
+        // Fenster schreibt man mit `fenster_zeichnen`, nicht mit
+        // `schreibe`: Pixel sind kein Byte-Strom.
+        KernelObjekt::PipeLesen(_) | KernelObjekt::Fenster(_) => Err(Fehler::FalscherHandleTyp),
     })?
 }
 

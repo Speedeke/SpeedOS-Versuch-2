@@ -128,6 +128,13 @@ path = "src/bin/holes.rs"
 name = "news"
 path = "src/bin/news.rs"
 
+# DER MEILENSTEIN VON SERIE 8 (Teil 1): ein Ring-3-Prozess mit einem
+# EIGENEN FENSTER. Malt einen Verlauf, reagiert auf Klicks und Tasten,
+# folgt Groessenaenderungen, beendet sich beim Schliessen-Wunsch.
+[[bin]]
+name = "fenstertest"
+path = "src/bin/fenstertest.rs"
+
 # panic = "abort" ist Pflicht: Abwickeln (unwinding) bräuchte eine
 # Personality-Funktion und Landing Pads — beides gibt es ohne std nicht.
 # Ein panickendes SpeedOS-Programm beendet sich per exit(101).

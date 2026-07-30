@@ -250,6 +250,35 @@ pub fn copy_in_prozess(
     copy_in(user_ptr, laenge)
 }
 
+/// Wie `copy_in`, aber in einen SCHON VORHANDENEN Kernel-Puffer.
+///
+/// Warum es das gibt (Serie 8): `fenster_zeichnen` überträgt ein Bild in
+/// vielen Zeilen. Mit `copy_in` entstünde je Zeile ein frischer `Vec` —
+/// bei einem vollen 4K-Fenster 2160 Allokationen für einen einzigen
+/// Syscall. Mit einem Puffer, den der Aufrufer EINMAL anlegt und
+/// wiederverwendet, sind es null.
+///
+/// Die PRÜFUNG ist unverändert dieselbe (`user_bereich_pruefen`, alle drei
+/// Stufen, dieselbe 64-KiB-Grenze) — nur das Ziel ist ein anderes. Genau
+/// deshalb steht die Funktion hier und nicht beim Aufrufer: Es gibt weiter
+/// nur EINE Stelle im Kernel, an der einem User-Zeiger gefolgt wird.
+///
+/// Kopiert wird `ziel.len()` Bytes. Panickt NIE.
+pub fn copy_in_scheibe(user_ptr: u64, ziel: &mut [u8]) -> Result<(), CopyFehler> {
+    if ziel.is_empty() {
+        return Ok(());
+    }
+    user_bereich_pruefen(user_ptr, ziel.len(), false)?;
+    // unsafe: Der gesamte Bereich ist geprüft im AKTIVEN Adressraum
+    // gemappt und user-zugänglich — kein Fault möglich. Quelle und Ziel
+    // können sich nicht überlappen: `ziel` ist Kernel-Speicher, die Quelle
+    // liegt nachweislich im User-Bereich (Prüfstufe (a)).
+    unsafe {
+        core::ptr::copy_nonoverlapping(user_ptr as *const u8, ziel.as_mut_ptr(), ziel.len());
+    }
+    Ok(())
+}
+
 /// Wie `copy_out`, mit explizit genanntem Prozess-Adressraum.
 pub fn copy_out_prozess(
     raum: &adressraum::AdressRaum,

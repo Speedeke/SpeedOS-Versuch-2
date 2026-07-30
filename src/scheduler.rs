@@ -273,6 +273,7 @@ pub fn weck_passt(wartet_auf: Warteauf, ereignis: Warteauf) -> bool {
         (Warteauf::PipeLesen(a), Warteauf::PipeLesen(b)) => a == b,
         (Warteauf::PipeSchreiben(a), Warteauf::PipeSchreiben(b)) => a == b,
         (Warteauf::Kind(wartend), Warteauf::Kind(geendet)) => wartend == 0 || wartend == geendet,
+        (Warteauf::Fenster(a), Warteauf::Fenster(b)) => a == b,
         _ => false,
     }
 }
@@ -561,6 +562,27 @@ fn warter_wecken(tabelle: &mut Tabelle, jetzt_ms: u64) {
             Some(Warteauf::Kind(pid)) => prozess.kind_ende_bereit(pid),
             Some(Warteauf::PipeLesen(id)) => crate::pipe::lesbar(id),
             Some(Warteauf::PipeSchreiben(id)) => crate::pipe::schreibbar(id),
+            // DAS SICHERHEITSNETZ FÜR FENSTER-EREIGNISSE (Serie 8): Der
+            // schnelle Weg ist `wecken` aus dem Eingabe-Pfad; hier wird
+            // nachgesehen, falls der aussetzen musste. `try_lock` — wir
+            // halten die Tabelle und dürfen auf den MANAGER nicht warten;
+            // „konnte nicht nachsehen" heisst dann schlicht „nächster
+            // Tick nochmal". Zusätzlich die FRIST: `wach_ab_ms` ist bei
+            // diesem Grund gesetzt, wenn der Aufrufer eine mitgegeben hat.
+            Some(Warteauf::Fenster(id)) => {
+                use crate::fenster::FensterLage;
+                match crate::fenster::prozess_fenster_lage(id) {
+                    FensterLage::Ereignis => true,
+                    // Fenster weg (geschlossen, Prozess-Ende): Der Warter
+                    // MUSS geweckt werden, sonst wartet er auf ein
+                    // Ereignis, das nie kommt. Sein Syscall läuft neu und
+                    // meldet dann ein ungültiges Handle.
+                    FensterLage::Weg => true,
+                    FensterLage::Leer | FensterLage::Unbekannt => {
+                        weck_faellig(prozess.wach_ab_ms, jetzt_ms)
+                    }
+                }
+            }
             // Kein Grund vermerkt: Der alte Weg über `wach_ab_ms` allein
             // (warten_setzen von aussen) — bleibt liegen, bis ihn jemand
             // ausdrücklich weckt.
@@ -968,7 +990,7 @@ pub fn syscall_schlafen(rahmen: *mut TrapFrame, ms: u64) -> Option<*mut TrapFram
 ///    Neustart noch die Syscall-Nummer und das dritte Argument.
 ///
 /// Liefert den Rahmen, mit dem es weitergeht (der eines anderen Prozesses).
-pub fn blockieren(rahmen: *mut TrapFrame, grund: Warteauf) -> *mut TrapFrame {
+pub fn blockieren(rahmen: *mut TrapFrame, grund: Warteauf, wach_ab_ms: u64) -> *mut TrapFrame {
     let aktuell = AKTUELL.load(Ordering::Relaxed);
     if !PLANUNG_AN.load(Ordering::Relaxed) || aktuell == KERNEL_SLOT {
         return rahmen;
@@ -983,7 +1005,8 @@ pub fn blockieren(rahmen: *mut TrapFrame, grund: Warteauf) -> *mut TrapFrame {
             None => return rahmen,
         };
         prozess.wartet_auf = Some(grund);
-        prozess.wach_ab_ms = 0;
+        // 0 = keine Frist (Pipes, warte) — dann weckt nur das Ereignis.
+        prozess.wach_ab_ms = wach_ab_ms;
         prozess.zustand = Zustand::Wartend;
     }
     // Nicht mehr lauffähig -> Regel 1 der Wechsel-Entscheidung greift.

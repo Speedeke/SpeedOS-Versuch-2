@@ -31,7 +31,13 @@ pub enum Ausgang {
     Fertig(SysErgebnis),
     /// Noch nicht möglich. Der Dispatcher legt den Prozess mit diesem Grund
     /// schlafen und lässt den Syscall danach neu laufen.
-    Blockieren(Warteauf),
+    ///
+    /// Die zweite Zahl ist ein WECKZEITPUNKT in ms seit Boot; `0` heisst
+    /// „keine Frist, nur das Ereignis weckt". Sie steht hier, weil
+    /// `fenster_ereignis` mit Frist wartet — und weil ein Weckzeitpunkt
+    /// beim Blockieren gesetzt werden muss, nicht danach: Zwischen beidem
+    /// könnte der Timer feuern.
+    Blockieren(Warteauf, u64),
 }
 
 // ---------------------------------------------------------------------------
@@ -112,7 +118,7 @@ pub fn sys_lese(h: u64, ptr: u64, laenge: u64) -> Ausgang {
                     }
                 }
                 // NICHTS wurde entnommen -> der Neustart ist gefahrlos.
-                PipeErgebnis::Blockiert => Ausgang::Blockieren(Warteauf::PipeLesen(id)),
+                PipeErgebnis::Blockiert => Ausgang::Blockieren(Warteauf::PipeLesen(id), 0),
                 PipeErgebnis::Abgebrochen => Ausgang::Fertig(Err(Fehler::Abgebrochen)),
                 PipeErgebnis::Ungueltig => Ausgang::Fertig(Err(Fehler::UngueltigerHandle)),
             }
@@ -151,7 +157,7 @@ pub fn pipe_schreiben(id: pipe::PipeId, ptr: u64, laenge: usize) -> Ausgang {
     };
     match pipe::schreiben(id, &daten) {
         PipeErgebnis::Bytes(n) => Ausgang::Fertig(Ok(n as u64)),
-        PipeErgebnis::Blockiert => Ausgang::Blockieren(Warteauf::PipeSchreiben(id)),
+        PipeErgebnis::Blockiert => Ausgang::Blockieren(Warteauf::PipeSchreiben(id), 0),
         PipeErgebnis::Abgebrochen => Ausgang::Fertig(Err(Fehler::Abgebrochen)),
         PipeErgebnis::Ungueltig => Ausgang::Fertig(Err(Fehler::UngueltigerHandle)),
     }
@@ -178,7 +184,7 @@ pub fn sys_warte(pid: u64) -> Ausgang {
     let gesucht = pid as crate::prozess::Pid;
     match scheduler::kind_ende_abholen(gesucht) {
         Ok(Some((_, ende))) => Ausgang::Fertig(Ok(ende.code())),
-        Ok(None) => Ausgang::Blockieren(Warteauf::Kind(gesucht)),
+        Ok(None) => Ausgang::Blockieren(Warteauf::Kind(gesucht), 0),
         Err(_) => Ausgang::Fertig(Err(Fehler::NichtGefunden)),
     }
 }

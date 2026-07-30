@@ -40,6 +40,7 @@ use std::process::Command;
 const PROGRAMME: &[&str] = &[
     "hallo", "kopiere", "netzhole", "zaehle", "filter", "elternprobe",
     "angreifer", "messung", "zertifikate", "tlsspike", "holes", "news",
+    "fenstertest",
 ];
 
 fn main() {

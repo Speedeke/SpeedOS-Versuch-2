@@ -80,6 +80,14 @@ pub const SYS_EMPFANGE: u64 = 35;
 pub const SYS_AUFLOESEN: u64 = 36;
 pub const SYS_SOCKET_ZUSTAND: u64 = 37;
 
+// Fenster (Serie 8) — die Nummern stehen zusaetzlich in `fenster.rs`,
+// wo sie gebraucht werden.
+pub const SYS_FENSTER_OEFFNEN: u64 = 48;
+pub const SYS_FENSTER_ZEICHNEN: u64 = 49;
+pub const SYS_FENSTER_EREIGNIS: u64 = 50;
+pub const SYS_FENSTER_TITEL: u64 = 51;
+pub const SYS_FENSTER_SCHLIESSEN: u64 = 52;
+
 /// Die drei reservierten Handles.
 pub const EINGABE: u64 = 0;
 pub const AUSGABE: u64 = 1;
@@ -111,6 +119,9 @@ pub const STAT_BYTES: usize = 32;
 // Fehler
 // ---------------------------------------------------------------------------
 
+/// Ein eigenes FENSTER aus Ring 3 (Serie 8, Teil 1) — Pixelpuffer,
+/// Ereignisschleife, Titel. Die Naht, auf der der Browser aufsetzt.
+pub mod fenster;
 pub mod heap;
 /// Die wiederverwendbare Abruf-Schicht (Serie 7, Teil 5): „hol mir diese
 /// URL" — http wie https, mit Weiterleitungen, Frist und Groessenlimit.
