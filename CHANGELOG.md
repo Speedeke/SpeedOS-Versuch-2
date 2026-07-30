@@ -41,12 +41,23 @@ Beim Zurückblättern zeichnet die Konsole den Schirm aus ihren Zellen neu
 Cursor verschwindet dabei: Er dort stehen zu lassen wäre eine Lüge, denn dort
 wird nicht getippt.
 
+**Der Rückblick überlebt eine Größenänderung.** Die erste Fassung warf ihn bei
+jeder Breitenänderung weg — und ein Terminal-Fenster zu **maximieren** ändert
+die Breite. Er war also genau dann verloren, wenn man ihn am dringendsten
+wollte, und beim Wiederherstellen gleich noch einmal. Jetzt legt
+`historie_umlegen` den Ring auf die neue Spaltenzahl um (je Zeile werden
+`min(alt, neu)` Zellen übernommen), und die Zeilen, die beim Verkleinern oben
+aus dem Raster fallen, wandern vorher in die Historie statt verworfen zu
+werden. Was dabei **nicht** passiert: ein Neu-Umbruch. Eine Zeile, die für die
+schmalere Breite zu lang ist, wird rechts abgeschnitten, nicht auf zwei Zeilen
+verteilt — echte Terminals tun sich damit schwer, und es wäre ein eigenes
+Vorhaben.
+
 Grenzen, ehrlich: 1000 Zeilen im Fenster, 300 in der Vollbild-Konsole (die ist
-so breit wie der Bildschirm — bei 4K sind das 480 Spalten). Eine
-Breitenänderung des Fensters **verwirft** den Rückblick, weil die gespeicherten
-Zeilen auf die alte Spaltenzahl gelegt sind; sie umzubrechen wäre ein eigenes
-Vorhaben. Fünf neue `#[test_case]`-Tests prüfen Zurückholen, Anschläge,
-Ring-Überlauf, das Mitziehen des Blicks und den verschwindenden Cursor.
+so breit wie der Bildschirm — bei 4K sind das 480 Spalten). Sieben neue
+`#[test_case]`-Tests prüfen Zurückholen, Anschläge, Ring-Überlauf, das
+Mitziehen des Blicks, den verschwindenden Cursor sowie das Überleben beim
+Verbreitern (Maximieren) und beim Verschmälern (Wiederherstellen).
 
 ### SERIE-7-ABSCHLUSS: der Kernel unter Angriff, die Zahlen, die Naht zu Serie 8
 

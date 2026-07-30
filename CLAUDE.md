@@ -462,9 +462,20 @@
   aus den Zellen neu gezeichnet. Und der CURSOR verschwindet beim Blaettern
   (`cursor_bildschirm()` liefert `None`) — er dort stehen zu lassen waere
   eine Luege.
-- **BEKANNTE GRENZE:** Eine Breitenaenderung VERWIRFT den Rueckblick (die
-  Zeilen sind auf die alte Spaltenzahl gelegt); Umbrechen waere ein eigenes
-  Vorhaben. Steht in docs/grenzen.md.
+- **DER RUECKBLICK UEBERLEBT EINE GROESSENAENDERUNG** — das war der erste
+  Fehler dieser Fassung und der haeufigste Handgriff zugleich: Ein
+  Terminal-Fenster zu MAXIMIEREN aendert die Breite, und die erste Fassung
+  warf den Rueckblick dabei weg (beim Wiederherstellen gleich noch einmal).
+  `historie_umlegen(neue_spalten)` legt den Ring um (je Zeile `min(alt, neu)`
+  Zellen), und `groesse_setzen` schiebt die Zeilen, die beim VERKLEINERN oben
+  aus dem Raster fallen, per `zeile_in_historie(zeile)` in die Historie,
+  BEVOR das neue Raster entsteht. ACHTUNG beim Aendern: `oberste_zeile_auf-
+  heben()` verschiebt das Raster NICHT (das tut `neue_zeile` per
+  `copy_within`) — wer es in einer Schleife ruft, legt dieselbe Zeile 0
+  mehrfach ab. Deshalb laeuft `groesse_setzen` ueber explizite Zeilenindizes.
+- **BEKANNTE GRENZE:** Beim Umlegen wird NICHT neu umbrochen — was fuer die
+  neue Breite zu lang ist, wird rechts abgeschnitten. Steht in
+  docs/grenzen.md.
 
 ## SERIE-7-ABSCHLUSS (Juli 2026) — Angriffe, Zahlen, Grenzen, Serie-8-Naht
 - **DIE EINE STELLE FUER ALLE LUECKEN: `docs/grenzen.md`.** Keine

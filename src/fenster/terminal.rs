@@ -163,9 +163,10 @@ impl Terminal {
         if hinauf == 0 || hinauf > self.historie_zeilen || self.historie.is_empty() {
             return None;
         }
-        // Rückwärts vom Schreibkopf, modulo Ringgröße.
-        let ring = self.historie.len() / self.spalten;
-        let index = (self.historie_kopf + ring - hinauf % ring.max(1)) % ring.max(1);
+        // Rückwärts vom Schreibkopf, modulo Ringgröße. `hinauf == MAX`
+        // ergibt dabei genau den Kopf — und der zeigt bei vollem Ring auf
+        // die ÄLTESTE Zeile. Das stimmt also.
+        let index = (self.historie_kopf + MAX_HISTORIE - hinauf % MAX_HISTORIE) % MAX_HISTORIE;
         self.historie.get(index * self.spalten + spalte).copied()
     }
 
@@ -271,14 +272,29 @@ impl Terminal {
     /// Der Ringpuffer wird beim ERSTEN Mal angelegt — ein Terminal, das nie
     /// überläuft (der Normalfall bei kurzen Befehlen), zahlt nichts dafür.
     fn oberste_zeile_aufheben(&mut self) {
+        self.zeile_in_historie(0);
+    }
+
+    /// Legt EINE bestimmte Rasterzeile im Rückblick ab.
+    ///
+    /// Schiebt das Raster NICHT — das tut der Aufrufer (`neue_zeile` per
+    /// `copy_within`, `groesse_setzen` beim Neuaufbau).
+    fn zeile_in_historie(&mut self, zeile: usize) {
+        if zeile >= self.zeilen {
+            return;
+        }
         if self.historie.is_empty() {
             self.historie = vec![Zelle::leer(self.standard_hg); MAX_HISTORIE * self.spalten];
             self.historie_kopf = 0;
             self.historie_zeilen = 0;
         }
-        let ziel = self.historie_kopf * self.spalten;
-        self.historie[ziel..ziel + self.spalten]
-            .copy_from_slice(&self.zellen[..self.spalten]);
+        // `zellen` und `historie` sind verschiedene Felder — die Ausleihen
+        // sind disjunkt, es braucht keinen Zwischenpuffer.
+        let breite = self.spalten;
+        let quelle = zeile * breite;
+        let ziel = self.historie_kopf * breite;
+        self.historie[ziel..ziel + breite]
+            .copy_from_slice(&self.zellen[quelle..quelle + breite]);
         self.historie_kopf = (self.historie_kopf + 1) % MAX_HISTORIE;
         self.historie_zeilen = (self.historie_zeilen + 1).min(MAX_HISTORIE);
 
@@ -290,28 +306,76 @@ impl Terminal {
         }
     }
 
+    /// LEGT DEN RÜCKBLICK AUF EINE NEUE BREITE UM — ohne ihn wegzuwerfen.
+    ///
+    /// ==================================================================
+    /// WARUM DAS SEIN MUSS (und die erste Fassung falsch war)
+    ///
+    /// Der Ring liegt zeilenweise auf `spalten`; ändert sich die Breite,
+    /// stimmt der Zeilenabstand nicht mehr. Die erste Fassung hat den
+    /// Rückblick deshalb einfach VERWORFEN und das als „bekannte Grenze"
+    /// dokumentiert.
+    ///
+    /// Das war in der Praxis unbrauchbar: Ein Terminal-Fenster zu
+    /// MAXIMIEREN ändert die Spaltenzahl — und Maximieren ist genau die
+    /// Geste, mit der man mehr sehen will. Der Rückblick war also immer
+    /// dann weg, wenn man ihn am ehesten braucht, und nach dem
+    /// Wiederherstellen gleich noch einmal.
+    ///
+    /// Jetzt werden die Zeilen umkopiert. Wird es SCHMALER, verlieren sie
+    /// rechts etwas — dasselbe tut das sichtbare Raster auch. Umbrechen
+    /// wäre die Kür (und echte Terminals tun sich damit schwer); erhalten
+    /// zu bleiben ist die Pflicht.
+    /// ==================================================================
+    fn historie_umlegen(&mut self, neue_spalten: usize) {
+        if self.historie.is_empty() || neue_spalten == self.spalten {
+            return;
+        }
+        let alt_stride = self.spalten;
+        let breite = alt_stride.min(neue_spalten);
+        let anzahl = self.historie_zeilen;
+        let mut neu = vec![Zelle::leer(self.standard_hg); MAX_HISTORIE * neue_spalten];
+        // In LOGISCHER Reihenfolge kopieren (älteste zuerst) — danach liegt
+        // der Ring wieder von vorne, und der Kopf zeigt hinter die jüngste.
+        for i in 0..anzahl {
+            let hinauf = anzahl - i;
+            let alt = (self.historie_kopf + MAX_HISTORIE - hinauf % MAX_HISTORIE) % MAX_HISTORIE;
+            let von = alt * alt_stride;
+            let nach = i * neue_spalten;
+            neu[nach..nach + breite].copy_from_slice(&self.historie[von..von + breite]);
+        }
+        self.historie = neu;
+        self.historie_kopf = anzahl % MAX_HISTORIE;
+    }
+
     /// Passt das Raster an eine neue Fenstergröße an. Die UNTEREN
     /// Zeilen bleiben erhalten — dort stehen Prompt und die jüngste
-    /// Ausgabe (oben ist nur Historie).
+    /// Ausgabe.
     pub fn groesse_setzen(&mut self, spalten: usize, zeilen: usize) {
         let (spalten, zeilen) = (spalten.max(1), zeilen.max(1));
         if spalten == self.spalten && zeilen == self.zeilen {
             return;
         }
-        // DER RÜCKBLICK IST ZEILENWEISE AUF `spalten` GELEGT — ändert sich
-        // die Breite, passt keine gespeicherte Zeile mehr. Sie umzubrechen
-        // wäre ein eigenes Vorhaben (echte Terminals tun sich damit schwer);
-        // hier wird der Rückblick verworfen und das ehrlich dokumentiert.
-        if spalten != self.spalten {
-            self.historie = Vec::new();
-            self.historie_zeilen = 0;
-            self.historie_kopf = 0;
+        // (1) WIRD ES NIEDRIGER, fallen oben Zeilen weg — die gehören in den
+        //     Rückblick, nicht in den Müll. Noch in der ALTEN Breite, damit
+        //     das Umlegen gleich alles auf einmal erwischt.
+        //
+        //     ACHTUNG: `zeile_in_historie` schiebt das Raster NICHT (das tut
+        //     `neue_zeile` selbst). Hier wird deshalb jede wegfallende Zeile
+        //     einzeln benannt — die erste Fassung rief in einer Schleife
+        //     immer wieder dieselbe Zeile 0 auf und legte sie mehrfach ab.
+        let zeilen_kopieren = self.zeilen.min(zeilen);
+        let quell_ab = self.zeilen - zeilen_kopieren;
+        for zeile in 0..quell_ab {
+            self.zeile_in_historie(zeile);
         }
+
+        // (2) Den Rückblick auf die neue Breite umlegen (siehe dort).
+        self.historie_umlegen(spalten);
+
+        // (3) Das sichtbare Raster neu aufbauen — die UNTEREN Zeilen bleiben.
         self.blick_ab = 0;
         let mut neu = vec![Zelle::leer(self.standard_hg); spalten * zeilen];
-        let zeilen_kopieren = self.zeilen.min(zeilen);
-        // Bei Verkleinerung: die obersten Zeilen fallen weg.
-        let quell_ab = self.zeilen - zeilen_kopieren;
         for zeile in 0..zeilen_kopieren {
             for spalte in 0..self.spalten.min(spalten) {
                 neu[zeile * spalten + spalte] =
@@ -491,6 +555,65 @@ mod tests {
         );
         term.zum_ende();
         assert!(term.cursor_bildschirm().is_some());
+    }
+
+    /// DER RÜCKBLICK ÜBERLEBT EINE GRÖSSENÄNDERUNG.
+    ///
+    /// Der Fehler, den dieser Test festhält: Die erste Fassung warf den
+    /// Rückblick bei jeder Breitenänderung weg — und ein Terminal-Fenster
+    /// zu MAXIMIEREN ändert die Breite. Also war er immer dann verloren,
+    /// wenn man ihn am dringendsten wollte, und nach dem Wiederherstellen
+    /// gleich noch einmal.
+    #[test_case]
+    fn test_terminal_rueckblick_ueberlebt_resize() {
+        let mut term = Terminal::neu(10, 3, HG);
+        for nummer in 1..=6 {
+            schreiben(&mut term, &alloc::format!("Zeile{}\n", nummer));
+        }
+        assert_eq!(term.historie_zeilen(), 4);
+
+        // BREITER (wie beim Maximieren) — der Rückblick muss bleiben.
+        term.groesse_setzen(20, 3);
+        assert_eq!(
+            term.historie_zeilen(),
+            4,
+            "der Rueckblick wurde beim Verbreitern weggeworfen"
+        );
+        term.scrollen(4);
+        assert_eq!(zeile_als_text(&term, 0).trim_end(), "Zeile1");
+        term.zum_ende();
+
+        // Und wieder SCHMALER (Wiederherstellen) — ebenfalls.
+        term.groesse_setzen(10, 3);
+        assert_eq!(
+            term.historie_zeilen(),
+            4,
+            "der Rueckblick wurde beim Verschmaelern weggeworfen"
+        );
+        term.scrollen(4);
+        assert_eq!(zeile_als_text(&term, 0).trim_end(), "Zeile1");
+    }
+
+    /// Wird das Fenster NIEDRIGER, wandern die oberen Zeilen in den
+    /// Rückblick, statt verloren zu gehen.
+    #[test_case]
+    fn test_terminal_niedriger_rettet_zeilen() {
+        let mut term = Terminal::neu(10, 4, HG);
+        schreiben(&mut term, "eins\nzwei\ndrei\nvier");
+        assert_eq!(term.historie_zeilen(), 0, "noch nichts herausgescrollt");
+
+        // Auf 2 Zeilen schrumpfen: "eins" und "zwei" fallen oben weg.
+        term.groesse_setzen(10, 2);
+        assert_eq!(zeile_als_text(&term, 0).trim_end(), "drei");
+        assert_eq!(zeile_als_text(&term, 1).trim_end(), "vier");
+        assert_eq!(
+            term.historie_zeilen(),
+            2,
+            "die weggefallenen Zeilen muessen im Rueckblick landen"
+        );
+        term.scrollen(2);
+        assert_eq!(zeile_als_text(&term, 0).trim_end(), "eins");
+        assert_eq!(zeile_als_text(&term, 1).trim_end(), "zwei");
     }
 
     /// Resize behält die UNTEREN Zeilen (Prompt!) und klemmt den Cursor.
