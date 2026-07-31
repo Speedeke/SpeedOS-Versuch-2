@@ -173,12 +173,15 @@ Keine Threads. Kein SMP — SpeedOS läuft auf **einem** Kern.
 
 ## 6. Oberfläche
 
-* Die **Widget-Schicht** lebt im Kernel. Ein User-Space-Prozess kann seit
-  Serie 8, Teil 1 zwar ein **Fenster besitzen** und Pixel hineinmalen
-  (`docs/fenster-syscalls.md`), aber er bekommt keine Knöpfe, keine Listen
-  und keine Textfelder — die gibt es nur kernel-seitig. Ob das Toolkit in
-  den User-Space wandert, ist DIE offene Architekturfrage für Serie 8
-  (`docs/serie8-bestandsaufnahme.md`).
+* Das **Widget-Toolkit** ist seit Serie 8, Teil 2 eine wirtsfreie Kiste
+  (`speedui/`) — ein Prozess bekommt Knöpfe, Listen und Textfelder
+  (`userland/uidemo`). **Was er NICHT bekommt: eine Schrift.** Die
+  vorgerasterten Kernel-Fonts sind Kernel-Daten, es gibt keinen
+  Schrift-Syscall; ein Prozess muss seine eigene mitbringen und sieht
+  deshalb anders aus als der Desktop. Ebenfalls kernel-seitig geblieben:
+  das **Kontextmenü** (es ist ein Fenster-Manager-Overlay) und der
+  mehrzeilige **Texteditor** von SpeedText.
+  Bericht: `docs/speedui-trennung.md` §9.
 * **Ein Fenster über den ganzen 4K-Schirm passt nicht in den User-Heap.**
   Der Pixelpuffer eines Programms liegt auf dessen eigenem Heap, und der ist
   auf 12 MiB gedeckelt (`prozess::HEAP_MAX_BYTES`, in der 16-MiB-Lücke
@@ -237,5 +240,6 @@ fehlen **mit Absicht**, und sie sollen fehlen:
 | SpeedFS: Format, Ordering, fsck | `docs/speedfs-format.md` |
 | Syscall-ABI | `docs/syscalls.md` |
 | Fenster aus Ring 3, Messzahlen, Umstiegskriterium | `docs/fenster-syscalls.md` |
+| Toolkit-Trennung, Traits, ehrlicher Bericht | `docs/speedui-trennung.md` |
 | unsafe-Flächen | `docs/unsafe-audit-serie6.md`, `docs/unsafe-audit-serie7.md` |
 | Echte Hardware | `docs/hardware-log.md`, `docs/usb-boot.md` |

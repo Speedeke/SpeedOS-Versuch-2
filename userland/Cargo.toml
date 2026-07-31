@@ -31,6 +31,13 @@ description = "Die Standard-Bibliothek der SpeedOS-Programme (no_std)"
 # keinen Socket — es zerlegt Bytes.
 speedhttp = { path = "../speedhttp" }
 
+# DAS WIDGET-TOOLKIT (Serie 8, Teil 2). Dieselbe Ueberlegung wie bei
+# speedhttp: Verboten ist die Abhaengigkeit vom KERNEL, nicht die von einer
+# wirtsfreien Bibliothek. speedui hat selbst KEINE Abhaengigkeiten und kennt
+# weder Syscall noch Framebuffer — was es braucht (Thema, Schrift, Uhr,
+# Leinwand), VERLANGT es als Trait, und `uidemo` liefert es.
+speedui = { path = "../speedui" }
+
 # Der Heap-Allocator des User-Space (Serie 7, Teil 3) — dieselbe Kiste, die
 # auch der Kernel benutzt (src/allocator.rs). Sie ist no_std und kann
 # `extend`, und genau das braucht ein Heap, der auf Anforderung waechst.
@@ -134,6 +141,13 @@ path = "src/bin/news.rs"
 [[bin]]
 name = "fenstertest"
 path = "src/bin/fenstertest.rs"
+
+# DER BEWEIS DER TOOLKIT-TRENNUNG (Serie 8, Teil 2): dieselben Widgets wie
+# im Kernel, aber in einem unprivilegierten Prozess — mit einem eigenen
+# Wirt (Thema, Schrift, Uhr, Leinwand).
+[[bin]]
+name = "uidemo"
+path = "src/bin/uidemo.rs"
 
 # panic = "abort" ist Pflicht: Abwickeln (unwinding) bräuchte eine
 # Personality-Funktion und Landing Pads — beides gibt es ohne std nicht.

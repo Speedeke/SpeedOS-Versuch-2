@@ -24,15 +24,11 @@
 // Cursor-Spalten zählen ZEICHEN (chars), nicht Bytes — sonst
 // zerschneidet ein Umlaut die UTF-8-Sequenz.
 
-use super::{UiEreignis, UiReaktion, Widget};
-use crate::fenster::FensterPuffer;
-use crate::grafik::{Rechteck, Zeichner};
-use crate::theme::{self, metrik};
+use super::{Farbrolle, Maler, Mass, Taste, UiEreignis, UiKontext, UiReaktion, Widget};
+use crate::grafik::Rechteck;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use noto_sans_mono_bitmap::{get_raster_width, FontWeight};
-use pc_keyboard::{DecodedKey, KeyCode};
 use spin::Mutex;
 
 // ---------------------------------------------------------------------------
@@ -244,25 +240,31 @@ impl TextEditor {
         TextEditor { puffer, nachricht, fokus: true, balken_griff: None }
     }
 
-    fn zeichen_breite() -> i32 {
-        get_raster_width(FontWeight::Regular, metrik().schrift_ui) as i32
+    fn zeichen_breite(k: &UiKontext) -> i32 {
+        k.zeichen_breite()
     }
 
     /// Breite der Zeilennummern-Spalte (Stellenzahl + Luft).
-    fn nummern_breite(zeilen_anzahl: usize) -> i32 {
+    fn nummern_breite(zeilen_anzahl: usize, k: &UiKontext) -> i32 {
         let stellen = alloc::format!("{}", zeilen_anzahl.max(1)).len() as i32;
-        stellen * Self::zeichen_breite() + metrik().abstand * 2
+        stellen * Self::zeichen_breite(k) + k.mass(Mass::Abstand) * 2
     }
 
     /// Sichtbare Textzeilen im Bereich.
-    fn sicht_zeilen(bereich: Rechteck) -> usize {
-        (bereich.hoehe / metrik().zeilen_hoehe).max(1) as usize
+    fn sicht_zeilen(bereich: Rechteck, k: &UiKontext) -> usize {
+        (bereich.hoehe / k.mass(Mass::ZeilenHoehe)).max(1) as usize
     }
 
     /// Scrollbalken-Griff (None = alles sichtbar) — dieselbe
     /// Geometrie-Idee wie in der ScrollListe, nur in Zeilen.
-    fn balken_rechteck(&self, bereich: Rechteck, zeilen: usize, scroll: usize) -> Option<Rechteck> {
-        let sicht = Self::sicht_zeilen(bereich);
+    fn balken_rechteck(
+        &self,
+        bereich: Rechteck,
+        zeilen: usize,
+        scroll: usize,
+        k: &UiKontext,
+    ) -> Option<Rechteck> {
+        let sicht = Self::sicht_zeilen(bereich, k);
         if zeilen <= sicht {
             return None;
         }
@@ -270,9 +272,9 @@ impl TextEditor {
         let weg = bereich.hoehe - hoehe;
         let y = bereich.y + weg * scroll as i32 / (zeilen - sicht) as i32;
         Some(Rechteck::neu(
-            bereich.x + bereich.breite - metrik().scrollbalken_breite,
+            bereich.x + bereich.breite - k.mass(Mass::ScrollbalkenBreite),
             y,
-            metrik().scrollbalken_breite,
+            k.mass(Mass::ScrollbalkenBreite),
             hoehe,
         ))
     }
@@ -280,28 +282,28 @@ impl TextEditor {
     /// Fenster-Rechteck der Textzeilen von der `von`. bis zur `bis`.
     /// sichtbaren Zeile (relativ zum Scroll) — die Einheit der
     /// Schadensmeldung beim Tippen.
-    fn zeilen_streifen(bereich: Rechteck, von_sicht: i32, bis_sicht: i32) -> Rechteck {
-        let zh = metrik().zeilen_hoehe;
+    fn zeilen_streifen(bereich: Rechteck, von_sicht: i32, bis_sicht: i32, k: &UiKontext) -> Rechteck {
+        let zh = k.mass(Mass::ZeilenHoehe);
         let y_oben = bereich.y + 2 + von_sicht.max(0) * zh;
         let y_unten = (bereich.y + 2 + (bis_sicht + 1) * zh).min(bereich.y + bereich.hoehe);
         Rechteck::neu(bereich.x, y_oben, bereich.breite, (y_unten - y_oben).max(zh))
     }
 
     /// Verarbeitet eine Taste im Puffer. true = verarbeitet.
-    fn taste_im_puffer(puffer: &mut TextPuffer, taste: DecodedKey, sicht: usize) -> bool {
+    fn taste_im_puffer(puffer: &mut TextPuffer, taste: Taste, sicht: usize) -> bool {
         match taste {
-            DecodedKey::Unicode('\n') | DecodedKey::Unicode('\r') => puffer.einfuegen('\n'),
-            DecodedKey::Unicode('\u{8}') | DecodedKey::Unicode('\u{7f}') => puffer.backspace(),
-            DecodedKey::RawKey(KeyCode::Delete) => puffer.entfernen(),
-            DecodedKey::RawKey(KeyCode::ArrowLeft) => puffer.links(),
-            DecodedKey::RawKey(KeyCode::ArrowRight) => puffer.rechts(),
-            DecodedKey::RawKey(KeyCode::ArrowUp) => puffer.hoch(),
-            DecodedKey::RawKey(KeyCode::ArrowDown) => puffer.runter(),
-            DecodedKey::RawKey(KeyCode::Home) => puffer.pos1(),
-            DecodedKey::RawKey(KeyCode::End) => puffer.ende(),
-            DecodedKey::RawKey(KeyCode::PageUp) => puffer.bild(sicht, false),
-            DecodedKey::RawKey(KeyCode::PageDown) => puffer.bild(sicht, true),
-            DecodedKey::Unicode(zeichen) if zeichen >= ' ' => puffer.einfuegen(zeichen),
+            Taste::Zeichen('\n') | Taste::Zeichen('\r') => puffer.einfuegen('\n'),
+            Taste::Zeichen('\u{8}') | Taste::Zeichen('\u{7f}') => puffer.backspace(),
+            Taste::Entf => puffer.entfernen(),
+            Taste::Links => puffer.links(),
+            Taste::Rechts => puffer.rechts(),
+            Taste::Hoch => puffer.hoch(),
+            Taste::Runter => puffer.runter(),
+            Taste::Pos1 => puffer.pos1(),
+            Taste::Ende => puffer.ende(),
+            Taste::BildHoch => puffer.bild(sicht, false),
+            Taste::BildRunter => puffer.bild(sicht, true),
+            Taste::Zeichen(zeichen) if zeichen >= ' ' => puffer.einfuegen(zeichen),
             _ => return false,
         }
         puffer.cursor_sichtbar_machen(sicht);
@@ -310,8 +312,8 @@ impl TextEditor {
 }
 
 impl Widget for TextEditor {
-    fn wunschgroesse(&self) -> (i32, i32) {
-        (200, 4 * metrik().zeilen_hoehe)
+    fn wunschgroesse(&self, k: &UiKontext) -> (i32, i32) {
+        (200, 4 * k.mass(Mass::ZeilenHoehe))
     }
 
     fn flex(&self) -> i32 {
@@ -331,14 +333,15 @@ impl Widget for TextEditor {
         self.fokus = false;
     }
 
-    fn zeichnen(&self, z: &mut Zeichner<'_, FensterPuffer>, bereich: Rechteck) {
-        let thema = theme::aktuell();
+    fn zeichnen(&self, m: &mut Maler<'_>, bereich: Rechteck) {
+        let kontext = m.kontext;
+        let k = &kontext;
         let puffer = x86_64::instructions::interrupts::without_interrupts(|| {
             // Zum Zeichnen reicht ein kurzer Blick — wir kopieren die
             // SICHTBAREN Zeilen heraus (Blatt-Lock nicht über das
             // ganze Rendern halten).
             let p = self.puffer.lock();
-            let sicht = Self::sicht_zeilen(bereich);
+            let sicht = Self::sicht_zeilen(bereich, k);
             let von = p.scroll_zeile.min(p.zeilen_anzahl().saturating_sub(1));
             let bis = (von + sicht).min(p.zeilen_anzahl());
             (
@@ -352,18 +355,18 @@ impl Widget for TextEditor {
         });
         let (zeilen, von, gesamt, cursor_zeile, cursor_spalte, scroll) = puffer;
 
-        let zb = Self::zeichen_breite();
-        let zh = metrik().zeilen_hoehe;
-        let nummern = Self::nummern_breite(gesamt);
+        let zb = Self::zeichen_breite(k);
+        let zh = k.mass(Mass::ZeilenHoehe);
+        let nummern = Self::nummern_breite(gesamt, k);
 
         // Grundflächen: Nummern-Spalte gedimmt, Textfläche wie ein
         // Eingabefeld, Rahmen zeigt den Fokus.
-        z.rechteck_fuellen(bereich, thema.eingabefeld);
-        z.rechteck_fuellen(
+        m.fuellen(bereich, k.farbe(Farbrolle::Eingabefeld));
+        m.fuellen(
             Rechteck::neu(bereich.x, bereich.y, nummern, bereich.hoehe),
-            thema.flaeche,
+            k.farbe(Farbrolle::Flaeche),
         );
-        z.rechteck_rahmen(bereich, if self.fokus { thema.akzent } else { thema.rahmen_passiv });
+        m.rahmen(bereich, if self.fokus { k.farbe(Farbrolle::Akzent) } else { k.farbe(Farbrolle::Rahmen) });
 
         // Der ÄUSSERE Clip des Zeichners (beim partiellen Neuzeichnen
         // ist das der Schadensbereich) — wir lesen ihn, um Textzeilen
@@ -372,7 +375,7 @@ impl Widget for TextEditor {
         // 4K für JEDE sichtbare Zeile alle Glyph-Pixel gegen den Clip
         // prüfen (Millionen No-Op-Vergleiche pro Taste); mit Culling
         // zeichnet ein Tastendruck nur die eine geänderte Zeile.
-        let aeusserer_clip = z.clip();
+        let aeusserer_clip = m.clip();
         // Effektiver Clip = Editor-Innenfläche GESCHNITTEN mit dem
         // äußeren Schadensbereich (der Zeichner kennt nur EIN Clip-
         // Rechteck, kein Stack — also selbst schneiden). None-Schnitt
@@ -382,8 +385,8 @@ impl Widget for TextEditor {
             Some(aussen) => aussen.schneiden(&innen),
             None => Some(innen),
         };
-        z.clip_setzen(effektiv);
-        let text_x = bereich.x + nummern + metrik().abstand;
+        m.clip_setzen(effektiv);
+        let text_x = bereich.x + nummern + k.mass(Mass::Abstand);
         for (i, zeile) in zeilen.iter().enumerate() {
             let y = bereich.y + 2 + i as i32 * zh;
             // Liegt diese Zeile ganz außerhalb des Schadens? Dann weg.
@@ -394,15 +397,13 @@ impl Widget for TextEditor {
                 }
             }
             let nummer = von + i + 1;
-            z.text(
-                bereich.x + metrik().abstand,
+            m.text(
+                bereich.x + k.mass(Mass::Abstand),
                 y,
                 &alloc::format!("{}", nummer),
-                metrik().schrift_ui,
-                FontWeight::Regular,
-                thema.text_gedimmt,
+                k.farbe(Farbrolle::TextGedimmt),
             );
-            z.text(text_x, y, zeile, metrik().schrift_ui, FontWeight::Regular, thema.text_normal);
+            m.text(text_x, y, zeile, k.farbe(Farbrolle::TextNormal));
         }
 
         // Cursor (blinkend, Tempo aus den Einstellungen):
@@ -414,28 +415,28 @@ impl Widget for TextEditor {
         {
             let cx = text_x + cursor_spalte as i32 * zb;
             let cy = bereich.y + 2 + (cursor_zeile - von) as i32 * zh;
-            z.rechteck_fuellen(Rechteck::neu(cx, cy, 2, zh), thema.akzent);
+            m.fuellen(Rechteck::neu(cx, cy, 2, zh), k.farbe(Farbrolle::Akzent));
         }
         // Den ÄUSSEREN Clip wiederherstellen (nicht None!) — sonst
         // zeichnen die Geschwister-Widgets über den Schaden hinaus.
-        z.clip_setzen(aeusserer_clip);
+        m.clip_setzen(aeusserer_clip);
 
         // Scrollbalken:
-        if let Some(griff) = self.balken_rechteck(bereich, gesamt, scroll) {
-            z.rechteck_fuellen(
-                Rechteck::neu(griff.x, bereich.y, metrik().scrollbalken_breite, bereich.hoehe),
-                thema.leiste_knopf,
+        if let Some(griff) = self.balken_rechteck(bereich, gesamt, scroll, k) {
+            m.fuellen(
+                Rechteck::neu(griff.x, bereich.y, k.mass(Mass::ScrollbalkenBreite), bereich.hoehe),
+                k.farbe(Farbrolle::KnopfFlaeche),
             );
-            z.rechteck_abgerundet(
+            m.abgerundet(
                 griff,
-                metrik().radius_klein,
-                if self.balken_griff.is_some() { thema.akzent } else { thema.text_gedimmt },
+                k.mass(Mass::RadiusKlein),
+                if self.balken_griff.is_some() { k.farbe(Farbrolle::Akzent) } else { k.farbe(Farbrolle::TextGedimmt) },
             );
         }
     }
 
-    fn ereignis(&mut self, ereignis: &UiEreignis, bereich: Rechteck) -> UiReaktion {
-        let sicht = Self::sicht_zeilen(bereich);
+    fn ereignis(&mut self, ereignis: &UiEreignis, bereich: Rechteck, k: &UiKontext) -> UiReaktion {
+        let sicht = Self::sicht_zeilen(bereich, k);
         match ereignis {
             UiEreignis::Taste(taste) if self.fokus => {
                 // Vorher-/Nachher-Schnappschuss, um GENAU den geänderten
@@ -457,14 +458,14 @@ impl Widget for TextEditor {
                             // betroffenen Zeile bis zum Editor-Ende (die
                             // Zeilen darunter sind verrutscht).
                             let von = (alte_zeile.min(p.cursor_zeile) as i32 - alter_scroll as i32).max(0);
-                            let bis = (bereich.hoehe / metrik().zeilen_hoehe).max(1);
-                            Some(Self::zeilen_streifen(bereich, von, bis))
+                            let bis = (bereich.hoehe / k.mass(Mass::ZeilenHoehe)).max(1);
+                            Some(Self::zeilen_streifen(bereich, von, bis, k))
                         } else {
                             // Reine Bearbeitung/Cursorbewegung: nur die
                             // alte UND die neue Cursorzeile (Bounding-Box).
                             let a = alte_zeile as i32 - alter_scroll as i32;
                             let b = p.cursor_zeile as i32 - p.scroll_zeile as i32;
-                            Some(Self::zeilen_streifen(bereich, a.min(b), a.max(b)))
+                            Some(Self::zeilen_streifen(bereich, a.min(b), a.max(b), k))
                         };
                         (verarbeitet, schaden)
                     });
@@ -483,7 +484,7 @@ impl Widget for TextEditor {
                     (p.zeilen_anzahl(), p.scroll_zeile)
                 });
                 // Scrollbalken zuerst (liegt über dem Text):
-                if let Some(griff) = self.balken_rechteck(bereich, zeilen, scroll) {
+                if let Some(griff) = self.balken_rechteck(bereich, zeilen, scroll, k) {
                     if griff.enthaelt(*x, *y) {
                         self.balken_griff = Some(*y - griff.y);
                         return UiReaktion::neu_zeichnen();
@@ -500,10 +501,10 @@ impl Widget for TextEditor {
                     }
                 }
                 // Klick in den Text: Cursor dorthin setzen.
-                let nummern = Self::nummern_breite(zeilen);
-                let text_x = bereich.x + nummern + metrik().abstand;
-                let spalte = ((*x - text_x).max(0) / Self::zeichen_breite()) as usize;
-                let zeile = scroll + ((*y - bereich.y - 2).max(0) / metrik().zeilen_hoehe) as usize;
+                let nummern = Self::nummern_breite(zeilen, k);
+                let text_x = bereich.x + nummern + k.mass(Mass::Abstand);
+                let spalte = ((*x - text_x).max(0) / Self::zeichen_breite(k)) as usize;
+                let zeile = scroll + ((*y - bereich.y - 2).max(0) / k.mass(Mass::ZeilenHoehe)) as usize;
                 x86_64::instructions::interrupts::without_interrupts(|| {
                     let mut p = self.puffer.lock();
                     p.cursor_zeile = zeile.min(p.zeilen_anzahl() - 1);
@@ -578,11 +579,13 @@ impl StatusZeile {
 }
 
 impl Widget for StatusZeile {
-    fn wunschgroesse(&self) -> (i32, i32) {
-        (0, metrik().zeilen_hoehe)
+    fn wunschgroesse(&self, k: &UiKontext) -> (i32, i32) {
+        (0, k.mass(Mass::ZeilenHoehe))
     }
 
-    fn zeichnen(&self, z: &mut Zeichner<'_, FensterPuffer>, bereich: Rechteck) {
+    fn zeichnen(&self, m: &mut Maler<'_>, bereich: Rechteck) {
+        let kontext = m.kontext;
+        let k = &kontext;
         let (zeile, spalte, zeichen, geaendert) =
             x86_64::instructions::interrupts::without_interrupts(|| {
                 let p = self.puffer.lock();
@@ -595,17 +598,15 @@ impl Widget for StatusZeile {
             zeichen,
             if geaendert { "Geaendert *" } else { "Gespeichert" }
         );
-        z.text(
+        m.text(
             bereich.x,
             bereich.y,
             &text,
-            metrik().schrift_ui,
-            FontWeight::Regular,
-            theme::aktuell().text_sekundaer,
+            k.farbe(Farbrolle::TextSekundaer),
         );
     }
 
-    fn ereignis(&mut self, _e: &UiEreignis, _b: Rechteck) -> UiReaktion {
+    fn ereignis(&mut self, _e: &UiEreignis, _b: Rechteck, _k: &UiKontext) -> UiReaktion {
         UiReaktion::ignoriert()
     }
 }

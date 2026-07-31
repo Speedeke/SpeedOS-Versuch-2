@@ -166,6 +166,7 @@ dependencies = [
  "pc-keyboard",
  "pic8259",
  "speedhttp",
+ "speedui",
  "spin 0.5.2",
  "uart_16550",
  "volatile 0.2.7",
@@ -174,6 +175,10 @@ dependencies = [
 
 [[package]]
 name = "speedhttp"
+version = "0.1.0"
+
+[[package]]
+name = "speedui"
 version = "0.1.0"
 
 [[package]]

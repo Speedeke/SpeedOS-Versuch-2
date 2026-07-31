@@ -65,54 +65,11 @@ pub fn alpha_mischen(untergrund: Farbe, farbe: Rgba) -> Farbe {
 // Rechtecke und Clipping
 // ---------------------------------------------------------------------------
 
-/// Ein Rechteck in Pixelkoordinaten. i32, damit auch (teilweise)
-/// außerhalb des Bildschirms liegende Formen erlaubt sind — das
-/// Clipping schneidet sie einfach ab.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Rechteck {
-    pub x: i32,
-    pub y: i32,
-    pub breite: i32,
-    pub hoehe: i32,
-}
-
-impl Rechteck {
-    pub const fn neu(x: i32, y: i32, breite: i32, hoehe: i32) -> Self {
-        Rechteck { x, y, breite, hoehe }
-    }
-
-    /// Liegt der Punkt (x, y) innerhalb?
-    pub fn enthaelt(&self, x: i32, y: i32) -> bool {
-        x >= self.x && y >= self.y && x < self.x + self.breite && y < self.y + self.hoehe
-    }
-
-    /// Schnittmenge zweier Rechtecke (None = keine Überlappung).
-    /// DAS Herzstück des Clippings — reine Funktion, unit-getestet.
-    pub fn schneiden(&self, anderes: &Rechteck) -> Option<Rechteck> {
-        let x = self.x.max(anderes.x);
-        let y = self.y.max(anderes.y);
-        let rechts = (self.x + self.breite).min(anderes.x + anderes.breite);
-        let unten = (self.y + self.hoehe).min(anderes.y + anderes.hoehe);
-        if x < rechts && y < unten {
-            Some(Rechteck::neu(x, y, rechts - x, unten - y))
-        } else {
-            None
-        }
-    }
-
-    /// Kleinstes Rechteck, das BEIDE umschließt (Bounding-Box-Union).
-    /// Die Dirty-Rect-Mechanik nutzt das, um zwei Schadensmeldungen
-    /// eines Frames zu EINER zusammenzufassen — reine, getestete
-    /// Funktion. Über-Deckung ist erlaubt (Korrektheit vor Optimum):
-    /// zwei weit auseinanderliegende Schäden ergeben ein großes Rect.
-    pub fn umschliessen(&self, anderes: &Rechteck) -> Rechteck {
-        let x = self.x.min(anderes.x);
-        let y = self.y.min(anderes.y);
-        let rechts = (self.x + self.breite).max(anderes.x + anderes.breite);
-        let unten = (self.y + self.hoehe).max(anderes.y + anderes.hoehe);
-        Rechteck::neu(x, y, rechts - x, unten - y)
-    }
-}
+// DAS RECHTECK WOHNT SEIT SERIE 8, TEIL 2 IN speedui (reine Geometrie,
+// kein Kernel-Bezug). Hier steht nur noch der Re-Export, damit sich in
+// Fenster-Manager und Apps keine Zeile aendert — `grafik::Rechteck` ist
+// weiterhin ein gueltiger Name.
+pub use speedui::Rechteck;
 
 // ---------------------------------------------------------------------------
 // Der Zeichner — generisch über jede Zeichenfläche
@@ -512,26 +469,15 @@ impl<'a, F: Zeichenflaeche> Zeichner<'a, F> {
 // Farbe der gemeinsamen Palette, '.' ist transparent.
 // ---------------------------------------------------------------------------
 
-/// Ein 16x16-Icon (Zeilen aus Palette-Zeichen).
-pub struct Icon {
-    pub zeilen: [&'static str; 16],
-}
+// AUCH DAS ICON WOHNT IN speedui — Typ und Palette sind reine Daten bzw.
+// eine reine Funktion, die BEIDE Wirte gleich aussehen lassen muessen.
+// Die konkreten Icons unten bleiben hier: Sie gehoeren zum
+// Erscheinungsbild des Kernels, und ein Prozess darf eigene mitbringen.
+pub use speedui::Icon;
 
-/// Die gemeinsame Icon-Palette (Obsidian-Aurora-Töne).
+/// Die gemeinsame Icon-Palette, als `Rgba` fuer den Zeichner.
 fn icon_palette(zeichen: char) -> Option<Rgba> {
-    match zeichen {
-        '.' => None, // transparent
-        'w' => Some(Rgba::neu(0xf8, 0xfa, 0xfc)), // Weiß
-        'h' => Some(Rgba::neu(0xc4, 0xca, 0xd6)), // Hellgrau
-        'd' => Some(Rgba::neu(0x56, 0x5f, 0x73)), // Dunkelgrau
-        'D' => Some(Rgba::neu(0x1a, 0x20, 0x29)), // Fast-Schwarz
-        'g' => Some(Rgba::neu(0xb4, 0x53, 0x09)), // Gold dunkel
-        'G' => Some(Rgba::neu(0xfb, 0xbf, 0x24)), // Gold hell
-        'v' => Some(Rgba::neu(0x7c, 0x3a, 0xed)), // Aurora-Violett
-        'b' => Some(Rgba::neu(0x3b, 0x82, 0xf6)), // Aurora-Blau
-        'c' => Some(Rgba::neu(0x22, 0xd3, 0xee)), // Aurora-Cyan
-        _ => Some(Rgba::neu(0xff, 0x00, 0xff)),   // auffälliges Magenta = Tippfehler im Icon!
-    }
+    speedui::icon_farbe(zeichen).map(|f| Rgba::mit_alpha(f.r, f.g, f.b, f.a))
 }
 
 /// Ordner (goldene Mappe mit Reiter).

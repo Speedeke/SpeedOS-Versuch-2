@@ -1,30 +1,29 @@
-// ui/widgets.rs — Die Grund-Widgets im Aurora-Stil
+// speedui::widgets — Die Grund-Widgets im Aurora-Stil
 //
-// Label, Trennlinie, Button, Checkbox, Textfeld und ScrollListe —
-// alle Farben aus theme::aktuell(), alle Maße aus METRIK (die
-// Projektregel "keine hartcodierten Werte im UI-Code" gilt hier
-// zuallererst). Zustandslogik, die sich rechnen lässt (Scroll-
-// Klemmen, sichtbarer Ausschnitt), liegt in reinen Funktionen und
-// ist unit-getestet.
+// Label, Trennlinie, Button, Checkbox, Textfeld und ScrollListe. Alle
+// Farben ueber `Farbrolle`, alle Masse ueber `Mass` — die Projektregel
+// „keine hartcodierten Werte im UI-Code" gilt hier zuallererst, und seit
+// dem Umzug kommen beide aus dem `UiKontext` statt aus Kernel-Globals.
+//
+// Zustandslogik, die sich rechnen laesst (Scroll-Klemmen, sichtbarer
+// Ausschnitt), liegt in reinen Funktionen und ist unit-getestet.
 
-use super::{UiEreignis, UiReaktion, Widget};
-use crate::fenster::FensterPuffer;
-use crate::grafik::{Icon, Rechteck, Zeichner};
-use crate::shell::editor::{Reaktion, Taste, Vervollstaendiger, ZeilenEditor};
-use crate::theme::{self, metrik};
+use crate::editor::{EditorTaste, Reaktion, Vervollstaendiger, ZeilenEditor};
+use crate::typen::{Icon, Rechteck, Taste};
+use crate::umgebung::{Farbrolle, Maler, Mass, UiKontext};
+use crate::{UiEreignis, UiReaktion, Widget};
 use alloc::string::String;
 use alloc::vec::Vec;
-use noto_sans_mono_bitmap::{get_raster_width, FontWeight};
-use pc_keyboard::{DecodedKey, KeyCode};
 
-/// Breite eines Zeichens der UI-Schrift in Pixeln.
-fn zeichen_breite() -> i32 {
-    get_raster_width(FontWeight::Regular, metrik().schrift_ui) as i32
+/// Breite eines Zeichens der UI-Schrift — jetzt eine Frage an die
+/// Schrift des Wirts statt an eine Kernel-Kiste.
+fn zeichen_breite(k: &UiKontext) -> i32 {
+    k.zeichen_breite()
 }
 
 /// Text vertikal in einem Bereich zentrieren (y der Textoberkante).
-fn text_mitte_y(bereich: Rechteck) -> i32 {
-    bereich.y + (bereich.hoehe - metrik().zeilen_hoehe) / 2
+fn text_mitte_y(bereich: Rechteck, k: &UiKontext) -> i32 {
+    bereich.y + (bereich.hoehe - k.mass(Mass::ZeilenHoehe)) / 2
 }
 
 // ---------------------------------------------------------------------------
@@ -48,28 +47,30 @@ impl Label {
 }
 
 impl Widget for Label {
-    fn wunschgroesse(&self) -> (i32, i32) {
+    fn wunschgroesse(&self, k: &UiKontext) -> (i32, i32) {
         let zeilen = self.text.lines().count().max(1) as i32;
         let laengste = self.text.lines().map(|z| z.chars().count()).max().unwrap_or(0) as i32;
-        (laengste * zeichen_breite(), zeilen * metrik().zeilen_hoehe)
+        (laengste * zeichen_breite(k), zeilen * k.mass(Mass::ZeilenHoehe))
     }
 
-    fn zeichnen(&self, z: &mut Zeichner<'_, FensterPuffer>, bereich: Rechteck) {
-        let thema = theme::aktuell();
-        let farbe = if self.sekundaer { thema.text_sekundaer } else { thema.text_normal };
+    fn zeichnen(&self, m: &mut Maler<'_>, bereich: Rechteck) {
+        // KOPIE, kein Borrow: `UiKontext` ist `Copy`, und ein
+        // `&m.kontext` wuerde den Maler festhalten — danach waere kein
+        // einziger Zeichen-Aufruf mehr moeglich (er braucht `&mut m`).
+        let kontext = m.kontext;
+        let k = &kontext;
+        let farbe = if self.sekundaer { k.farbe(Farbrolle::TextSekundaer) } else { k.farbe(Farbrolle::TextNormal) };
         for (i, zeile) in self.text.lines().enumerate() {
-            z.text(
+            m.text(
                 bereich.x,
-                bereich.y + i as i32 * metrik().zeilen_hoehe,
+                bereich.y + i as i32 * k.mass(Mass::ZeilenHoehe),
                 zeile,
-                metrik().schrift_ui,
-                FontWeight::Regular,
                 farbe,
             );
         }
     }
 
-    fn ereignis(&mut self, _e: &UiEreignis, _bereich: Rechteck) -> UiReaktion {
+    fn ereignis(&mut self, _e: &UiEreignis, _bereich: Rechteck, _k: &UiKontext) -> UiReaktion {
         UiReaktion::ignoriert()
     }
 }
@@ -81,14 +82,25 @@ impl Widget for Label {
 pub struct Trennlinie;
 
 impl Widget for Trennlinie {
-    fn wunschgroesse(&self) -> (i32, i32) {
-        (0, metrik().abstand)
+    fn wunschgroesse(&self, k: &UiKontext) -> (i32, i32) {
+        (0, k.mass(Mass::Abstand))
     }
-    fn zeichnen(&self, z: &mut Zeichner<'_, FensterPuffer>, bereich: Rechteck) {
+    fn zeichnen(&self, m: &mut Maler<'_>, bereich: Rechteck) {
+        // KOPIE, kein Borrow: `UiKontext` ist `Copy`, und ein
+        // `&m.kontext` wuerde den Maler festhalten — danach waere kein
+        // einziger Zeichen-Aufruf mehr moeglich (er braucht `&mut m`).
+        let kontext = m.kontext;
+        let k = &kontext;
         let y = bereich.y + bereich.hoehe / 2;
-        z.linie(bereich.x, y, bereich.x + bereich.breite - 1, y, theme::aktuell().rahmen_passiv);
+        m.linie(
+            bereich.x,
+            y,
+            bereich.x + bereich.breite - 1,
+            y,
+            k.farbe(Farbrolle::Rahmen),
+        );
     }
-    fn ereignis(&mut self, _e: &UiEreignis, _bereich: Rechteck) -> UiReaktion {
+    fn ereignis(&mut self, _e: &UiEreignis, _bereich: Rechteck, _k: &UiKontext) -> UiReaktion {
         UiReaktion::ignoriert()
     }
 }
@@ -139,57 +151,59 @@ impl Button {
 }
 
 impl Widget for Button {
-    fn wunschgroesse(&self) -> (i32, i32) {
+    fn wunschgroesse(&self, k: &UiKontext) -> (i32, i32) {
         let icon_platz = if self.icon.is_some() { 22 } else { 0 };
         (
-            self.text.chars().count() as i32 * zeichen_breite() + 2 * metrik().abstand + icon_platz + 8,
-            metrik().ui_element_hoehe,
+            self.text.chars().count() as i32 * zeichen_breite(k) + 2 * k.mass(Mass::Abstand) + icon_platz + 8,
+            k.mass(Mass::ElementHoehe),
         )
     }
 
-    fn zeichnen(&self, z: &mut Zeichner<'_, FensterPuffer>, bereich: Rechteck) {
-        let thema = theme::aktuell();
+    fn zeichnen(&self, m: &mut Maler<'_>, bereich: Rechteck) {
+        // KOPIE, kein Borrow: `UiKontext` ist `Copy`, und ein
+        // `&m.kontext` wuerde den Maler festhalten — danach waere kein
+        // einziger Zeichen-Aufruf mehr moeglich (er braucht `&mut m`).
+        let kontext = m.kontext;
+        let k = &kontext;
         // Zustand -> Füllung: gedrückt/aktiv (Auswahl) > hover > normal;
         // deaktiviert bleibt flach und ohne Akzent.
         let fuellung = if self.deaktiviert {
-            thema.eingabefeld
+            k.farbe(Farbrolle::Eingabefeld)
         } else if self.gedrueckt || self.aktiv {
-            thema.auswahl
+            k.farbe(Farbrolle::Auswahl)
         } else if self.hover {
-            thema.leiste_knopf_aktiv
+            k.farbe(Farbrolle::KnopfAktiv)
         } else {
-            thema.eingabefeld
+            k.farbe(Farbrolle::Eingabefeld)
         };
-        z.rechteck_abgerundet(bereich, metrik().radius_klein, fuellung);
-        z.rechteck_rahmen(
+        m.abgerundet(bereich, k.mass(Mass::RadiusKlein), fuellung);
+        m.rahmen(
             bereich,
             if !self.deaktiviert && (self.hover || self.aktiv) {
-                thema.akzent
+                k.farbe(Farbrolle::Akzent)
             } else {
-                thema.rahmen_passiv
+                k.farbe(Farbrolle::Rahmen)
             },
         );
 
         let mut text_x = bereich.x
             + (bereich.breite
-                - self.text.chars().count() as i32 * zeichen_breite()
+                - self.text.chars().count() as i32 * zeichen_breite(k)
                 - if self.icon.is_some() { 22 } else { 0 })
                 / 2;
         if let Some(icon) = self.icon {
-            z.icon(text_x, text_mitte_y(bereich), icon, 1);
+            m.icon(text_x, text_mitte_y(bereich, k), icon, 1);
             text_x += 22;
         }
-        z.text(
+        m.text(
             text_x,
-            text_mitte_y(bereich),
+            text_mitte_y(bereich, k),
             &self.text,
-            metrik().schrift_ui,
-            FontWeight::Regular,
-            if self.deaktiviert { thema.text_gedimmt } else { thema.text_stark },
+            if self.deaktiviert { k.farbe(Farbrolle::TextGedimmt) } else { k.farbe(Farbrolle::TextStark) },
         );
     }
 
-    fn ereignis(&mut self, ereignis: &UiEreignis, bereich: Rechteck) -> UiReaktion {
+    fn ereignis(&mut self, ereignis: &UiEreignis, bereich: Rechteck, _k: &UiKontext) -> UiReaktion {
         // Deaktiviert: reagiert auf nichts (auch kein Hover-Akzent).
         if self.deaktiviert {
             return UiReaktion::ignoriert();
@@ -249,40 +263,42 @@ impl Checkbox {
 }
 
 impl Widget for Checkbox {
-    fn wunschgroesse(&self) -> (i32, i32) {
+    fn wunschgroesse(&self, k: &UiKontext) -> (i32, i32) {
         (
-            metrik().zeilen_hoehe + metrik().abstand + self.text.chars().count() as i32 * zeichen_breite(),
-            metrik().ui_element_hoehe,
+            k.mass(Mass::ZeilenHoehe) + k.mass(Mass::Abstand) + self.text.chars().count() as i32 * zeichen_breite(k),
+            k.mass(Mass::ElementHoehe),
         )
     }
 
-    fn zeichnen(&self, z: &mut Zeichner<'_, FensterPuffer>, bereich: Rechteck) {
-        let thema = theme::aktuell();
+    fn zeichnen(&self, m: &mut Maler<'_>, bereich: Rechteck) {
+        // KOPIE, kein Borrow: `UiKontext` ist `Copy`, und ein
+        // `&m.kontext` wuerde den Maler festhalten — danach waere kein
+        // einziger Zeichen-Aufruf mehr moeglich (er braucht `&mut m`).
+        let kontext = m.kontext;
+        let k = &kontext;
         let kasten = Rechteck::neu(
             bereich.x,
-            bereich.y + (bereich.hoehe - metrik().zeilen_hoehe) / 2,
-            metrik().zeilen_hoehe,
-            metrik().zeilen_hoehe,
+            bereich.y + (bereich.hoehe - k.mass(Mass::ZeilenHoehe)) / 2,
+            k.mass(Mass::ZeilenHoehe),
+            k.mass(Mass::ZeilenHoehe),
         );
-        z.rechteck_abgerundet(kasten, 3, if self.an { thema.akzent } else { thema.eingabefeld });
-        z.rechteck_rahmen(kasten, if self.hover { thema.akzent } else { thema.rahmen_passiv });
+        m.abgerundet(kasten, 3, if self.an { k.farbe(Farbrolle::Akzent) } else { k.farbe(Farbrolle::Eingabefeld) });
+        m.rahmen(kasten, if self.hover { k.farbe(Farbrolle::Akzent) } else { k.farbe(Farbrolle::Rahmen) });
         if self.an {
             // Der Haken: zwei Linien in Titel-Textfarbe.
             let (cx, cy) = (kasten.x + kasten.breite / 2, kasten.y + kasten.hoehe / 2);
-            z.linie(cx - 4, cy, cx - 1, cy + 3, thema.text_titel_aktiv);
-            z.linie(cx - 1, cy + 3, cx + 4, cy - 3, thema.text_titel_aktiv);
+            m.linie(cx - 4, cy, cx - 1, cy + 3, k.farbe(Farbrolle::TextAufAkzent));
+            m.linie(cx - 1, cy + 3, cx + 4, cy - 3, k.farbe(Farbrolle::TextAufAkzent));
         }
-        z.text(
-            kasten.x + kasten.breite + metrik().abstand,
-            text_mitte_y(bereich),
+        m.text(
+            kasten.x + kasten.breite + k.mass(Mass::Abstand),
+            text_mitte_y(bereich, k),
             &self.text,
-            metrik().schrift_ui,
-            FontWeight::Regular,
-            thema.text_normal,
+            k.farbe(Farbrolle::TextNormal),
         );
     }
 
-    fn ereignis(&mut self, ereignis: &UiEreignis, bereich: Rechteck) -> UiReaktion {
+    fn ereignis(&mut self, ereignis: &UiEreignis, bereich: Rechteck, _k: &UiKontext) -> UiReaktion {
         match ereignis {
             UiEreignis::MausRein => {
                 self.hover = true;
@@ -347,48 +363,52 @@ impl Textfeld {
 }
 
 impl Widget for Textfeld {
-    fn wunschgroesse(&self) -> (i32, i32) {
+    fn wunschgroesse(&self, k: &UiKontext) -> (i32, i32) {
         // Breite: Box-Container strecken quer sowieso auf volle
         // Breite — der Wunsch ist nur das Minimum.
-        (120, metrik().ui_element_hoehe)
+        (120, k.mass(Mass::ElementHoehe))
     }
 
-    fn zeichnen(&self, z: &mut Zeichner<'_, FensterPuffer>, bereich: Rechteck) {
-        let thema = theme::aktuell();
-        z.rechteck_abgerundet(bereich, metrik().radius_klein, thema.eingabefeld);
-        z.rechteck_rahmen(bereich, if self.fokus { thema.akzent } else { thema.rahmen_passiv });
+    fn zeichnen(&self, m: &mut Maler<'_>, bereich: Rechteck) {
+        // KOPIE, kein Borrow: `UiKontext` ist `Copy`, und ein
+        // `&m.kontext` wuerde den Maler festhalten — danach waere kein
+        // einziger Zeichen-Aufruf mehr moeglich (er braucht `&mut m`).
+        let kontext = m.kontext;
+        let k = &kontext;
+        m.abgerundet(bereich, k.mass(Mass::RadiusKlein), k.farbe(Farbrolle::Eingabefeld));
+        m.rahmen(bereich, if self.fokus { k.farbe(Farbrolle::Akzent) } else { k.farbe(Farbrolle::Rahmen) });
 
         // Text (bei Überlänge das ENDE zeigen — dort wird getippt):
-        let platz = ((bereich.breite - 2 * metrik().abstand) / zeichen_breite()).max(0) as usize;
+        let platz = ((bereich.breite - 2 * k.mass(Mass::Abstand)) / zeichen_breite(k)).max(0) as usize;
         let text = self.editor.zeile();
         let anzahl = text.chars().count();
         let sichtbar: String = text.chars().skip(anzahl.saturating_sub(platz)).collect();
-        let text_y = text_mitte_y(bereich);
-        z.text(
-            bereich.x + metrik().abstand,
+        let text_y = text_mitte_y(bereich, k);
+        m.text(
+            bereich.x + k.mass(Mass::Abstand),
             text_y,
             &sichtbar,
-            metrik().schrift_ui,
-            FontWeight::Regular,
-            thema.text_stark,
+            k.farbe(Farbrolle::TextStark),
         );
 
         // Cursor: blinkt über die zeit-API; der Uhr-Task stößt das
         // Neuzeichnen an, solange das Feld fokussiert ist. Das Tempo
         // kommt aus den Einstellungen (Anzeige -> Cursor-Blinken).
+        // Cursor: blinkt ueber die UHR DES WIRTS, das Tempo kommt als
+        // MASS aus dem Thema (im Kernel die Einstellung „Cursor-Blinken",
+        // in einem Prozess irgendetwas Vernuenftiges).
         if self.fokus
-            && (crate::zeit::us_seit_boot() / crate::einstellungen::cursor_blink_us())
-                .is_multiple_of(2)
+            && (k.uhr.us() / (k.mass(Mass::CursorBlinkUs).max(1) as u64)).is_multiple_of(2)
         {
-            let cursor_x = bereich.x + metrik().abstand + sichtbar.chars().count() as i32 * zeichen_breite();
-            z.rechteck_fuellen(
-                Rechteck::neu(cursor_x, text_y, 2, metrik().zeilen_hoehe),
-                theme::aktuell().akzent,
+            let cursor_x = bereich.x + k.mass(Mass::Abstand) + sichtbar.chars().count() as i32 * zeichen_breite(k);
+            m.fuellen(
+                Rechteck::neu(cursor_x, text_y, 2, k.mass(Mass::ZeilenHoehe)),
+                k.farbe(Farbrolle::Akzent),
             );
         }
     }
 
-    fn ereignis(&mut self, ereignis: &UiEreignis, bereich: Rechteck) -> UiReaktion {
+    fn ereignis(&mut self, ereignis: &UiEreignis, bereich: Rechteck, _k: &UiKontext) -> UiReaktion {
         // Ein einzeiliges Textfeld ändert nur seine eigene Fläche —
         // `bereich` als Schaden statt das ganze Fenster (Tippen!).
         match ereignis {
@@ -407,12 +427,17 @@ impl Widget for Textfeld {
                 UiReaktion::neu_zeichnen_bereich(bereich)
             }
             UiEreignis::Taste(taste) if self.fokus => {
+                // Die Toolkit-Taste in die Editor-Taste uebersetzen.
+                // Zwei Enums fuer Tasten sehen nach Doppelarbeit aus, sind
+                // aber verschiedene EBENEN: `Taste` ist, was eine Tastatur
+                // liefert; `EditorTaste` ist, was eine Eingabezeile kennt
+                // (sie hat kein F5 und kein Bild-auf).
                 let editor_taste = match taste {
-                    DecodedKey::Unicode('\n') | DecodedKey::Unicode('\r') => Taste::Enter,
-                    DecodedKey::Unicode('\u{8}') | DecodedKey::Unicode('\u{7f}') => Taste::Backspace,
-                    DecodedKey::RawKey(KeyCode::ArrowUp) => Taste::HochPfeil,
-                    DecodedKey::RawKey(KeyCode::ArrowDown) => Taste::RunterPfeil,
-                    DecodedKey::Unicode(c) if *c >= ' ' => Taste::Zeichen(*c),
+                    Taste::Zeichen('\n') | Taste::Zeichen('\r') => EditorTaste::Enter,
+                    Taste::Zeichen('\u{8}') | Taste::Zeichen('\u{7f}') => EditorTaste::Backspace,
+                    Taste::Hoch => EditorTaste::HochPfeil,
+                    Taste::Runter => EditorTaste::RunterPfeil,
+                    Taste::Zeichen(c) if *c >= ' ' => EditorTaste::Zeichen(*c),
                     _ => return UiReaktion::verbraucht(), // fokussiert: schlucken
                 };
                 let text_vorher = alloc::string::String::from(self.editor.zeile());
@@ -443,10 +468,10 @@ impl Widget for Textfeld {
         // Blatt-Regel der Tab-Kette: nehmen, wenn frei; abgeben,
         // wenn gehalten (dann ist das nächste Widget dran).
         if self.fokus {
-            self.ereignis(&UiEreignis::FokusRaus, Rechteck::neu(0, 0, 0, 0));
+            self.fokus = false;
             false
         } else {
-            self.ereignis(&UiEreignis::FokusRein, Rechteck::neu(0, 0, 0, 0));
+            self.fokus = true;
             true
         }
     }
@@ -592,13 +617,13 @@ impl ScrollListe {
         }
     }
 
-    fn inhalt_hoehe(&self) -> i32 {
-        self.eintraege.len() as i32 * metrik().listen_eintrag_hoehe
+    fn inhalt_hoehe(&self, k: &UiKontext) -> i32 {
+        self.eintraege.len() as i32 * k.mass(Mass::ListenEintragHoehe)
     }
 
     /// Das Rechteck des Scrollbalken-GRIFFS (None = alles sichtbar).
-    fn balken_rechteck(&self, bereich: Rechteck) -> Option<Rechteck> {
-        let inhalt = self.inhalt_hoehe();
+    fn balken_rechteck(&self, bereich: Rechteck, k: &UiKontext) -> Option<Rechteck> {
+        let inhalt = self.inhalt_hoehe(k);
         if inhalt <= bereich.hoehe {
             return None;
         }
@@ -606,16 +631,16 @@ impl ScrollListe {
         let weg = bereich.hoehe - hoehe;
         let y = bereich.y + weg * self.scroll.get() / (inhalt - bereich.hoehe);
         Some(Rechteck::neu(
-            bereich.x + bereich.breite - metrik().scrollbalken_breite,
+            bereich.x + bereich.breite - k.mass(Mass::ScrollbalkenBreite),
             y,
-            metrik().scrollbalken_breite,
+            k.mass(Mass::ScrollbalkenBreite),
             hoehe,
         ))
     }
 
     /// Scroll-Position aus einer Griff-Position rückrechnen (Drag).
-    fn scroll_aus_griff(&self, bereich: Rechteck, griff_y: i32) -> i32 {
-        let inhalt = self.inhalt_hoehe();
+    fn scroll_aus_griff(&self, bereich: Rechteck, griff_y: i32, k: &UiKontext) -> i32 {
+        let inhalt = self.inhalt_hoehe(k);
         let griff_hoehe = (bereich.hoehe * bereich.hoehe / inhalt).max(24);
         let weg = (bereich.hoehe - griff_hoehe).max(1);
         scroll_klemmen(
@@ -628,7 +653,7 @@ impl ScrollListe {
     /// Bewegt die Auswahl um `delta` Einträge (mit Wrap-Around) und
     /// scrollt sie in den Sichtbereich — für Pfeiltasten-Navigation
     /// (Startmenü) und Alt+Tab.
-    pub fn auswahl_bewegen(&mut self, delta: i32, sicht_hoehe: i32) {
+    pub fn auswahl_bewegen(&mut self, delta: i32, sicht_hoehe: i32, k: &UiKontext) {
         if self.eintraege.is_empty() {
             self.auswahl = None;
             return;
@@ -637,8 +662,8 @@ impl ScrollListe {
         let neu = (self.auswahl.unwrap_or(0) as i32 + delta).rem_euclid(anzahl);
         self.auswahl = Some(neu as usize);
         // In den Sichtbereich holen:
-        let oben = neu * metrik().listen_eintrag_hoehe;
-        let unten = oben + metrik().listen_eintrag_hoehe;
+        let oben = neu * k.mass(Mass::ListenEintragHoehe);
+        let unten = oben + k.mass(Mass::ListenEintragHoehe);
         if oben < self.scroll.get() {
             self.scroll.set(oben);
         } else if unten > self.scroll.get() + sicht_hoehe {
@@ -653,18 +678,18 @@ impl ScrollListe {
         self.auswahl = if self.eintraege.is_empty() { None } else { Some(0) };
     }
 
-    fn eintrag_bei(&self, bereich: Rechteck, x: i32, y: i32) -> Option<usize> {
-        if !bereich.enthaelt(x, y) || x >= bereich.x + bereich.breite - metrik().scrollbalken_breite {
+    fn eintrag_bei(&self, bereich: Rechteck, x: i32, y: i32, k: &UiKontext) -> Option<usize> {
+        if !bereich.enthaelt(x, y) || x >= bereich.x + bereich.breite - k.mass(Mass::ScrollbalkenBreite) {
             return None;
         }
-        let index = ((y - bereich.y + self.scroll.get()) / metrik().listen_eintrag_hoehe) as usize;
+        let index = ((y - bereich.y + self.scroll.get()) / k.mass(Mass::ListenEintragHoehe)) as usize;
         (index < self.eintraege.len()).then_some(index)
     }
 }
 
 impl Widget for ScrollListe {
-    fn wunschgroesse(&self) -> (i32, i32) {
-        (self.wunsch_breite, 3 * metrik().listen_eintrag_hoehe)
+    fn wunschgroesse(&self, k: &UiKontext) -> (i32, i32) {
+        (self.wunsch_breite, 3 * k.mass(Mass::ListenEintragHoehe))
     }
 
     fn flex(&self) -> i32 {
@@ -688,15 +713,19 @@ impl Widget for ScrollListe {
         self.fokus = false;
     }
 
-    fn zeichnen(&self, z: &mut Zeichner<'_, FensterPuffer>, bereich: Rechteck) {
-        let thema = theme::aktuell();
+    fn zeichnen(&self, m: &mut Maler<'_>, bereich: Rechteck) {
+        // KOPIE, kein Borrow: `UiKontext` ist `Copy`, und ein
+        // `&m.kontext` wuerde den Maler festhalten — danach waere kein
+        // einziger Zeichen-Aufruf mehr moeglich (er braucht `&mut m`).
+        let kontext = m.kontext;
+        let k = &kontext;
         // Auswahl in den Sichtbereich holen (Cell — zeichnen ist
         // &self): für Apps, die die Liste nach jeder Nachricht neu
         // aufbauen und die Auswahl als Zustand mitgeben.
         if self.auswahl_sichtbar {
             if let Some(index) = self.auswahl {
-                let oben = index as i32 * metrik().listen_eintrag_hoehe;
-                let unten = oben + metrik().listen_eintrag_hoehe;
+                let oben = index as i32 * k.mass(Mass::ListenEintragHoehe);
+                let unten = oben + k.mass(Mass::ListenEintragHoehe);
                 if oben < self.scroll.get() {
                     self.scroll.set(oben);
                 } else if unten > self.scroll.get() + bereich.hoehe {
@@ -704,72 +733,70 @@ impl Widget for ScrollListe {
                 }
             }
         }
-        z.rechteck_fuellen(bereich, thema.eingabefeld);
-        z.rechteck_rahmen(bereich, if self.fokus { thema.akzent } else { thema.rahmen_passiv });
+        m.fuellen(bereich, k.farbe(Farbrolle::Eingabefeld));
+        m.rahmen(bereich, if self.fokus { k.farbe(Farbrolle::Akzent) } else { k.farbe(Farbrolle::Rahmen) });
 
         // Einträge — GECLIPPT auf den Listenbereich (Teilzeilen am Rand):
-        z.clip_setzen(Some(Rechteck::neu(bereich.x + 1, bereich.y + 1, bereich.breite - 2, bereich.hoehe - 2)));
+        m.clip_setzen(Some(Rechteck::neu(bereich.x + 1, bereich.y + 1, bereich.breite - 2, bereich.hoehe - 2)));
         let (erster, letzter) = sichtbare_eintraege(
             self.scroll.get(),
             bereich.hoehe,
-            metrik().listen_eintrag_hoehe,
+            k.mass(Mass::ListenEintragHoehe),
             self.eintraege.len(),
         );
         for index in erster..letzter {
             let eintrag = &self.eintraege[index];
-            let y = bereich.y + index as i32 * metrik().listen_eintrag_hoehe - self.scroll.get();
+            let y = bereich.y + index as i32 * k.mass(Mass::ListenEintragHoehe) - self.scroll.get();
             let zeile = Rechteck::neu(
                 bereich.x + 2,
                 y,
-                bereich.breite - metrik().scrollbalken_breite - 4,
-                metrik().listen_eintrag_hoehe,
+                bereich.breite - k.mass(Mass::ScrollbalkenBreite) - 4,
+                k.mass(Mass::ListenEintragHoehe),
             );
             if self.auswahl == Some(index) {
-                z.rechteck_abgerundet(zeile, metrik().radius_klein, thema.auswahl);
+                m.abgerundet(zeile, k.mass(Mass::RadiusKlein), k.farbe(Farbrolle::Auswahl));
             }
             let mut text_x = zeile.x + 6;
             if let Some(icon) = eintrag.icon {
-                z.icon(text_x, y + (metrik().listen_eintrag_hoehe - 16) / 2, icon, 1);
+                m.icon(text_x, y + (k.mass(Mass::ListenEintragHoehe) - 16) / 2, icon, 1);
                 text_x += 22;
             }
-            z.text(
+            m.text(
                 text_x,
-                y + (metrik().listen_eintrag_hoehe - metrik().zeilen_hoehe) / 2,
+                y + (k.mass(Mass::ListenEintragHoehe) - k.mass(Mass::ZeilenHoehe)) / 2,
                 &eintrag.text,
-                metrik().schrift_ui,
-                FontWeight::Regular,
-                if self.auswahl == Some(index) { thema.text_stark } else { thema.text_normal },
+                if self.auswahl == Some(index) { k.farbe(Farbrolle::TextStark) } else { k.farbe(Farbrolle::TextNormal) },
             );
         }
-        z.clip_setzen(None);
+        m.clip_setzen(None);
 
         // Scrollbalken (nur wenn nötig):
-        if let Some(griff) = self.balken_rechteck(bereich) {
-            z.rechteck_fuellen(
-                Rechteck::neu(griff.x, bereich.y, metrik().scrollbalken_breite, bereich.hoehe),
-                thema.leiste_knopf,
+        if let Some(griff) = self.balken_rechteck(bereich, k) {
+            m.fuellen(
+                Rechteck::neu(griff.x, bereich.y, k.mass(Mass::ScrollbalkenBreite), bereich.hoehe),
+                k.farbe(Farbrolle::KnopfFlaeche),
             );
-            z.rechteck_abgerundet(
+            m.abgerundet(
                 griff,
-                metrik().radius_klein,
-                if self.balken_griff.is_some() { thema.akzent } else { thema.text_gedimmt },
+                k.mass(Mass::RadiusKlein),
+                if self.balken_griff.is_some() { k.farbe(Farbrolle::Akzent) } else { k.farbe(Farbrolle::TextGedimmt) },
             );
         }
     }
 
-    fn ereignis(&mut self, ereignis: &UiEreignis, bereich: Rechteck) -> UiReaktion {
+    fn ereignis(&mut self, ereignis: &UiEreignis, bereich: Rechteck, k: &UiKontext) -> UiReaktion {
         match ereignis {
             UiEreignis::Scroll { delta, x, y } if bereich.enthaelt(*x, *y) => {
                 // Rad hoch (delta > 0) = Inhalt nach oben scrollen.
                 self.scroll.set(scroll_klemmen(
-                    self.scroll.get() - *delta as i32 * 3 * metrik().listen_eintrag_hoehe / 2,
-                    self.inhalt_hoehe(),
+                    self.scroll.get() - *delta as i32 * 3 * k.mass(Mass::ListenEintragHoehe) / 2,
+                    self.inhalt_hoehe(k),
                     bereich.hoehe,
                 ));
                 UiReaktion::neu_zeichnen_bereich(bereich)
             }
             UiEreignis::Klick { x, y } => {
-                if let Some(griff) = self.balken_rechteck(bereich) {
+                if let Some(griff) = self.balken_rechteck(bereich, k) {
                     if griff.enthaelt(*x, *y) {
                         self.balken_griff = Some(*y - griff.y);
                         return UiReaktion::neu_zeichnen_bereich(bereich);
@@ -779,13 +806,13 @@ impl Widget for ScrollListe {
                         let richtung = if *y < griff.y { -1 } else { 1 };
                         self.scroll.set(scroll_klemmen(
                             self.scroll.get() + richtung * bereich.hoehe,
-                            self.inhalt_hoehe(),
+                            self.inhalt_hoehe(k),
                             bereich.hoehe,
                         ));
                         return UiReaktion::neu_zeichnen_bereich(bereich);
                     }
                 }
-                if let Some(index) = self.eintrag_bei(bereich, *x, *y) {
+                if let Some(index) = self.eintrag_bei(bereich, *x, *y, k) {
                     self.auswahl = Some(index);
                     if self.fokussierbar {
                         self.fokus = true; // Klick fokussiert die Liste
@@ -795,7 +822,7 @@ impl Widget for ScrollListe {
                 UiReaktion::ignoriert()
             }
             UiEreignis::Doppelklick { x, y } => {
-                if let Some(index) = self.eintrag_bei(bereich, *x, *y) {
+                if let Some(index) = self.eintrag_bei(bereich, *x, *y, k) {
                     UiReaktion::nachricht(self.doppelklick_nachricht(index))
                 } else {
                     UiReaktion::ignoriert()
@@ -804,7 +831,7 @@ impl Widget for ScrollListe {
             // Rechtsklick: Eintrag auswählen + Kontext-Nachricht;
             // freie Fläche innerhalb der Liste: Leer-Nachricht.
             UiEreignis::Rechtsklick { x, y } => {
-                if let Some(index) = self.eintrag_bei(bereich, *x, *y) {
+                if let Some(index) = self.eintrag_bei(bereich, *x, *y, k) {
                     if let Some(basis) = self.rechtsklick_basis {
                         self.auswahl = Some(index);
                         return UiReaktion::nachricht(basis + index as u32);
@@ -819,21 +846,21 @@ impl Widget for ScrollListe {
             // Tastatur (nur mit Fokus): Pfeile bewegen die Auswahl,
             // Enter wirkt wie ein Doppelklick auf den Eintrag.
             UiEreignis::Taste(taste) if self.fokus => match taste {
-                DecodedKey::RawKey(KeyCode::ArrowUp) => {
-                    self.auswahl_bewegen(-1, bereich.hoehe);
+                Taste::Hoch => {
+                    self.auswahl_bewegen(-1, bereich.hoehe, k);
                     match self.auswahl {
                         Some(index) => UiReaktion::nachricht(self.auswahl_nachricht(index)),
                         None => UiReaktion::neu_zeichnen_bereich(bereich),
                     }
                 }
-                DecodedKey::RawKey(KeyCode::ArrowDown) => {
-                    self.auswahl_bewegen(1, bereich.hoehe);
+                Taste::Runter => {
+                    self.auswahl_bewegen(1, bereich.hoehe, k);
                     match self.auswahl {
                         Some(index) => UiReaktion::nachricht(self.auswahl_nachricht(index)),
                         None => UiReaktion::neu_zeichnen_bereich(bereich),
                     }
                 }
-                DecodedKey::Unicode('\n') | DecodedKey::Unicode('\r') => match self.auswahl {
+                Taste::Zeichen('\n') | Taste::Zeichen('\r') => match self.auswahl {
                     Some(index) => UiReaktion::nachricht(self.doppelklick_nachricht(index)),
                     None => UiReaktion::verbraucht(),
                 },
@@ -841,7 +868,7 @@ impl Widget for ScrollListe {
             },
             UiEreignis::Bewegt { x: _, y } => {
                 if let Some(griff_versatz) = self.balken_griff {
-                    self.scroll.set(self.scroll_aus_griff(bereich, *y - griff_versatz));
+                    self.scroll.set(self.scroll_aus_griff(bereich, *y - griff_versatz, k));
                     return UiReaktion::neu_zeichnen_bereich(bereich);
                 }
                 UiReaktion::ignoriert()
@@ -858,15 +885,22 @@ impl Widget for ScrollListe {
 }
 
 // ---------------------------------------------------------------------------
-// Tests
+// Tests — jetzt auf dem HOST, mit einem Wirt aus Pappe
+//
+// Sie sind Wort fuer Wort die Tests aus Serie 3; dazugekommen ist nur der
+// `TestWirt` und sein Kontext. Genau das ist der Gewinn der Trennung: Was
+// vorher einen QEMU-Start brauchte, laeuft jetzt in Millisekunden.
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::attrappe::{MalProtokoll, Strich, TestWirt};
+    use crate::{Maler, Schrift, UiKontext};
+    use alloc::format;
 
     /// Scroll-Klemmen: nie negativ, nie hinter das Inhaltsende.
-    #[test_case]
+    #[test]
     fn test_scroll_klemmen() {
         assert_eq!(scroll_klemmen(-10, 500, 100), 0);
         assert_eq!(scroll_klemmen(250, 500, 100), 250);
@@ -875,88 +909,187 @@ mod tests {
     }
 
     /// Sichtbereich der ScrollListe: richtige Index-Spanne, auch mit
-    /// angeschnittenen Einträgen oben und unten.
-    #[test_case]
+    /// angeschnittenen Eintraegen oben und unten.
+    #[test]
     fn test_sichtbare_eintraege() {
-        // 20 Einträge à 26 px, Sichtfenster 100 px:
-        // scroll 0: Einträge 0..4 (Eintrag 3 angeschnitten).
+        // 20 Eintraege a 26 px, Sichtfenster 100 px:
         assert_eq!(sichtbare_eintraege(0, 100, 26, 20), (0, 4));
-        // scroll 30: erster = 1 (Eintrag 1 ab Pixel 26), bis Pixel 130 -> 0..5.
         assert_eq!(sichtbare_eintraege(30, 100, 26, 20), (1, 5));
-        // Ganz unten (scroll = 20*26-100 = 420): 16..20.
         assert_eq!(sichtbare_eintraege(420, 100, 26, 20), (16, 20));
-        // Wenige Einträge: Spanne wird auf die Anzahl gekappt.
         assert_eq!(sichtbare_eintraege(0, 100, 26, 2), (0, 2));
     }
 
     /// Auswahl per Klick + Scroll verschieben den sichtbaren Eintrag.
-    #[test_case]
+    #[test]
     fn test_liste_auswahl_und_scroll() {
+        let wirt = TestWirt::neu();
+        let k = wirt.kontext();
         let eintraege = (0..20)
-            .map(|i| ListenEintrag { icon: None, text: alloc::format!("Eintrag {}", i) })
+            .map(|i| ListenEintrag { icon: None, text: format!("Eintrag {}", i) })
             .collect();
         let mut liste = ScrollListe::neu(eintraege, 100, 101);
         let bereich = Rechteck::neu(0, 0, 200, 100);
 
-        // Klick auf den zweiten Eintrag (y=30, Eintrag-Höhe 26):
-        let klick = liste.ereignis(&UiEreignis::Klick { x: 10, y: 30 }, bereich);
+        // Klick auf den zweiten Eintrag (y=30, Eintrag-Hoehe 24 im
+        // Test-Thema):
+        let klick = liste.ereignis(&UiEreignis::Klick { x: 10, y: 30 }, bereich, &k);
         assert_eq!(liste.auswahl, Some(1));
         assert_eq!(klick.nachricht, Some(100));
 
-        // Rad nach unten (delta -1) scrollt; derselbe Klickpunkt
-        // trifft jetzt einen späteren Eintrag:
-        liste.ereignis(&UiEreignis::Scroll { delta: -1, x: 10, y: 30 }, bereich);
+        // Rad nach unten (delta -1) scrollt; derselbe Klickpunkt trifft
+        // jetzt einen spaeteren Eintrag:
+        liste.ereignis(&UiEreignis::Scroll { delta: -1, x: 10, y: 30 }, bereich, &k);
         assert!(liste.scroll.get() > 0);
-        liste.ereignis(&UiEreignis::Klick { x: 10, y: 30 }, bereich);
+        liste.ereignis(&UiEreignis::Klick { x: 10, y: 30 }, bereich, &k);
         assert!(liste.auswahl > Some(1));
 
         // Doppelklick meldet die Doppelklick-Nachricht:
-        let doppel = liste.ereignis(&UiEreignis::Doppelklick { x: 10, y: 30 }, bereich);
+        let doppel = liste.ereignis(&UiEreignis::Doppelklick { x: 10, y: 30 }, bereich, &k);
         assert_eq!(doppel.nachricht, Some(101));
     }
 
     /// Button: Klick + Loslassen im Bereich = Nachricht; wegziehen
-    /// bricht ab; Hover kommt über MausRein/MausRaus.
-    #[test_case]
+    /// bricht ab; Hover kommt ueber MausRein/MausRaus.
+    #[test]
     fn test_button_zustaende() {
+        let wirt = TestWirt::neu();
+        let k = wirt.kontext();
         let mut button = Button::neu("Test", 7);
         let bereich = Rechteck::neu(0, 0, 100, 30);
 
-        button.ereignis(&UiEreignis::MausRein, bereich);
+        button.ereignis(&UiEreignis::MausRein, bereich, &k);
         assert!(button.hover);
-        button.ereignis(&UiEreignis::Klick { x: 10, y: 10 }, bereich);
+        button.ereignis(&UiEreignis::Klick { x: 10, y: 10 }, bereich, &k);
         assert!(button.gedrueckt);
         // Wegziehen und woanders loslassen: KEINE Nachricht.
-        let daneben = button.ereignis(&UiEreignis::Losgelassen { x: 300, y: 10 }, bereich);
+        let daneben = button.ereignis(&UiEreignis::Losgelassen { x: 300, y: 10 }, bereich, &k);
         assert_eq!(daneben.nachricht, None);
         // Nochmal, diesmal richtig:
-        button.ereignis(&UiEreignis::Klick { x: 10, y: 10 }, bereich);
-        let klick = button.ereignis(&UiEreignis::Losgelassen { x: 12, y: 12 }, bereich);
+        button.ereignis(&UiEreignis::Klick { x: 10, y: 10 }, bereich, &k);
+        let klick = button.ereignis(&UiEreignis::Losgelassen { x: 12, y: 12 }, bereich, &k);
         assert_eq!(klick.nachricht, Some(7));
-        button.ereignis(&UiEreignis::MausRaus, bereich);
+        button.ereignis(&UiEreignis::MausRaus, bereich, &k);
         assert!(!button.hover);
     }
 
-    /// Textfeld: Tippen über den ZeilenEditor, Enter meldet die
+    /// Textfeld: Tippen ueber den ZeilenEditor, Enter meldet die
     /// Nachricht, Checkbox toggelt.
-    #[test_case]
+    #[test]
     fn test_textfeld_und_checkbox() {
+        let wirt = TestWirt::neu();
+        let k = wirt.kontext();
         let mut feld = Textfeld::neu(42);
         let bereich = Rechteck::neu(0, 0, 200, 30);
-        feld.ereignis(&UiEreignis::Klick { x: 5, y: 5 }, bereich); // fokussiert
+        feld.ereignis(&UiEreignis::Klick { x: 5, y: 5 }, bereich, &k); // fokussiert
         assert!(feld.hat_fokus());
         for zeichen in "abc".chars() {
-            feld.ereignis(&UiEreignis::Taste(DecodedKey::Unicode(zeichen)), bereich);
+            feld.ereignis(&UiEreignis::Taste(Taste::Zeichen(zeichen)), bereich, &k);
         }
         assert_eq!(feld.text(), "abc");
-        feld.ereignis(&UiEreignis::Taste(DecodedKey::Unicode('\u{8}')), bereich);
+        feld.ereignis(&UiEreignis::Taste(Taste::Zeichen('\u{8}')), bereich, &k);
         assert_eq!(feld.text(), "ab");
-        let enter = feld.ereignis(&UiEreignis::Taste(DecodedKey::Unicode('\n')), bereich);
+        let enter = feld.ereignis(&UiEreignis::Taste(Taste::Zeichen('\n')), bereich, &k);
         assert_eq!(enter.nachricht, Some(42));
 
         let mut kasten = Checkbox::neu("An?", false, 9);
-        let reaktion = kasten.ereignis(&UiEreignis::Klick { x: 5, y: 5 }, Rechteck::neu(0, 0, 100, 30));
+        let reaktion =
+            kasten.ereignis(&UiEreignis::Klick { x: 5, y: 5 }, Rechteck::neu(0, 0, 100, 30), &k);
         assert!(kasten.an);
         assert_eq!(reaktion.nachricht, Some(9));
+    }
+
+    // -----------------------------------------------------------------
+    // NEU: Tests AN DER TRAIT-GRENZE — sie gab es vorher nicht, weil es
+    // vorher keine Grenze gab.
+    // -----------------------------------------------------------------
+
+    /// DAS THEMA WIRD WIRKLICH BENUTZT, nicht nur mitgeschleppt: Ein
+    /// Button malt seine Flaeche in der Farbe, die das Thema fuer die
+    /// Rolle liefert — und eine ANDERE, sobald der Cursor darueber steht.
+    #[test]
+    fn test_button_fragt_das_thema() {
+        let wirt = TestWirt::neu();
+        let k = wirt.kontext();
+        let mut protokoll = MalProtokoll::neu(200, 100);
+        let bereich = Rechteck::neu(0, 0, 100, 30);
+        let button = Button::neu("Hallo", 1);
+
+        {
+            let mut m = Maler::neu(&mut protokoll, k);
+            button.zeichnen(&mut m, bereich);
+        }
+        // Die Flaeche in Eingabefeld-Farbe, der Rahmen in Rahmen-Farbe,
+        // der Text ist da:
+        assert!(protokoll.striche.contains(&Strich::Abgerundet(
+            bereich,
+            k.mass(Mass::RadiusKlein),
+            k.farbe(Farbrolle::Eingabefeld)
+        )));
+        assert!(protokoll.striche.contains(&Strich::Rahmen(bereich, k.farbe(Farbrolle::Rahmen))));
+        assert!(protokoll.hat_text("Hallo"));
+
+        // Jetzt mit Hover — der Rahmen wechselt auf den Akzent:
+        let mut button = button;
+        button.ereignis(&UiEreignis::MausRein, bereich, &k);
+        protokoll.leeren();
+        {
+            let mut m = Maler::neu(&mut protokoll, k);
+            button.zeichnen(&mut m, bereich);
+        }
+        assert!(protokoll.striche.contains(&Strich::Rahmen(bereich, k.farbe(Farbrolle::Akzent))));
+    }
+
+    /// DIE SCHRIFT WIRD WIRKLICH GEFRAGT: Die Wunschbreite eines Labels
+    /// haengt an der Zeichenbreite des Wirts. Zwei Wirte mit
+    /// verschiedenen Schriften ergeben verschiedene Breiten — mit einer
+    /// eingebauten Schrift waere das nicht moeglich.
+    #[test]
+    fn test_label_fragt_die_schrift() {
+        struct BreiteSchrift;
+        impl Schrift for BreiteSchrift {
+            fn zeichen_breite(&self, groesse: i32) -> i32 {
+                groesse // doppelt so breit wie die Test-Schrift
+            }
+            fn zeilen_hoehe(&self, groesse: i32) -> i32 {
+                groesse + 4
+            }
+        }
+        let wirt = TestWirt::neu();
+        let schmal = wirt.kontext();
+        let breit = UiKontext::neu(&wirt.thema, &BreiteSchrift, &wirt.uhr);
+
+        let label = Label::neu("12345");
+        assert_eq!(label.wunschgroesse(&schmal).0, 5 * 8);
+        assert_eq!(label.wunschgroesse(&breit).0, 5 * 16);
+    }
+
+    /// DIE UHR WIRD WIRKLICH GEFRAGT: Der Textfeld-Cursor blinkt — also
+    /// zeichnet dasselbe Feld bei verschiedenen Uhrzeiten verschieden
+    /// viel. Ohne die Attrappe muesste dieser Test WARTEN; so stellt er
+    /// die Zeit.
+    #[test]
+    fn test_textfeld_cursor_blinkt_nach_der_uhr() {
+        let wirt = TestWirt::neu();
+        let k = wirt.kontext();
+        let bereich = Rechteck::neu(0, 0, 200, 30);
+        let mut feld = Textfeld::neu(1);
+        feld.fokus_setzen(true);
+
+        let striche_bei = |us: u64, feld: &Textfeld| {
+            wirt.uhr.setzen(us);
+            let mut protokoll = MalProtokoll::neu(200, 100);
+            {
+                let mut m = Maler::neu(&mut protokoll, k);
+                feld.zeichnen(&mut m, bereich);
+            }
+            protokoll.striche.len()
+        };
+        // Blink-Periode ist 500_000 us: in der ersten Haelfte ist der
+        // Cursor da (ein Strich mehr), in der zweiten nicht.
+        let mit = striche_bei(0, &feld);
+        let ohne = striche_bei(500_000, &feld);
+        assert_eq!(mit, ohne + 1, "der Cursor muss genau einen Strich ausmachen");
+        // Und eine Periode weiter ist er wieder da:
+        assert_eq!(striche_bei(1_000_000, &feld), mit);
     }
 }

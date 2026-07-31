@@ -22,6 +22,13 @@ exclude = ["boot", "userland"]
 # Die Kiste hat selbst keine Abhaengigkeiten und kennt keinen Transport.
 speedhttp = { path = "speedhttp" }
 
+# DAS WIDGET-TOOLKIT (Serie 8, Teil 2) — herausgeloest aus src/ui/, damit
+# BEIDE Seiten es benutzen koennen: der Kernel fuer Explorer & Co. und
+# `userland/uidemo` in Ring 3. Die Kiste hat selbst keine Abhaengigkeiten
+# und kennt keinen Wirt; was sie braucht (Thema, Schrift, Uhr, Leinwand,
+# Dateiquelle), VERLANGT sie als Trait. Entwurf: docs/speedui-trennung.md.
+speedui = { path = "speedui" }
+
 # Die Kernel-Seite des Bootloaders (seit 0.11 aufgeteilt):
 # bootloader_api liefert entry_point!, BootInfo und die Config —
 # das Disk-Image baut das separate Host-Programm in boot/.

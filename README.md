@@ -8,6 +8,14 @@ ist alles selbst gebaut (auf Basis der bewährten Architektur aus
 > Lernprojekt: Der Code ist bewusst ausführlich auf Deutsch kommentiert —
 > jede Datei erklärt, *was* sie tut und *warum* es so funktioniert.
 
+![speedui in Ring 3](docs/screenshots/serie8-speedui-ring3.png)
+*Serie 8, Teil 2: `starte uidemo &` — **dieselben Widgets, die im Kernel den
+Explorer bauen**, laufen in einem unprivilegierten Prozess. Knöpfe,
+Checkbox, Textfeld und ScrollListe kommen aus der wirtsfreien Kiste
+`speedui/` (leerer `[dependencies]`-Block); Thema, Schrift, Uhr und
+Leinwand liefert der Prozess selbst. Warum das nicht trivial war und was
+am zähesten war: [`docs/speedui-trennung.md`](docs/speedui-trennung.md).*
+
 ![Ein Ring-3-Prozess mit eigenem Fenster](docs/screenshots/serie8-prozess-fenster.png)
 *Der Meilenstein von Serie 8, Teil 1: `starte fenstertest &` — ein
 **unprivilegierter Prozess besitzt ein Fenster**. Verlauf, Klick-Punkte und

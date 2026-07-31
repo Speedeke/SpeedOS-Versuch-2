@@ -1,0 +1,27 @@
+# speedui — Das Widget-Toolkit von SpeedOS, ohne jeden Wirt
+#
+# Diese Kiste ist das Toolkit aus Serie 3, aus `src/ui/` herausgeloest — und
+# anders als bei `speedhttp` war das NICHT trivial. Ein Parser kennt nur
+# Bytes, und Bytes kennen keine Umgebung; ein Widget existiert dagegen nur,
+# weil es etwas ZEICHNET, in einer FARBE, in einer SCHRIFT, und weil ein
+# Cursor mit einer FREQUENZ blinkt.
+#
+# Der Trick ist deshalb nicht, die Umgebung wegzulassen, sondern sie
+# UMZUDREHEN: speedui beschreibt in Traits, WAS es braucht (Thema, Schrift,
+# Uhr, Leinwand, Dateiquelle), und der Wirt bringt es mit. Der Kernel
+# liefert seine Implementierung, ein Ring-3-Prozess seine.
+#
+# Der Entwurf mit allen gefundenen Kopplungen steht in
+# docs/speedui-trennung.md — geschrieben, BEVOR eine Zeile umzog.
+
+[package]
+name = "speedui"
+version = "0.1.0"
+edition = "2021"
+description = "Widget-Toolkit — wirtsfrei, no_std + alloc"
+
+# ABSICHTLICH LEER, und das ist der ganze Beweis. Wer hier etwas eintraegt,
+# sollte sich fragen, ob ein Widget-Baum es wirklich braucht — insbesondere
+# `pc_keyboard` (speedui hat sein eigenes `Taste`-Enum) und alles, was nach
+# Schrift-Daten aussieht.
+[dependencies]

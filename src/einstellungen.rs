@@ -338,10 +338,13 @@ pub fn offset_text(minuten: i64) -> String {
 // Die Einstellungen-App — Kategorien links, Inhalt rechts
 // ===========================================================================
 
-use crate::grafik::{Icon, Rechteck, Rgba, Zeichner};
-use crate::theme::{self, metrik};
+use crate::grafik::{Icon, Rechteck, Rgba};
+use crate::theme;
 use crate::ui::widgets::{Button, Checkbox, Label, ListenEintrag, ScrollListe, Trennlinie};
-use crate::ui::{hbox, vbox, App, AppReaktion, Fueller, UiEreignis, UiReaktion, Widget};
+use crate::ui::{
+    hbox, vbox, App, AppReaktion, Farbrolle, Fueller, Maler, Mass, UiEreignis, UiKontext,
+    UiReaktion, Widget,
+};
 
 // ----- Nachricht-IDs (Basen weit genug auseinander für die Indizes) -----
 const N_NICHTS: u32 = 0; // Anzeige-Chips ohne Wirkung (Offset-Text)
@@ -994,25 +997,31 @@ struct FarbFeld {
 }
 
 impl Widget for FarbFeld {
-    fn wunschgroesse(&self) -> (i32, i32) {
-        (metrik().ui_element_hoehe, metrik().ui_element_hoehe)
+    fn wunschgroesse(&self, k: &UiKontext) -> (i32, i32) {
+        (k.mass(Mass::ElementHoehe), k.mass(Mass::ElementHoehe))
     }
 
-    fn zeichnen(&self, z: &mut Zeichner<'_, crate::fenster::FensterPuffer>, bereich: Rechteck) {
-        let thema = theme::aktuell();
-        z.rechteck_abgerundet(bereich, metrik().radius_klein, self.farbe);
+    fn zeichnen(&self, m: &mut Maler<'_>, bereich: Rechteck) {
+        // Kopie statt Borrow: `&m.kontext` wuerde den Maler festhalten.
+        let kontext = m.kontext;
+        let k = &kontext;
+        m.abgerundet(
+            bereich,
+            k.mass(Mass::RadiusKlein),
+            speedui::Farbe::mit_alpha(self.farbe.r, self.farbe.g, self.farbe.b, self.farbe.a),
+        );
         if self.aktiv {
-            z.rechteck_rahmen(bereich, thema.text_stark);
-            z.rechteck_rahmen(
+            m.rahmen(bereich, k.farbe(Farbrolle::TextStark));
+            m.rahmen(
                 Rechteck::neu(bereich.x + 1, bereich.y + 1, bereich.breite - 2, bereich.hoehe - 2),
-                thema.text_stark,
+                k.farbe(Farbrolle::TextStark),
             );
         } else {
-            z.rechteck_rahmen(bereich, thema.rahmen_passiv);
+            m.rahmen(bereich, k.farbe(Farbrolle::Rahmen));
         }
     }
 
-    fn ereignis(&mut self, ereignis: &UiEreignis, bereich: Rechteck) -> UiReaktion {
+    fn ereignis(&mut self, ereignis: &UiEreignis, bereich: Rechteck, _k: &UiKontext) -> UiReaktion {
         match ereignis {
             UiEreignis::Klick { x, y } if bereich.enthaelt(*x, *y) => {
                 UiReaktion::nachricht(self.nachricht)
@@ -1029,13 +1038,16 @@ struct IconBild {
 }
 
 impl Widget for IconBild {
-    fn wunschgroesse(&self) -> (i32, i32) {
-        (16 * self.skala + metrik().abstand, 16 * self.skala)
+    fn wunschgroesse(&self, k: &UiKontext) -> (i32, i32) {
+        (16 * self.skala + k.mass(Mass::Abstand), 16 * self.skala)
     }
-    fn zeichnen(&self, z: &mut Zeichner<'_, crate::fenster::FensterPuffer>, bereich: Rechteck) {
-        z.icon(bereich.x, bereich.y, self.icon, self.skala);
+    fn zeichnen(&self, m: &mut Maler<'_>, bereich: Rechteck) {
+        // Kopie statt Borrow: `&m.kontext` wuerde den Maler festhalten.
+        let kontext = m.kontext;
+        let _k = &kontext;
+        m.icon(bereich.x, bereich.y, self.icon, self.skala);
     }
-    fn ereignis(&mut self, _e: &UiEreignis, _bereich: Rechteck) -> UiReaktion {
+    fn ereignis(&mut self, _e: &UiEreignis, _bereich: Rechteck, _k: &UiKontext) -> UiReaktion {
         UiReaktion::ignoriert()
     }
 }

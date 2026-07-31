@@ -352,9 +352,14 @@ impl Switcher {
         let thema = theme::aktuell();
         let bereich = self.liste_bereich();
         let (breite, hoehe) = (self.puffer.breite as i32, self.puffer.hoehe as i32);
-        let mut z = Zeichner::neu(&mut self.puffer);
-        z.rechteck_fuellen(Rechteck::neu(0, 0, breite, hoehe), thema.flaeche);
-        self.liste.zeichnen(&mut z, bereich);
+        let k = crate::ui::kontext();
+        let mut leinwand = crate::ui::FensterLeinwand::neu(&mut self.puffer);
+        let mut maler = crate::ui::Maler::neu(&mut leinwand, k);
+        maler.fuellen(
+            Rechteck::neu(0, 0, breite, hoehe),
+            speedui::Farbe::mit_alpha(thema.flaeche.r, thema.flaeche.g, thema.flaeche.b, thema.flaeche.a),
+        );
+        self.liste.zeichnen(&mut maler, bereich);
     }
 }
 
@@ -509,36 +514,43 @@ impl StartMenue {
     fn zeichnen(&mut self) {
         let thema = theme::aktuell();
         let (breite, hoehe) = (self.puffer.breite as i32, self.puffer.hoehe as i32);
-        let mut z = Zeichner::neu(&mut self.puffer);
-        z.rechteck_fuellen(Rechteck::neu(0, 0, breite, hoehe), thema.flaeche);
-        self.suchfeld.zeichnen(&mut z, Self::suchfeld_bereich());
-        self.liste.zeichnen(&mut z, Self::liste_bereich());
+        let k = crate::ui::kontext();
+        let mut leinwand = crate::ui::FensterLeinwand::neu(&mut self.puffer);
+        let mut maler = crate::ui::Maler::neu(&mut leinwand, k);
+        maler.fuellen(
+            Rechteck::neu(0, 0, breite, hoehe),
+            speedui::Farbe::mit_alpha(thema.flaeche.r, thema.flaeche.g, thema.flaeche.b, thema.flaeche.a),
+        );
+        self.suchfeld.zeichnen(&mut maler, Self::suchfeld_bereich());
+        self.liste.zeichnen(&mut maler, Self::liste_bereich());
     }
 
     /// Routet ein Ereignis (Panel-Koordinaten): Pfeiltasten steuern
     /// die Liste, andere Tasten das Suchfeld; Maus-Ereignisse gehen
     /// je nach Position an Suchfeld oder Liste.
     fn ereignis(&mut self, ereignis: &crate::ui::UiEreignis) -> crate::ui::UiReaktion {
-        use crate::ui::UiEreignis;
-        use pc_keyboard::KeyCode;
+        use crate::ui::{Taste, UiEreignis};
 
+        let k = crate::ui::kontext();
         match ereignis {
-            UiEreignis::Taste(DecodedKey::RawKey(KeyCode::ArrowUp)) => {
-                self.liste.auswahl_bewegen(-1, Self::liste_bereich().hoehe);
+            UiEreignis::Taste(Taste::Hoch) => {
+                self.liste.auswahl_bewegen(-1, Self::liste_bereich().hoehe, &k);
                 crate::ui::UiReaktion::neu_zeichnen()
             }
-            UiEreignis::Taste(DecodedKey::RawKey(KeyCode::ArrowDown)) => {
-                self.liste.auswahl_bewegen(1, Self::liste_bereich().hoehe);
+            UiEreignis::Taste(Taste::Runter) => {
+                self.liste.auswahl_bewegen(1, Self::liste_bereich().hoehe, &k);
                 crate::ui::UiReaktion::neu_zeichnen()
             }
-            UiEreignis::Taste(_) => self.suchfeld.ereignis(ereignis, Self::suchfeld_bereich()),
+            UiEreignis::Taste(_) => {
+                self.suchfeld.ereignis(ereignis, Self::suchfeld_bereich(), &k)
+            }
             _ => match ereignis.position() {
                 Some((x, y)) if Self::suchfeld_bereich().enthaelt(x, y) => {
-                    self.suchfeld.ereignis(ereignis, Self::suchfeld_bereich())
+                    self.suchfeld.ereignis(ereignis, Self::suchfeld_bereich(), &k)
                 }
                 // Alles andere an die Liste (auch Bewegt/Losgelassen
                 // außerhalb — für den Scrollbalken-Drag).
-                _ => self.liste.ereignis(ereignis, Self::liste_bereich()),
+                _ => self.liste.ereignis(ereignis, Self::liste_bereich(), &k),
             },
         }
     }
@@ -1282,7 +1294,11 @@ impl FensterManager {
     /// Tastatur im offenen Startmenü (ruft die Shell).
     fn startmenue_taste(&mut self, taste: DecodedKey) -> NachLock {
         let reaktion = match &mut self.start_menue {
-            Some(menue) => menue.ereignis(&crate::ui::UiEreignis::Taste(taste)),
+            Some(menue) => match crate::ui::taste_von(taste) {
+                Some(taste) => menue.ereignis(&crate::ui::UiEreignis::Taste(taste)),
+                // Modifikatoren haben in der Toolkit-ABI keine Entsprechung.
+                None => return NachLock::Keine,
+            },
             None => return NachLock::Keine,
         };
         self.startmenue_reaktion(reaktion)
@@ -1394,8 +1410,8 @@ impl FensterManager {
     fn ui_maus(&mut self, index: usize, ereignis: crate::ui::UiEreignis) -> NachLock {
         let Fenster { inhalt, puffer, .. } = &mut self.fenster[index];
         let reaktion = match inhalt {
-            Inhalt::Ui(ui) => ui.maus(ereignis, puffer),
-            Inhalt::App(app_fenster) => app_fenster.ui.maus(ereignis, puffer),
+            Inhalt::Ui(ui) => crate::ui::ui_maus(ui, ereignis, puffer),
+            Inhalt::App(app_fenster) => crate::ui::ui_maus(&mut app_fenster.ui, ereignis, puffer),
             _ => return NachLock::Keine,
         };
         self.ui_reaktion(index, reaktion)
@@ -2018,8 +2034,10 @@ impl FensterManager {
             let widget_reaktion = {
                 let Fenster { inhalt, puffer, .. } = &mut self.fenster[index];
                 match inhalt {
-                    Inhalt::Ui(ui) => Some(ui.taste(taste, puffer)),
-                    Inhalt::App(app_fenster) => Some(app_fenster.ui.taste(taste, puffer)),
+                    Inhalt::Ui(ui) => Some(crate::ui::ui_taste(ui, taste, puffer)),
+                    Inhalt::App(app_fenster) => {
+                        Some(crate::ui::ui_taste(&mut app_fenster.ui, taste, puffer))
+                    }
                     _ => None,
                 }
             };
@@ -2053,7 +2071,7 @@ impl FensterManager {
     fn switcher_weiter(&mut self) {
         match &mut self.switcher {
             Some(sw) => {
-                sw.liste.auswahl_bewegen(1, sw.liste_bereich().hoehe);
+                sw.liste.auswahl_bewegen(1, sw.liste_bereich().hoehe, &crate::ui::kontext());
                 sw.zeichnen();
             }
             None => {
@@ -2089,7 +2107,7 @@ impl FensterManager {
                 };
                 // Erster Tab wählt das NÄCHSTE Fenster (Index 1).
                 if sw.reihenfolge.len() > 1 {
-                    sw.liste.auswahl_bewegen(1, sw.liste_bereich().hoehe);
+                    sw.liste.auswahl_bewegen(1, sw.liste_bereich().hoehe, &crate::ui::kontext());
                 }
                 sw.zeichnen();
                 self.switcher = Some(sw);
@@ -2563,11 +2581,11 @@ fn terminal_rendern(term: &mut terminal::Terminal, puffer: &mut FensterPuffer) {
 /// hier nie durch — die haben ihren eigenen Zeilen-Streifen-Pfad.
 fn inhalt_zeichnen_bereich(fenster: &mut Fenster, bereich: Rechteck) {
     if let Inhalt::Ui(ui) = &fenster.inhalt {
-        ui.zeichnen_bereich(&mut fenster.puffer, bereich);
+        crate::ui::ui_zeichnen_bereich(ui, &mut fenster.puffer, bereich);
         return;
     }
     if let Inhalt::App(app_fenster) = &fenster.inhalt {
-        app_fenster.ui.zeichnen_bereich(&mut fenster.puffer, bereich);
+        crate::ui::ui_zeichnen_bereich(&app_fenster.ui, &mut fenster.puffer, bereich);
     }
     // Andere Inhalte melden nie einen Sub-Bereich (nur Ui/App tun das).
 }
@@ -2575,11 +2593,11 @@ fn inhalt_zeichnen_bereich(fenster: &mut Fenster, bereich: Rechteck) {
 fn inhalt_zeichnen(fenster: &mut Fenster) {
     // Widget-Fenster: Der Baum zeichnet sich selbst (ui-Modul).
     if let Inhalt::Ui(ui) = &fenster.inhalt {
-        ui.zeichnen(&mut fenster.puffer);
+        crate::ui::ui_zeichnen(ui, &mut fenster.puffer);
         return;
     }
     if let Inhalt::App(app_fenster) = &fenster.inhalt {
-        app_fenster.ui.zeichnen(&mut fenster.puffer);
+        crate::ui::ui_zeichnen(&app_fenster.ui, &mut fenster.puffer);
         return;
     }
     // PROZESS-FENSTER: Der Kernel zeichnet hier NICHTS. Der Puffer gehoert

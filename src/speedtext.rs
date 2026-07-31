@@ -144,7 +144,13 @@ impl SpeedTextApp {
             }
         } else {
             self.dialog = Some(Dialog::Speichern {
-                dialog: DateiDialog::neu("Speichern unter", crate::explorer::start_ordner(), "neu.txt", N_DIALOG_BASIS),
+                dialog: DateiDialog::neu(
+                    "Speichern unter",
+                    crate::explorer::start_ordner(),
+                    "neu.txt",
+                    N_DIALOG_BASIS,
+                    &crate::ui::wirt::DATEIEN,
+                ),
                 danach_schliessen,
             });
         }
@@ -220,7 +226,7 @@ impl App for SpeedTextApp {
     fn nachricht(&mut self, id: u32) -> AppReaktion {
         // Datei-Dialog zuerst (sein Id-Fenster liegt weit oben):
         if let Some(Dialog::Oeffnen(dialog)) = &mut self.dialog {
-            if let Some(ergebnis) = dialog.nachricht(id) {
+            if let Some(ergebnis) = dialog.nachricht(id, &crate::ui::wirt::DATEIEN) {
                 match ergebnis {
                     Some(DateiDialogErgebnis::Gewaehlt(pfad)) => {
                         self.dialog = None;
@@ -234,7 +240,7 @@ impl App for SpeedTextApp {
         }
         if let Some(Dialog::Speichern { dialog, danach_schliessen }) = &mut self.dialog {
             let danach_schliessen = *danach_schliessen;
-            if let Some(ergebnis) = dialog.nachricht(id) {
+            if let Some(ergebnis) = dialog.nachricht(id, &crate::ui::wirt::DATEIEN) {
                 match ergebnis {
                     Some(DateiDialogErgebnis::Gewaehlt(pfad)) => {
                         self.dialog = None;
@@ -290,9 +296,13 @@ impl App for SpeedTextApp {
 
     /// App-Shortcuts + Dialog-Tasten (VOR dem Widget-Baum).
     fn taste(&mut self, taste: DecodedKey) -> Option<AppReaktion> {
+        // Die Kernel-Taste in die Toolkit-Taste uebersetzen — die Dialoge
+        // wohnen seit Serie 8, Teil 2 in der Kiste und kennen
+        // `pc_keyboard` nicht mehr.
+        let ui_taste = crate::ui::taste_von(taste);
         // Offene Dialoge bekommen die Tasten zuerst:
         if let Some(Dialog::Oeffnen(dialog)) = &mut self.dialog {
-            match dialog.taste(taste) {
+            match ui_taste.and_then(|t| dialog.taste(t, &crate::ui::wirt::DATEIEN)) {
                 Some(DateiDialogErgebnis::Gewaehlt(pfad)) => {
                     self.dialog = None;
                     self.laden(&pfad);
@@ -304,7 +314,7 @@ impl App for SpeedTextApp {
         }
         if let Some(Dialog::Speichern { dialog, danach_schliessen }) = &mut self.dialog {
             let danach_schliessen = *danach_schliessen;
-            match dialog.taste(taste) {
+            match ui_taste.and_then(|t| dialog.taste(t, &crate::ui::wirt::DATEIEN)) {
                 Some(DateiDialogErgebnis::Gewaehlt(pfad)) => {
                     self.dialog = None;
                     if self.speichern_nach(&pfad) && danach_schliessen {
@@ -350,6 +360,7 @@ impl App for SpeedTextApp {
                     &start,
                     "",
                     N_DIALOG_BASIS,
+                    &crate::ui::wirt::DATEIEN,
                 )));
                 Some(self.reaktion_mit_titel())
             }

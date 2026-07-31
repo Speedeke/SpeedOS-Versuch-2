@@ -23,9 +23,11 @@
 // Noch KEINE Dateioperationen (Teil 2) — nur Navigation.
 
 use crate::fs::{self, NodeTyp};
-use crate::grafik::{Icon, Rechteck, Zeichner};
+use crate::grafik::{Icon, Rechteck};
 use crate::ui::widgets::{Button, Label, ListenEintrag, ScrollListe, Trennlinie};
-use crate::ui::{hbox, vbox, App, AppReaktion, Fueller, UiEreignis, UiReaktion, Widget};
+use crate::ui::{
+    hbox, vbox, App, AppReaktion, Fueller, Maler, UiEreignis, UiKontext, UiReaktion, Widget,
+};
 use alloc::boxed::Box;
 use alloc::collections::BTreeSet;
 use alloc::format;
@@ -294,14 +296,14 @@ struct KlickFlaeche {
 }
 
 impl Widget for KlickFlaeche {
-    fn wunschgroesse(&self) -> (i32, i32) {
+    fn wunschgroesse(&self, _k: &UiKontext) -> (i32, i32) {
         (0, 0)
     }
     fn flex(&self) -> i32 {
         1
     }
-    fn zeichnen(&self, _z: &mut Zeichner<'_, crate::fenster::FensterPuffer>, _b: Rechteck) {}
-    fn ereignis(&mut self, ereignis: &UiEreignis, bereich: Rechteck) -> UiReaktion {
+    fn zeichnen(&self, _m: &mut Maler<'_>, _b: Rechteck) {}
+    fn ereignis(&mut self, ereignis: &UiEreignis, bereich: Rechteck, _k: &UiKontext) -> UiReaktion {
         match ereignis {
             UiEreignis::Klick { x, y } if bereich.enthaelt(*x, *y) => {
                 UiReaktion::nachricht(self.nachricht)

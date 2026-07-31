@@ -29,12 +29,15 @@
 // Wer die beiden Listen nebeneinander sieht, versteht die Zwei-Ebenen-
 // Architektur aus docs/scheduler-design.md auf einen Blick.
 
-use crate::grafik::{Icon, Rechteck, Zeichner};
+use crate::grafik::{Icon, Rechteck};
 use crate::prozess::ProzessMoment;
 use crate::task::uebersicht::{self, TaskArt, TaskMoment};
-use crate::theme::{self, metrik};
+use crate::theme;
 use crate::ui::widgets::{Button, Label, ListenEintrag, ScrollListe, Trennlinie};
-use crate::ui::{hbox, vbox, App, AppReaktion, Fueller, UiEreignis, UiReaktion, Widget};
+use crate::ui::{
+    hbox, vbox, App, AppReaktion, Farbrolle, Fueller, Maler, Mass, UiEreignis, UiKontext,
+    UiReaktion, Widget,
+};
 use crate::zeit;
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
@@ -127,18 +130,20 @@ struct CpuGraph {
 }
 
 impl Widget for CpuGraph {
-    fn wunschgroesse(&self) -> (i32, i32) {
+    fn wunschgroesse(&self, k: &UiKontext) -> (i32, i32) {
         // Breite skaliert mit (60 Sekunden sollen erkennbar bleiben).
-        (GRAPH_SEKUNDEN as i32 * 3 * theme::skala_halbe() / 2, 4 * metrik().zeilen_hoehe)
+        (GRAPH_SEKUNDEN as i32 * 3 * theme::skala_halbe() / 2, 4 * k.mass(Mass::ZeilenHoehe))
     }
 
-    fn zeichnen(&self, z: &mut Zeichner<'_, crate::fenster::FensterPuffer>, bereich: Rechteck) {
-        let thema = theme::aktuell();
-        z.rechteck_fuellen(bereich, thema.eingabefeld);
-        z.rechteck_rahmen(bereich, thema.rahmen_passiv);
+    fn zeichnen(&self, m: &mut Maler<'_>, bereich: Rechteck) {
+        // Kopie statt Borrow: `&m.kontext` wuerde den Maler festhalten.
+        let kontext = m.kontext;
+        let k = &kontext;
+        m.fuellen(bereich, k.farbe(Farbrolle::Eingabefeld));
+        m.rahmen(bereich, k.farbe(Farbrolle::Rahmen));
         // 50-%-Hilfslinie:
         let mitte = bereich.y + bereich.hoehe / 2;
-        z.linie(bereich.x + 1, mitte, bereich.x + bereich.breite - 2, mitte, thema.leiste_knopf);
+        m.linie(bereich.x + 1, mitte, bereich.x + bereich.breite - 2, mitte, k.farbe(Farbrolle::KnopfFlaeche));
 
         // Der Verlauf als Linienzug (innen, 2 px Rand):
         let innen_breite = bereich.breite - 4;
@@ -147,17 +152,17 @@ impl Widget for CpuGraph {
         for paar in punkte.windows(2) {
             let (x1, y1) = paar[0];
             let (x2, y2) = paar[1];
-            z.linie(
+            m.linie(
                 bereich.x + 2 + x1,
                 bereich.y + 2 + y1,
                 bereich.x + 2 + x2,
                 bereich.y + 2 + y2,
-                thema.akzent,
+                k.farbe(Farbrolle::Akzent),
             );
         }
     }
 
-    fn ereignis(&mut self, _e: &UiEreignis, _b: Rechteck) -> UiReaktion {
+    fn ereignis(&mut self, _e: &UiEreignis, _b: Rechteck, _k: &UiKontext) -> UiReaktion {
         UiReaktion::ignoriert()
     }
 }

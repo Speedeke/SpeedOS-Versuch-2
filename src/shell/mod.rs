@@ -272,6 +272,17 @@ impl Vervollstaendiger for FsVervollstaendiger {
             })
             .unwrap_or_default()
     }
+
+    /// DIE EINE ZEILE, DIE BEIM SPEEDUI-UMZUG ZUM ARGUMENT WURDE.
+    ///
+    /// Der Editor löste Pfade früher selbst mit `fs::pfad_aufloesen` auf —
+    /// die letzte Kernel-Abhängigkeit, die er hatte. Jetzt fragt er den
+    /// Vervollständiger, und hier steht die echte VFS-Auflösung (die
+    /// Voreinstellung der Kiste kann kein `..` und kennt keine
+    /// Mount-Präfixe).
+    fn aufloesen(&self, basis: &str, teil: &str) -> String {
+        fs::pfad_aufloesen(basis, teil)
+    }
 }
 
 /// Führt eine Eingabezeile aus: erstes Wort = Befehlsname, Rest =

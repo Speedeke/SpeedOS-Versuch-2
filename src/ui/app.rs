@@ -21,8 +21,8 @@
 // dem Loslassen des Locks ausführt (dasselbe NachLock-Muster wie
 // bei App-Starts aus dem Startmenü).
 
-use super::{UiFenster, Widget};
 use crate::grafik::Icon;
+use speedui::{UiFenster, Widget};
 use alloc::boxed::Box;
 
 /// Antwort einer App auf eine Widget-Nachricht oder einen Tick.

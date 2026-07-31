@@ -5,6 +5,101 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### SERIE 8, TEIL 2: Das Toolkit wohnt jetzt in einer eigenen Kiste
+
+Die eigentliche Architekturfrage der Serie — beantwortet mit Empfehlung
+**(c)**: Das Widget-Toolkit aus Serie 3 ist eine wirtsfreie Bibliothek
+(`speedui/`) mit einem **leeren `[dependencies]`-Block**.
+
+Bei `speedhttp` (Serie 7) war das leicht: Ein Parser kennt nur Bytes, und
+Bytes kennen keine Umgebung. Hier war es anders, und das ist die Definition
+eines Toolkits — ein Widget existiert nur, weil es etwas ZEICHNET, in einer
+FARBE, in einer SCHRIFT, und weil ein Cursor mit einer FREQUENZ blinkt. Der
+Trick war nicht, die Umgebung wegzulassen, sondern sie **umzudrehen**.
+
+#### Die fünf Traits, die speedui VERLANGT
+
+`Thema` (Farbrolle/Mass), `Schrift` (nur Masse — die Glyphen bleiben beim
+Wirt), `Uhr` (eine Methode), **`Leinwand`** und `Dateiquelle`.
+
+`Leinwand` war die **versteckte vierte Abhängigkeit und zugleich die
+grösste**: Der alte Widget-Trait hiess
+`zeichnen(&self, z: &mut Zeichner<'_, FensterPuffer>, …)` und band das
+Toolkit damit an zwei Kernel-Typen auf einmal. Neun hohe Operationen (genau
+die, die die Widgets benutzen — nachgezählt) statt eines Pixel-Traits:
+Sonst müsste speedui Bresenham, Alpha-Blending und Rundungs-Ecken selbst
+mitbringen, und zwar ohne die Zeilen-Schnellpfade aus Serie 3.
+
+`Farbrolle` und `Mass` sind **Enums, keine Structs** — die abschliessende,
+nachlesbare Liste dessen, was ein Widget vom Erscheinungsbild sehen darf
+(13 Farben, 9 Masse). Ein Struct hätte die Kopplung nur umbenannt.
+
+**Verworfen: die globale Registrierung.** `speedui::umgebung_setzen(…)`
+hätte *keine einzige Signatur* geändert — und wäre keine Umkehr gewesen,
+sondern eine Umbenennung: Die Abhängigkeit bliebe ambient. Ausserdem
+bräuchten Attrappen-Tests dann globalen Zustand.
+
+#### Der Regressionstest sind die Apps
+
+Explorer, Einstellungen, Task-Manager und SpeedText laufen **unverändert**,
+obwohl unter ihnen das ganze Fundament ausgetauscht wurde. Ihre vier eigenen
+Widget-Implementierungen (`FarbFeld`, `IconBild`, `KlickFlaeche`,
+`CpuGraph`) machen die neuen Signaturen mit — der Beweis, dass die Grenze
+auch für App-Autoren benutzbar ist.
+
+#### Der Beweis im User-Space: `userland/uidemo`
+
+`starte uidemo &` öffnet ein Fenster über die Syscalls aus Teil 1, baut
+darin **dieselben Widgets** wie der Kernel und liefert dafür einen
+komplett anderen Wirt: feste Farben statt Theme-System, das 5×7-Raster
+statt vorgerasterter Schrift, den Zeit-Syscall statt der TSC, einen eigenen
+Pixelpuffer statt des Zeichners. Und die **Teil-Rechteck-Mechanik geht über
+die Prozessgrenze**: Die Schadensmeldung eines Widgets (Serie 4) wird zum
+`fenster_zeichnen`-Rechteck (Serie 8, Teil 1).
+
+#### Der unerwartete Gewinn: die Attrappen
+
+`speedui::attrappe` liefert einen Wirt aus Pappe — und seine Leinwand
+(`MalProtokoll`) **zeichnet nicht, sie schreibt mit**. Damit ist „hat der
+Button seinen Rahmen gemalt, in welcher Farbe?" eine Frage an eine Liste
+statt an ein Bild. Die `TestUhr` **steht**, bis der Test sie stellt — ein
+Cursor-Blink-Test muss nicht mehr warten, er stellt die Zeit.
+
+**29 Toolkit-Tests laufen jetzt auf dem HOST in 0,00 s** statt in einem
+QEMU-Start. Das war kein Ziel, sondern ein Nebenprodukt — und das
+angenehmste.
+
+#### Der ehrliche Bericht (`docs/speedui-trennung.md` §9)
+
+**Die zäheste Abhängigkeit war NICHT die Schrift.** Die war die leichteste:
+Ein Toolkit will von ihr nur Masse, und Masse sind drei Methoden. Am
+zähesten war der `Zeichner` — weil er keine Abhängigkeit ist, sondern eine
+**Aufruf-Konvention**: Er ändert jede Signatur *und* die Borrow-Struktur
+(`let k = &m.kontext;` hält den Maler fest, danach geht kein
+Zeichen-Aufruf mehr; `UiKontext` ist `Copy`, also eine Kopie nehmen).
+
+**Dupliziert werden musste**: die Tastatur-Übersetzung (zweimal, aus
+verschiedenen Quellen — Absicht, sonst hinge die Kiste an `pc_keyboard`)
+und die Farb-Umrechnung an den Wirts-Grenzen. **Nicht** dupliziert:
+Layout, Event-Routing, Fokus-Kette, Schadens-Kombination, ZeilenEditor,
+Dialoge.
+
+**Nicht umgezogen** (und begründet): das Kontextmenü ist ein
+Fenster-Manager-Overlay, und `ui::texteditor` braucht `Arc<Mutex<…>>` —
+`spin` wäre eine Abhängigkeit gewesen. Dass er trotzdem `speedui::Widget`
+implementiert, ist mehr wert als der Umzug es gewesen wäre.
+
+**Eine Zeile Verhalten musste sich ändern**, und sie ist lehrreich: Die
+Standard-`aufloesen` des `Vervollstaendiger`-Traits normalisierte den
+Schluss-Schrägstrich nicht, und der **unveränderte** Serie-3-Test
+`test_tab_eindeutig` fiel darüber. Nicht der Test war falsch, die Kiste
+war es.
+
+Gegenprobe gegen Erosion: `tools/speedui_allein_bauen.ps1` prüft, dass der
+`[dependencies]`-Block leer ist und die Kiste **allein** baut — für
+Bare-Metal und für den Host.
+
+
 ### SERIE 8, TEIL 1: Ein Ring-3-Prozess besitzt ein Fenster
 
 Bis hierher lebte die gesamte Fenster-Schicht im Kernel. Ein Programm in

@@ -569,6 +569,62 @@
   (aus „type" wird sonst „tzpe"); absolute Mauspositionen gibt es bei PS/2
   nicht — relativ in 100-Pixel-Schritten, weil ein Paket nur +-255 traegt.
 
+## DAS TOOLKIT WOHNT IN EINER KISTE (Serie 8, Teil 2 — speedui/)
+- **DIE REGEL: `speedui` DEFINIERT TRAITS UND IMPLEMENTIERT SIE NICHT.**
+  Leerer `[dependencies]`-Block, geprueft von `tools/speedui_allein_bauen.ps1`
+  (Block leer + Bau fuer Bare-Metal UND Host + Tests). Entwurf mit ALLEN
+  gefundenen Kopplungen: `docs/speedui-trennung.md`, geschrieben VOR dem Code.
+- **FUENF TRAITS**: `Thema` (Farbrolle/Mass), `Schrift` (nur MASSE, keine
+  Glyphen), `Uhr` (eine Methode), **`Leinwand`** (die versteckte vierte und
+  groesste — neun hohe Operationen, KEIN Pixel-Trait, sonst muesste speedui
+  Bresenham und Alpha selbst mitbringen) und `Dateiquelle` (nur fuer den
+  Datei-Dialog). Gebuendelt in `UiKontext` (rechnen) und `Maler`
+  (zeichnen = Kontext + Leinwand).
+- **`Farbrolle` und `Mass` sind ENUMS, keine Structs** — die abschliessende,
+  nachlesbare Liste dessen, was ein Widget vom Erscheinungsbild sehen darf
+  (13 Farben, 9 Masse, nachgezaehlt). Ein Struct haette die Kopplung nur
+  umbenannt: Jede neue Kernel-Farbe muesste in die Kiste.
+- **SIGNATUR-BRUCH, vollstaendig:** `wunschgroesse(&self, k: &UiKontext)`,
+  `zeichnen(&self, m: &mut Maler, bereich)`, `ereignis(..., k: &UiKontext)`.
+  Mehr nicht.
+- **DIE BORROW-FALLE dieses Teils:** `let k = &m.kontext;` haelt den Maler
+  fest, danach geht kein einziger Zeichen-Aufruf mehr (er braucht `&mut m`).
+  `UiKontext` ist `Copy` — also `let kontext = m.kontext; let k = &kontext;`.
+  Steht mit Begruendung in jedem `zeichnen()`.
+- **DIE GLOBALE REGISTRIERUNG WURDE VERWORFEN** (`speedui::umgebung_setzen`
+  haette KEINE Signatur geaendert): Sie waere keine Umkehr, sondern eine
+  Umbenennung — die Abhaengigkeit bliebe ambient. Und Attrappen-Tests
+  braeuchten globalen Zustand. Die Aufgabe sagte „zu ARGUMENTEN werden".
+- **DIE ATTRAPPEN SIND DER GROESSTE GEWINN** (`speedui::attrappe`, KEIN
+  `cfg(test)`): `MalProtokoll` ZEICHNET NICHT, sondern SCHREIBT MIT — damit
+  ist „hat der Button seinen Rahmen gemalt, in welcher Farbe?" eine Frage an
+  eine Liste statt an ein Bild. `TestUhr` STEHT, bis der Test sie stellt (ein
+  Blink-Test muss nicht warten). 29 Toolkit-Tests laufen jetzt auf dem HOST
+  in 0,00 s statt in einem QEMU-Start.
+- **WAS NICHT UMZOG, und warum es keine Ausrede ist:** Das Kontextmenue ist
+  ein Fenster-Manager-Overlay (nur seine LISTE ist eine ScrollListe), und
+  `ui::texteditor` braucht `Arc<Mutex<..>>` — `spin` waere eine
+  Abhaengigkeit gewesen. Dass er trotzdem `speedui::Widget` implementiert,
+  ist der Beweis, dass die Grenze auch fuer App-Autoren benutzbar ist.
+- **ZWEIMAL DASSELBE, mit Absicht:** die Tastatur-Uebersetzung
+  (`DecodedKey -> Taste` im Kernel, ABI-Code -> `Taste` in `uidemo`). Beide
+  uebersetzen aus VERSCHIEDENEN Quellen; ein gemeinsamer Typ haette die
+  Kiste an `pc_keyboard` gebunden. Dasselbe Argument wie bei der ABI.
+- **DER REGRESSIONSTEST SIND DIE APPS:** Explorer, Einstellungen,
+  Task-Manager und SpeedText laufen unveraendert, obwohl das ganze Fundament
+  ausgetauscht wurde. `userland/uidemo` ist der zweite Wirt (eigenes Thema,
+  5x7-Schrift, Syscall-Uhr, eigene Leinwand) — und traegt die
+  Teil-Rechteck-Mechanik ueber die Prozessgrenze.
+- **EINE ZEILE VERHALTEN musste sich aendern:** Die Standard-`aufloesen` des
+  `Vervollstaendiger`-Traits normalisierte den Schluss-Schraegstrich nicht,
+  und der UNVERAENDERTE Serie-3-Test `test_tab_eindeutig` fiel darueber.
+  Nicht der Test war falsch, die Kiste war es — das ist der Wert
+  unveraenderter Tests bei einem Umzug.
+- **DER EHRLICHE BERICHT steht in docs/speedui-trennung.md 9:** Die zaehste
+  Abhaengigkeit war NICHT die Schrift (die war die leichteste — ein Toolkit
+  will nur Masse), sondern der `Zeichner` — weil er keine Abhaengigkeit ist,
+  sondern eine AUFRUF-KONVENTION.
+
 ## SERIE-7-ABSCHLUSS (Juli 2026) — Angriffe, Zahlen, Grenzen, Serie-8-Naht
 - **DIE EINE STELLE FUER ALLE LUECKEN: `docs/grenzen.md`.** Keine
   Sperrlisten-Pruefung (OCSP/CRL), manueller Root-Store OHNE Signatur, kein
