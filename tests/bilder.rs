@@ -63,7 +63,10 @@ fn main(boot_info: &'static mut BootInfo) -> ! {
         .expect("kein Physik-Mapping");
     memory::init(VirtAddr::new(offset), &boot_info.memory_regions);
     allocator::init_heap().expect("Heap-Initialisierung fehlgeschlagen");
-    allocator::heap_erweitern(512).expect("Heap-Erweiterung fehlgeschlagen");
+    // 8 MiB — siehe tests/html.rs: `programme::installieren()` liest
+    // jedes Programm ganz in den Heap, und die groessten sind ueber
+    // 1 MB.
+    allocator::heap_erweitern(2048).expect("Heap-Erweiterung fehlgeschlagen");
 
     speed_os::ata::init();
     speed_os::pci::init();

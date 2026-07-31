@@ -64,22 +64,148 @@ hat für jeden unmöglichen Zustand einen definierten Ausgang.
   Textbereiche** — ihr Inhalt wird nicht als Markup gelesen. Wer das
   nicht tut, findet in jedem `if (a < b)` einen Tag-Anfang.
 
-### 2.3 CSS in Spurweite
+### 2.3 CSS in Spurweite — die vollständige Liste
 
-Der Umfang ist bewusst schmal und wird in einem eigenen Schritt gebaut:
+*Gebaut in Serie 8, Teil 5 (`speedcss/`). Die Liste hier IST die Liste;
+im Code ist sie die Feldliste von `speedcss::Stil` und die Tabelle in
+`speedcss::stil::bekannt`.*
 
-* Eigenschaften: `color`, `background-color`, `font-size`, `font-weight`,
-  `font-style`, `margin`, `padding`, `text-align`, `display`
-  (`block`/`inline`/`none`), `width`, `height`, `border` (nur Breite +
-  Farbe, keine Radien).
-* Quellen: `style`-Attribute und `<style>`-Blöcke.
-* Selektoren: Typ (`p`), Klasse (`.warn`), ID (`#kopf`), und
-  Nachfahren-Kombination (`div p`). **Keine** Pseudoklassen außer
-  `:link`/`:visited`, keine Attributselektoren, keine Kombinatoren `>`
-  `+` `~`.
-* **Keine Kaskade über externe Stylesheets** (`<link rel=stylesheet>`
-  wird nicht geholt). Spezifität nur in der einfachen Form
-  ID > Klasse > Typ, danach Dokumentreihenfolge.
+#### Unterstützte Eigenschaften
+
+| Eigenschaft | Werte | erbt |
+|---|---|:--:|
+| `display` | `block`, `inline`, `inline-block`, `none`, `list-item`, `table`, `table-row-group`, `table-row`, `table-cell` | – |
+| `color` | Farbe | **ja** |
+| `background-color`, `background` | Farbe (aus `background` **nur** die Farbe) | – |
+| `font-size` | Länge, `%`, `xx-small`…`xx-large`, `larger`/`smaller` | **ja** |
+| `font-weight` | `normal`, `bold`, `bolder`, `lighter`, 100–900 (≥ 600 = fett) | **ja** |
+| `font-style` | `normal`, `italic`, `oblique` | **ja** |
+| `font-family` | Liste → auf `Proportional`/`Monospace` abgebildet | **ja** |
+| `line-height` | `normal`, Zahl (Faktor), Länge, `%` | **ja** |
+| `text-align` | `left`, `center`, `right`, `justify`, `start`, `end` | **ja** |
+| `text-decoration`, `-line` | `none`, `underline`, `line-through`, `overline` | **ja** \* |
+| `list-style-type`, `list-style` | `none`, `disc`, `circle`, `square`, `decimal`, `lower/upper-alpha`, `lower/upper-roman` | **ja** |
+| `vertical-align` | `baseline`, `top`, `middle`, `bottom`, `sub`, `super` | – |
+| `width`, `height`, `max-width` | Länge, `%`, `auto` | – |
+| `margin` (+ `-top/-right/-bottom/-left`) | Länge, `%`, `auto`, 1–4 Werte | – |
+| `padding` (+ vier Seiten) | wie `margin` | – |
+| `border` (+ vier Seiten) | Kurzform aus Breite, Stil, Farbe — in beliebiger Reihenfolge | – |
+| `border-width`, `-style`, `-color` | 1–4 Werte / `solid`+`none` / Farbe | – |
+
+\* `text-decoration` erbt in CSS **nicht**, wird aber auf Nachfahren
+mitgezeichnet. Wir behandeln sie als geerbt: dieselbe Optik mit weniger
+Maschinerie. Der Unterschied ist nur sichtbar, wenn ein Nachfahre die
+Dekoration selbst setzt.
+
+`border-style` kennt nur **zwei** Zustände: `none` und durchgezogen.
+`dashed`, `dotted`, `double` und der Rest werden zu durchgezogen — einen
+gestrichelten Rahmen zu malen ist Renderer-Arbeit, ihn wegzulassen wäre
+schlechter (der Kasten verschwände).
+
+#### Einheiten
+
+**Dabei:** `px`, `%`, `em`, `rem` (wie `em` — wir haben keine abweichende
+Wurzelgröße), `pt` (× 4/3), die nackte `0`, und die Schlüsselwörter
+`auto`, `inherit`, `initial`, `unset`.
+
+**Nicht dabei, und alle werden ABGELEHNT statt geraten:** `vw`/`vh`
+(brauchen die Fenstergröße schon zur Kaskadenzeit), `ex`/`ch` (brauchen
+Schriftmetrik), `cm`/`mm`/`in` (brauchen eine echte Pixeldichte, die wir
+nicht kennen), **`calc()`**, **Custom Properties** (`--x` / `var()`).
+
+Eine abgelehnte Deklaration fällt weg; es gilt dann der geerbte oder der
+Anfangswert. Das ist *sichtbar* falsch (etwas ist zu klein oder am
+falschen Platz) statt unsichtbar falsch.
+
+**Es gibt kein Fließkomma** (`-sse,+soft-float`): Alle Längen stehen in
+**Tausendsteln** ihrer Einheit. `1.5em` ist 1500, `62.5%` ist 62500.
+
+#### Was wann aufgelöst wird
+
+Die Unterscheidung, an der eine CSS-Umsetzung steht oder fällt:
+
+* **Kaskadenzeit** (`speedcss`): `font-size` wird zu einer festen
+  Pixelzahl; `em` in allen anderen Eigenschaften wird gegen die *eigene*
+  Schriftgröße aufgelöst; `line-height` in `%` oder `em` ebenfalls.
+* **Layoutzeit** (Prompt 70): `%` und `auto` — erst dann steht fest, wie
+  breit der umgebende Kasten ist.
+
+Ein `width: 50%`, das schon die Kaskade zu einer Zahl macht, müsste die
+Breite raten und rät falsch, sobald das Fenster seine Größe ändert.
+
+#### Selektoren
+
+**Dabei:** Typ (`p`), Klasse (`.warn`), ID (`#kopf`), Universal (`*`),
+Nachfahren (`div p`), Gruppierung (`h1, h2`), und die Pseudoklassen
+`:link`, `:visited`, `:hover`.
+
+`:hover` ist **vorbereitet, nicht benutzt**: Die Kaskade wertet es aus,
+wenn der Aufrufer den Zustand meldet (`Zustand::unter_maus`) — der
+Browser tut das noch nicht. Wenn er es tut, ändert sich an `speedcss`
+nichts.
+
+**Nicht dabei:** Kombinatoren `>` `+` `~`, Attributselektoren
+(`a[href]`), funktionale Pseudoklassen (`:not()`, `:nth-child()`) und
+Pseudo-**Elemente** (`::before`).
+
+**Sie machen den Selektor UNERFÜLLBAR, statt näherungsweise zu passen.**
+Das ist die wichtigste Entscheidung dieses Abschnitts: `div > p { display:
+none }` als Nachfahren zu deuten würde aus „nur direkte Kinder" ein „alle
+Nachfahren" machen — und etwas verstecken, das sichtbar bleiben sollte.
+Nicht raten ist hier sicherer als raten.
+
+#### Herkunft und Kaskade
+
+Von schwach nach stark:
+
+1. Standard-Stylesheet (eingebaut, §2.3a)
+2. Autor-Stylesheet, gewöhnlich
+3. Autor-Stylesheet, `!important`
+4. Standard-Stylesheet, `!important` — **bei `!important` dreht sich die
+   Herkunfts-Reihenfolge um**
+
+Innerhalb einer Stufe: höhere Spezifität, bei Gleichstand die spätere
+Regel. Ein `style`-Attribut schlägt jeden Selektor.
+
+**Spezifität ist lexikografisch** (IDs, Klassen, Typen) und wird **nie**
+zu einer Zahl verrechnet — sonst schlagen elf Klassen eine ID, und das
+ist falsch.
+
+**Keine Kaskade über externe Stylesheets:** `<link rel=stylesheet>` wird
+**nicht geholt**. Das würde aus dem Parsen eine Netz-Operation machen, mit
+Frist, Fehlerfall und Größenlimit; `speedcss` kennt kein Netz. Die Folge
+ist ehrlich zu benennen: Auf Seiten, die ihr gesamtes Aussehen aus
+externen Dateien beziehen — heute die Regel —, wirkt nur das
+Standard-Stylesheet. Der Browser kann die Dateien später selbst holen und
+hereinreichen; die Kaskade ändert sich dadurch nicht.
+
+**`@media` wird übersprungen** — aber *sauber*, mit balancierter
+Klammerung. Wer nur die Zeile überspringt, lässt den Block offen, und die
+Regeln darin werden zu Regeln auf oberster Ebene: Eine Druck- oder
+Handy-Formatierung schlüge dann auf den Desktop durch. Das ist schlimmer,
+als sie wegzulassen.
+
+### 2.3a Das eingebaute Stylesheet
+
+**Der Grund, warum HTML ohne CSS überhaupt aussieht.** Ein `<h1>` ist
+nicht groß und fett, weil der Renderer `h1` kennt, sondern weil ein
+Stylesheet es sagt — eines, das jeder Browser mitbringt und das man nie
+zu Gesicht bekommt.
+
+Bei uns steht es als **echter CSS-Text** in `speedcss::standard` (~90
+Regeln, aus dem HTML-Standard, Anhang „Rendering"). Drei Gründe gegen
+Rust-Strukturen:
+
+1. Es ist der **Selbsttest des Parsers**: Läuft es durch, kann er
+   Selektorlisten, Kurzformen, Einheiten und Pseudoklassen.
+2. **Die Kaskade gilt auch für den Standard** — eine Autor-Regel
+   `h1 { margin: 0 }` schlägt ihn mit derselben Maschinerie wie jede
+   andere Kollision.
+3. Man kann es **lesen** und mit dem vergleichen, was Browser tun.
+
+Nachprüfbar ist die Trennung an einem Test: Ohne dieses Stylesheet ist
+**alles** `display: inline`, nichts fett, alles gleich groß
+(`test_ohne_standard_ist_alles_inline`).
 
 ### 2.4 Layout
 
@@ -254,10 +380,12 @@ Die Aufteilung folgt dem Muster, das sich zweimal bewährt hat
 (`speedhttp`, `speedui`): **Was keinen Wirt braucht, bekommt keinen.**
 
 ```
-speedhtml/            NEU. Tokenizer + DOM. Leerer [dependencies]-Block.
+speedhtml/            Tokenizer + DOM. Leerer [dependencies]-Block.
                       Kennt kein Netz, kein Fenster, keine Schrift, kein CSS.
                       Tests laufen auf dem HOST in Millisekunden.
-speedcss/             (Prompt 69) Parser + Kaskade. Ebenfalls wirtsfrei.
+speedcss/             Parser + Kaskade + Standard-Stylesheet. Hängt als
+                      EINZIGES an speedhtml (CSS ohne Baum ist
+                      bedeutungslos) — sonst nichts.
 speedui/              Toolkit + Textmetrik + Umbruch (steht)
 speedhttp/            HTTP (steht)
 libspeed::netz        Abruf mit TLS (steht)
@@ -282,8 +410,8 @@ dieses Schritts und nicht ein späteres Extra.
 
 ## 6. Die Reihenfolge
 
-1. **Tokenizer + DOM + `htmldump`** ← *dieser Teil*
-2. CSS-Teilmenge (Prompt 69)
+1. **Tokenizer + DOM + `htmldump`** (Serie 8, Teil 4 — steht)
+2. **CSS-Teilmenge + Kaskade + `cssdump`** (Serie 8, Teil 5 — steht)
 3. Block- und Inline-Layout, Text mit Umbruch
 4. Bilder, Links, Tabellen
 5. Fenster, Bedienung, Verlauf — jetzt ist es ein Browser

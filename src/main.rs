@@ -152,7 +152,13 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     //    kommt es dicker: Dann landen ALLE Programme (~2 MiB) im RAM-VFS,
     //    also im selben Heap. Wer hier ein weiteres großes Programm
     //    ergänzt, prüft diese Zahl mit.
-    allocator::heap_erweitern(2048).expect("Heap-Erweiterung vor den Mounts fehlgeschlagen");
+    //    12 MiB SEIT SERIE 8, TEIL 5: Mit `htmldump` (1,0 MB) und
+    //    `cssdump` (1,06 MB) sind es jetzt ~5,4 MB Programme. Ohne
+    //    Daten-Platte landen sie ALLE im RAM-VFS, also in genau diesem
+    //    Heap — und der Vergleich beim Installieren liest zusätzlich
+    //    jede Datei einmal ganz ein. Der Testkernel in tests/html.rs
+    //    ist an derselben Zahl gestorben, bevor sie erhöht wurde.
+    allocator::heap_erweitern(3072).expect("Heap-Erweiterung vor den Mounts fehlgeschlagen");
 
     //    Jetzt ist Platz fuer den KONSOLEN-RUECKBLICK (Bild auf/ab in der
     //    Vollbild-Konsole). Bewusst HIER und nicht in konsole::init(): Dort

@@ -391,6 +391,7 @@ dependencies = [
  "linked_list_allocator",
  "rustls",
  "rustls-rustcrypto",
+ "speedcss",
  "speedhtml",
  "speedhttp",
  "speedui",
@@ -837,6 +838,13 @@ name = "smallvec"
 version = "1.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
+
+[[package]]
+name = "speedcss"
+version = "0.1.0"
+dependencies = [
+ "speedhtml",
+]
 
 [[package]]
 name = "speedhtml"

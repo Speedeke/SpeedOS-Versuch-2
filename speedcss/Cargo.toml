@@ -1,0 +1,46 @@
+# speedcss — CSS zerlegen, kaskadieren, vererben. Sonst nichts.
+#
+# ===========================================================================
+# DIE EINE ABHAENGIGKEIT, UND WARUM SIE ERLAUBT IST
+#
+# `speedhttp`, `speedui` und `speedhtml` haben einen LEEREN
+# [dependencies]-Block. Diese Kiste hat GENAU EINEN Eintrag, und das ist
+# eine bewusste Entscheidung, keine Aufweichung:
+#
+# **CSS ohne Dokumentbaum ist bedeutungslos.** Die Kaskade ist per
+# Definition eine Operation AUF Elementen — sie fragt nach Tag-Namen,
+# Klassen, Ids und Vorfahren. Ein `Baum`-Trait davorzusetzen waere die
+# formal reinere Loesung gewesen; sie haette hier aber nichts umgekehrt,
+# sondern nur umbenannt (es gaebe genau einen Implementierer), und die
+# Tests waeren gegen einen Schein-Baum gelaufen statt gegen echtes HTML.
+# Genau dieselbe Abwaegung wie bei der verworfenen `speedui::umgebung_setzen`
+# — nur faellt sie hier andersherum aus, weil der Baum ein DATENTYP ist und
+# keine Umgebung.
+#
+# Die Regel, die weiter gilt und die geprueft wird
+# (tools/speedcss_allein_bauen.ps1): **KEINE Abhaengigkeit vom KERNEL, von
+# libspeed oder von Fremdkisten.** speedhtml selbst hat keine
+# Abhaengigkeiten, die Kette bleibt also sauber, und beide Kisten laufen
+# unveraendert auf dem Host wie bare-metal.
+#
+# Der Zuschnitt des Browsers: docs/browser-v1.md.
+
+[package]
+name = "speedcss"
+version = "0.1.0"
+edition = "2021"
+description = "CSS-Teilmenge: Tokenizer, Parser, Kaskade und Vererbung — no_std"
+
+[dependencies]
+# Der Dokumentbaum, auf dem kaskadiert wird. Siehe Kopfkommentar.
+speedhtml = { path = "../speedhtml" }
+
+# Wie bei speedhtml: Die Tests laufen OPTIMIERT. Ein Wikipedia-Stylesheet
+# hat tausende Regeln, und der Muell-Test wirft dem Parser Megabytes vor —
+# unoptimiert dauert das Minuten, und ein Test, der Minuten braucht, wird
+# nicht mehr ausgefuehrt.
+[profile.test]
+opt-level = 2
+
+[profile.dev]
+opt-level = 2

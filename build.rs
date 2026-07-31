@@ -40,7 +40,7 @@ use std::process::Command;
 const PROGRAMME: &[&str] = &[
     "hallo", "kopiere", "netzhole", "zaehle", "filter", "elternprobe",
     "angreifer", "messung", "zertifikate", "tlsspike", "holes", "news",
-    "fenstertest", "uidemo", "bilder", "htmldump",
+    "fenstertest", "uidemo", "bilder", "htmldump", "cssdump",
 ];
 
 /// Die Testbilder, die mitreisen (erzeugt von tools/testbilder_erzeugen.py).
@@ -74,6 +74,8 @@ fn main() {
     println!("cargo:rerun-if-changed=speedhttp/src");
     // Der HTML-Parser (Serie 8, Teil 4) haengt an userland/htmldump.
     println!("cargo:rerun-if-changed=speedhtml/src");
+    // Und der CSS-Teil (Serie 8, Teil 5) haengt an userland/cssdump.
+    println!("cargo:rerun-if-changed=speedcss/src");
     // Notausgang, falls die verschachtelte cargo-Ausfuehrung in einer
     // fremden Umgebung Probleme macht: SPEEDOS_OHNE_USERLAND=1 baut den
     // Kernel mit LEEREN Programmen (er bootet dann ohne /platte/programme).

@@ -625,6 +625,95 @@
   will nur Masse), sondern der `Zeichner` — weil er keine Abhaengigkeit ist,
   sondern eine AUFRUF-KONVENTION.
 
+## CSS: TEILMENGE, KASKADE, STANDARD-STYLESHEET (Serie 8, Teil 5, speedcss/)
+- **DIE VIERTE KISTE — UND DIE ERSTE MIT EINER ABHAENGIGKEIT.** `speedcss`
+  haengt an `speedhtml`, und das ist eine begruendete Entscheidung, keine
+  Aufweichung: **CSS ohne Dokumentbaum ist bedeutungslos** (die Kaskade
+  fragt nach Tag, Klassen, Id, Vorfahren). Ein `Baum`-Trait haette hier
+  nichts umgekehrt, sondern nur umbenannt — es gaebe genau EINEN
+  Implementierer, und die Tests liefen gegen einen Schein-Baum statt gegen
+  echtes HTML. Die Regel gilt weiter und wird geprueft
+  (`tools/speedcss_allein_bauen.ps1`): KEIN Kernel, KEIN libspeed, KEINE
+  Fremdkiste — und speedhtml selbst hat weiter null Abhaengigkeiten.
+- **DIE UNTERSTUETZTEN EIGENSCHAFTEN SIND DIE FELDLISTE VON `Stil`**, nicht
+  eine Zuordnung Name->String. Eine Tabelle waere flexibel und falsch: Das
+  Layout muesste jeden Wert bei jedem Zugriff neu deuten, ein Tippfehler im
+  Namen fiele nie auf, und bei 20 000 Knoten waeren es 20 000 Zuordnungen.
+  Die vollstaendige Liste steht in docs/browser-v1.md §2.3.
+- **COMPUTED VALUE vs. USED VALUE — die Unterscheidung, an der alles
+  haengt.** Zur KASKADENZEIT wird `font-size` absolut und jedes `em` gegen
+  die EIGENE Schriftgroesse aufgeloest; `%` und `auto` bleiben STEHEN, weil
+  erst das LAYOUT weiss, wie breit der umgebende Kasten ist. Ein Parser,
+  der `width: 50%` schon jetzt zu einer Zahl macht, raet — und raet falsch,
+  sobald das Fenster seine Groesse aendert.
+- **DIE em-FALLE, zweimal getestet:** Bei `p { margin: 1em; font-size: 2em }`
+  unter einem 20-px-Elternteil ist die Schrift 40 px (2 x 20, vom
+  ELTERNTEIL) und der Rand 40 px (1 x 40, vom EIGENEN Wert) — und zwar
+  UNABHAENGIG davon, in welcher Reihenfolge die beiden im Block stehen.
+  Deshalb laeuft die Kaskade `font-size` in einem EIGENEN Durchgang VORWEG.
+- **`line-height` HAT ZWEI SORTEN, und der Unterschied zeigt sich erst beim
+  KIND:** Eine nackte Zahl (`1.5`) wird als FAKTOR vererbt und beim Kind neu
+  angewandt; `150%` wird beim Elternteil ausgerechnet, und das ERGEBNIS
+  wird vererbt. Wer das verwechselt, bekommt bei kleiner Elternschrift zu
+  grosse Kinderzeilen.
+- **SPEZIFITAET IST LEXIKOGRAFISCH** (Ids, Klassen, Typen) und wird NIE zu
+  einer Zahl verrechnet — bei `ids*100 + klassen*10 + typen` schlagen elf
+  Klassen eine Id, und das ist falsch. Ein Rust-Tupel mit `Ord` macht genau
+  das Richtige.
+- **DIE HERKUNFTS-REIHENFOLGE DREHT SICH BEI `!important` UM:** Standard <
+  Autor < Autor-important < **Standard-important**. Bei uns folgenlos (das
+  Standard-Stylesheet benutzt kein `!important`), aber richtig — und ein
+  spaeteres Benutzer-Stylesheet braucht es.
+- **WAS WIR NICHT KOENNEN, PASST GAR NICHT — statt naeherungsweise.**
+  Kombinatoren (`>`, `+`, `~`), Attributselektoren, `:not()`,
+  Pseudo-Elemente: Der Selektor wird UNERFUELLBAR. `div > p { display:
+  none }` als Nachkommen zu deuten machte aus „nur direkte Kinder" ein
+  „alle Nachfahren" — und versteckte mehr, als gemeint war. Etwas
+  faelschlich zu verstecken ist der schlimmere Fehler.
+- **`@media` WIRD UEBERSPRUNGEN, ABER SAUBER — mit BALANCIERTER
+  Klammerung.** Wer nur die Zeile ueberspringt, laesst den Block offen, und
+  die Regeln darin werden zu Regeln auf oberster Ebene: Eine Druck- oder
+  Handy-Formatierung schlaegt dann auf den Desktop durch. Das ist SCHLIMMER
+  als sie wegzulassen. Zeichenketten werden dabei geschont (`content: "}"`
+  beendet keinen Block).
+- **DAS STANDARD-STYLESHEET IST ECHTER CSS-TEXT** (~90 Regeln,
+  `speedcss::standard`), kein Rust-Struct. Drei Gruende: Es ist der
+  SELBSTTEST des Parsers bei jedem Start; die KASKADE gilt auch fuer den
+  Standard (eine Autor-Regel schlaegt ihn mit derselben Maschinerie); und
+  man kann es LESEN. **Es ist der Grund, warum HTML ohne CSS ueberhaupt
+  aussieht** — nachpruefbar mit `test_ohne_standard_ist_alles_inline`: Ohne
+  es ist ALLES `display: inline`, nichts fett, alles gleich gross.
+- **VIER FEHLER, DIE DIE TESTS FANDEN und die alle im Code stehen:**
+  (1) Kommentare MITTEN im Selektor (`div/**/p`) und im Wert
+  (`color: /*x*/ red`) — `leerraum` sieht die nie, sie brauchen eine eigene
+  Entfernung, und die muss Zeichenketten schonen. (2) `line-height: 150%`
+  wurde als Prozent vererbt statt als Ergebnis. (3) `::before` wurde als
+  Pseudo-KLASSE gelesen statt den Selektor unerfuellbar zu machen.
+  (4) **DIE WECHSELWIRKUNG ZWISCHEN ZWEI KISTEN:**
+  `Dokument::text_von` ueberspringt `<style>` ABSICHTLICH (die Lehre aus
+  `news`) — womit `autor_stylesheet` ein LEERES Stylesheet bekam. Kein Test
+  der einzelnen Kiste findet so etwas; er heisst
+  `test_style_bloecke_im_dokument`.
+- **`cssdump` ERKLAERT, ES ZEIGT NICHT NUR.** Je Eigenschaft: der
+  berechnete Wert, die Regel die ihn setzte (Herkunft, Selektor,
+  Spezifitaet, `!important`) UND die Regeln, die verloren haben. Letzteres
+  ist beim Debuggen die eigentliche Auskunft („meine Regel ist da, sie wird
+  nur ueberstimmt"). Umgesetzt als ZWEITE Kaskade fuer genau einen Knoten —
+  mitzuschreiben kostete bei 20 000 Knoten zwanzig Strings je Knoten fuer
+  eine Information, die man an EINEM braucht.
+  `test_erklaerung_stimmt_mit_berechnung` nagelt fest, dass beide Wege
+  dasselbe liefern.
+- **KEIN FLIESSKOMMA:** Alle Laengen in TAUSENDSTELN (`1.5em` = 1500).
+  Dieselbe Loesung wie die UI-Skalierung in HALBEN und der Bildzoom als
+  Bruch.
+- **ZAHLEN:** 56 Host-Tests in 0,01 s, 6 weitere in QEMU. ELF `cssdump`
+  1 083 792 B. **DER KERNEL-HEAP MUSSTE MITWACHSEN** (8 -> 12 MiB in
+  main.rs, 2 -> 8 MiB in den Testkerneln): `programme::installieren()`
+  liest beim Boot JEDE Datei ganz in den Heap, um sie zu vergleichen, und
+  der Testkernel starb an genau der Groesse von `cssdump`. Der Kommentar in
+  main.rs bat darum, diese Zahl bei jedem grossen Programm zu pruefen — er
+  hatte recht.
+
 ## HTML VERSTEHEN — TOKENIZER UND DOM (Serie 8, Teil 4, speedhtml/)
 - **DER ZUSCHNITT STAND VOR DEM CODE: docs/browser-v1.md.** Was V1 kann,
   was es AUSDRUECKLICH nicht kann (JavaScript, Flexbox/Grid, Positionierung,

@@ -294,6 +294,44 @@ die nächsten Schritte. Was am Parser selbst fehlt:
   schützt nicht den Parser, sondern alles, was den Baum danach rekursiv
   durchläuft — der User-Stack ist 64 KiB.
 
+### CSS: eine Teilmenge, und sie ist klein
+
+*(Serie 8, Teil 5 — die vollständige Liste steht in
+`docs/browser-v1.md` §2.3, sichtbar mit `cssdump`)*
+
+SpeedOS versteht seit Serie 8, Teil 5 eine CSS-Teilmenge und rechnet
+Kaskade und Vererbung durch (`speedcss`). Was **nicht** dabei ist:
+
+* **Externe Stylesheets werden nicht geholt.** `<link rel=stylesheet>`
+  wird ignoriert — nur `<style>`-Blöcke und `style`-Attribute wirken.
+  **Das ist die folgenreichste Lücke:** Auf Seiten, die ihr Aussehen aus
+  externen Dateien beziehen (heute die Regel), wirkt nur das eingebaute
+  Standard-Stylesheet. Der Grund ist eine Schichtgrenze, keine
+  Vergesslichkeit — `speedcss` kennt kein Netz; der Browser kann die
+  Dateien später holen und hereinreichen.
+* **`@media` wird übersprungen** (sauber, mit balancierter Klammerung —
+  die Regeln darin schlagen also *nicht* durch). Bei „mobile first"-Seiten,
+  die ihr ganzes Layout in Media-Queries haben, bleibt entsprechend wenig.
+* **Kein `calc()`, keine Custom Properties** (`--x`/`var()`).
+* **Keine Einheiten** `vw`/`vh`/`ex`/`ch`/`cm`/`mm`/`in` — sie werden
+  abgelehnt, nicht geraten.
+* **Keine Kombinatoren** `>` `+` `~`, keine Attributselektoren, kein
+  `:not()`/`:nth-child()`, keine Pseudo-Elemente (`::before`). Solche
+  Selektoren machen die Regel **unerfüllbar** statt näherungsweise
+  passend — `div > p { display: none }` als Nachfahren zu deuten würde
+  mehr verstecken als gemeint.
+* **`:hover` ist vorbereitet, aber unbenutzt** — die Kaskade kann es, der
+  Browser meldet den Zustand noch nicht.
+* **Kein Blocksatz**: `text-align: justify` wird gelesen und wie `left`
+  gerendert (Wortabstands-Verteilung ist Layout-Arbeit).
+* **`border-style` kennt zwei Zustände** (keiner / durchgezogen);
+  `dashed`, `dotted`, `double` werden zu durchgezogen.
+* **Nur eine Schriftfamilie.** `font-family` wird auf
+  `Proportional`/`Monospace` abgebildet, und beide rendern heute mit
+  demselben Raster (siehe Schriften oben).
+* **Grenzen:** 100 000 Regeln, 256 Selektoren und 256 Deklarationen je
+  Regel. Darüber wird abgeschnitten und im `Befund` vermerkt.
+
 ---
 
 ## 7. Was ausdrücklich KEINE Lücke ist
@@ -327,6 +365,6 @@ fehlen **mit Absicht**, und sie sollen fehlen:
 | Toolkit-Trennung, Traits, ehrlicher Bericht | `docs/speedui-trennung.md` |
 | Bild-Dekoder: Evaluation, Zahlen, Angriffe | `docs/bild-entscheidung.md` |
 | Schriftgrößen, Textmetrik, Fett/Kursiv | `docs/schrift-groessen.md` |
-| Browser-V1: Zuschnitt, Zielmarke, Reißleine | `docs/browser-v1.md` |
+| Browser-V1: Zuschnitt, CSS-Teilmenge, Zielmarke, Reißleine | `docs/browser-v1.md` |
 | unsafe-Flächen | `docs/unsafe-audit-serie6.md`, `docs/unsafe-audit-serie7.md` |
 | Echte Hardware | `docs/hardware-log.md`, `docs/usb-boot.md` |

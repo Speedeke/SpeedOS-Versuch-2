@@ -44,6 +44,10 @@ speedui = { path = "../speedui" }
 # KEINE Abhaengigkeiten und kennt weder Netz noch Fenster.
 speedhtml = { path = "../speedhtml" }
 
+# CSS (Serie 8, Teil 5). Haengt selbst nur an speedhtml — die Begruendung
+# fuer diese EINE Abhaengigkeit steht in speedcss/Cargo.toml.
+speedcss = { path = "../speedcss" }
+
 # Der Heap-Allocator des User-Space (Serie 7, Teil 3) — dieselbe Kiste, die
 # auch der Kernel benutzt (src/allocator.rs). Sie ist no_std und kann
 # `extend`, und genau das braucht ein Heap, der auf Anforderung waechst.
@@ -186,6 +190,13 @@ path = "src/bin/bilder.rs"
 [[bin]]
 name = "htmldump"
 path = "src/bin/htmldump.rs"
+
+# DAS ZWEITE DEBUG-WERKZEUG (Serie 8, Teil 5): Welche Regel hat diesen
+# Wert gesetzt? `htmldump` beantwortet „Parser oder Layout?", `cssdump`
+# beantwortet „warum ist das Ding blau?".
+[[bin]]
+name = "cssdump"
+path = "src/bin/cssdump.rs"
 
 # panic = "abort" ist Pflicht: Abwickeln (unwinding) bräuchte eine
 # Personality-Funktion und Landing Pads — beides gibt es ohne std nicht.

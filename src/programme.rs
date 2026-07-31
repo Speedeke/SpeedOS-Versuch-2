@@ -127,6 +127,11 @@ pub static PROGRAMME: &[Programm] = &[
         elf: include_bytes!(concat!(env!("OUT_DIR"), "/htmldump")),
     },
     Programm {
+        name: "cssdump",
+        beschreibung: "cssdump <datei|url> [pfad] — berechnete Stile und ihre Regeln",
+        elf: include_bytes!(concat!(env!("OUT_DIR"), "/cssdump")),
+    },
+    Programm {
         name: "elternprobe",
         beschreibung: "elternprobe [ms] — startet ein Kind und wartet auf es (Ring 3)",
         elf: include_bytes!(concat!(env!("OUT_DIR"), "/elternprobe")),
@@ -439,11 +444,11 @@ mod tests {
     /// userland-Crate nicht — und zwar BEVOR jemand versucht, sie zu starten.
     #[test_case]
     fn test_eingebettete_programme_sind_gueltig() {
-        // Sechzehn seit Serie 8, Teil 4 (`htmldump` kam dazu). Die Zahl ist
+        // Siebzehn seit Serie 8, Teil 5 (`cssdump` kam dazu). Die Zahl ist
         // Absicht: Wer ein Programm ergaenzt, muss es an DREI Stellen tun
         // (userland/Cargo.toml, build.rs, PROGRAMME) — dieser Test faengt
         // die vergessene dritte.
-        assert_eq!(PROGRAMME.len(), 16, "es sollen sechzehn Programme mitkommen");
+        assert_eq!(PROGRAMME.len(), 17, "es sollen siebzehn Programme mitkommen");
         for programm in PROGRAMME {
             // Mit SPEEDOS_OHNE_USERLAND=1 gebaut? Dann gibt es nichts zu
             // pruefen — aber das ist der Notfall-Pfad, nicht der Normalfall.

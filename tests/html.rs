@@ -1,20 +1,22 @@
-// tests/html.rs — DER HTML-PARSER IN RING 3 (Serie 8, Teil 4)
+// tests/html.rs — HTML- UND CSS-FUNDAMENT IN RING 3 (Serie 8, Teil 4+5)
 //
 // ===========================================================================
 // WAS HIER GEPRUEFT WIRD — UND WAS AUSDRUECKLICH WOANDERS
 //
-// Die PARSER-LOGIK wird in `speedhtml` auf dem HOST geprueft: 63 Tests in
-// 0,6 Sekunden, darunter 20 MB Muell in fuenf Varianten, ein
-// Wikipedia-Artikel und die Zeichenreferenz-Tabelle. Sie hier zu
-// wiederholen waere Verschwendung — jeder Fall kostete einen QEMU-Start.
+// Die PARSER- und KASKADEN-LOGIK wird auf dem HOST geprueft: 63 Tests in
+// `speedhtml` und 56 in `speedcss`, zusammen unter einer Sekunde — darunter
+// 20 MB Muell, ein Wikipedia-Artikel, die Zeichenreferenz-Tabelle,
+// Spezifitaet, Vererbung und `!important`. Sie hier zu wiederholen waere
+// Verschwendung: jeder Fall kostete einen QEMU-Start.
 //
 // Hier wird das geprueft, was der Host NICHT zeigen kann:
 //
-//   1. `speedhtml` uebersetzt und laeuft BARE-METAL, no_std, in Ring 3.
-//   2. `htmldump` findet seine Datei, parst sie und schreibt das Ergebnis
-//      durch eine PIPE — der ganze Weg also, nicht nur die Funktion.
+//   1. `speedhtml` UND `speedcss` uebersetzen und laufen BARE-METAL,
+//      no_std, in Ring 3.
+//   2. `htmldump` und `cssdump` finden ihre Datei, verarbeiten sie und
+//      schreiben das Ergebnis durch eine PIPE — der ganze Weg also.
 //   3. Ein Ring-3-Prozess mit 12 MiB Heap kommt mit einem echten Dokument
-//      zurecht.
+//      und dem Standard-Stylesheet zurecht.
 //   4. Kaputte Eingaben lassen den Prozess nicht sterben (Exit 101).
 //
 // Das ist dieselbe Arbeitsteilung wie bei `speedui` (Toolkit-Logik auf dem
@@ -50,7 +52,14 @@ fn main(boot_info: &'static mut BootInfo) -> ! {
         .expect("kein Physik-Mapping");
     memory::init(VirtAddr::new(offset), &boot_info.memory_regions);
     allocator::init_heap().expect("Heap-Initialisierung fehlgeschlagen");
-    allocator::heap_erweitern(512).expect("Heap-Erweiterung fehlgeschlagen");
+    // 8 MiB, nicht 2: `programme::installieren()` liest beim Boot JEDE
+    // vorhandene Datei ganz in den Heap, um sie mit der eingebetteten
+    // Fassung zu vergleichen. Mit `htmldump` (1,0 MB) und `cssdump`
+    // (1,06 MB) reichten 2 MiB nicht mehr — der Testkernel starb mit
+    // „Heap-Allokation fehlgeschlagen: size 1083792", also genau der
+    // Groesse von cssdump. Dieselbe Zahl und derselbe Grund wie in
+    // main.rs.
+    allocator::heap_erweitern(2048).expect("Heap-Erweiterung fehlgeschlagen");
 
     speed_os::ata::init();
     speed_os::pci::init();
@@ -100,14 +109,19 @@ impl Lauf {
 
 /// Startet `htmldump` mit den gegebenen Argumenten und sammelt die Ausgabe.
 fn htmldump(argumente: &[&str]) -> Lauf {
+    programm_laufen("htmldump", argumente)
+}
+
+/// Startet ein Programm mit einer Pipe als Ausgabe und liest alles mit.
+fn programm_laufen(programm: &str, argumente: &[&str]) -> Lauf {
     let start = zeit::ms_seit_boot();
     let leitung = pipe::anlegen().expect("Pipe");
-    let pfad = programme::pfad("htmldump");
+    let pfad = programme::pfad(programm);
     pipe::ende_uebernehmen(leitung, pipe::Ende::Schreiben);
 
     // argv[0] gehoert dazu — `prozess_starten_mit` stellt den Namen nicht
     // selbst voran.
-    let mut argv: Vec<&str> = alloc::vec!["htmldump"];
+    let mut argv: Vec<&str> = alloc::vec![programm];
     argv.extend_from_slice(argumente);
 
     let pid: Pid = prozess::prozess_starten_mit(
@@ -118,7 +132,7 @@ fn htmldump(argumente: &[&str]) -> Lauf {
         Some(KernelObjekt::PipeSchreiben(leitung)),
         false,
     )
-    .expect("'htmldump' starten");
+    .unwrap_or_else(|f| panic!("'{}' starten: {}", programm, f.meldung()));
     pipe::ende_schliessen(leitung, pipe::Ende::Schreiben);
 
     let mut gesammelt: Vec<u8> = Vec::new();
@@ -131,7 +145,7 @@ fn htmldump(argumente: &[&str]) -> Lauf {
             pipe::PipeErgebnis::Bytes(n) => gesammelt.extend_from_slice(&puffer[..n]),
             pipe::PipeErgebnis::Blockiert => {
                 if zeit::ms_seit_boot() >= frist {
-                    serial_println!("  !! Frist abgelaufen — htmldump haengt.");
+                    serial_println!("  !! Frist abgelaufen — {} haengt.", programm);
                     break;
                 }
                 if ende.is_none() {
@@ -389,4 +403,227 @@ fn test_fehlende_datei() {
     assert_ne!(lauf.code(), CODE_PANIK);
     assert_ne!(lauf.code(), 0, "eine fehlende Datei muss ein Fehler sein");
     serial_println!("  Fehlende Datei: Exit {} (kein Absturz).", lauf.code());
+}
+
+// ===========================================================================
+// 4. CSS IN RING 3 (Serie 8, Teil 5)
+// ===========================================================================
+
+/// Startet `cssdump` und sammelt die Ausgabe ein.
+fn cssdump(argumente: &[&str]) -> Lauf {
+    programm_laufen("cssdump", argumente)
+}
+
+/// Legt eine HTML-Datei im Testordner an und liefert ihren Pfad.
+fn testdatei(name: &str, inhalt: &str) -> String {
+    let ordner = fs::persistenter_pfad("/platte/htmltest", "/htmltest");
+    let _ = fs::mit_fs(|f| f.mkdir(ordner));
+    let pfad = fs::pfad_anhaengen(ordner, name);
+    datei_schreiben(&pfad, inhalt);
+    pfad
+}
+
+/// DER MEILENSTEIN VON TEIL 5: Ein Ring-3-Prozess rechnet die Kaskade
+/// durch — Standard-Stylesheet, Vererbung, Spezifitaet — und sagt, welche
+/// Regel welchen Wert gesetzt hat.
+#[test_case]
+fn test_kaskade_in_ring3() {
+    if !programme_vorhanden() || programme::TESTSEITE.is_empty() {
+        return;
+    }
+    let pfad = programme::testseite_pfad();
+    let lauf = cssdump(&[&pfad, "h1"]);
+
+    assert_ne!(lauf.code(), CODE_PANIK, "cssdump ist gepanickt:\n{}", lauf.ausgabe);
+    assert_eq!(lauf.code(), 0, "Ausgabe:\n{}", lauf.ausgabe);
+
+    // Das Standard-Stylesheet hat gegriffen: <h1> ist Block, fett und
+    // 32 px gross (2em von 16px).
+    assert!(lauf.ausgabe.contains("<h1>"), "Kopfzeile fehlt:\n{}", lauf.ausgabe);
+    assert!(lauf.ausgabe.contains("Block"), "display fehlt:\n{}", lauf.ausgabe);
+    assert!(lauf.ausgabe.contains("32px"), "font-size fehlt:\n{}", lauf.ausgabe);
+    assert!(lauf.ausgabe.contains("bold"), "font-weight fehlt");
+
+    // Und die HERKUNFT steht dabei — das ist der eigentliche Zweck.
+    assert!(
+        lauf.ausgabe.contains("Standard"),
+        "keine Herkunftsangabe:\n{}",
+        lauf.ausgabe
+    );
+    assert!(lauf.ausgabe.contains("(0,0,1)"), "keine Spezifitaet");
+
+    serial_println!(
+        "  Kaskade in Ring 3: {} Zeilen fuer <h1> in {} ms.",
+        lauf.zeilen(),
+        lauf.dauer_ms
+    );
+}
+
+/// Vererbung ueber die Prozessgrenze: `color` erbt bis nach unten,
+/// `margin` nicht.
+#[test_case]
+fn test_vererbung_in_ring3() {
+    if !programme_vorhanden() {
+        return;
+    }
+    let pfad = testdatei(
+        "erben.html",
+        "<html><body><style>div { color: #abcdef; margin: 40px }</style>\
+         <div><p><span>tief</span></p></div></body></html>",
+    );
+
+    let lauf = cssdump(&[&pfad, "span"]);
+    assert_eq!(lauf.code(), 0, "{}", lauf.ausgabe);
+    assert!(
+        lauf.ausgabe.contains("#abcdef"),
+        "color haette erben muessen:\n{}",
+        lauf.ausgabe
+    );
+    assert!(
+        lauf.ausgabe.contains("geerbt"),
+        "die Quelle 'geerbt' fehlt:\n{}",
+        lauf.ausgabe
+    );
+    // margin erbt NICHT — der Wert muss 0 sein.
+    let margin_zeile = lauf
+        .ausgabe
+        .lines()
+        .find(|z| z.starts_with("margin"))
+        .unwrap_or("");
+    assert!(
+        margin_zeile.contains("0px 0px 0px 0px"),
+        "margin darf nicht erben, steht aber als: {margin_zeile}"
+    );
+
+    serial_println!("  Vererbung verhaelt sich in Ring 3 wie auf dem Host.");
+}
+
+/// Autor schlaegt Standard, `!important` schlaegt Spezifitaet — beides
+/// ueber den ganzen Weg.
+#[test_case]
+fn test_kaskadenrang_in_ring3() {
+    if !programme_vorhanden() {
+        return;
+    }
+    let pfad = testdatei(
+        "rang.html",
+        "<html><head><style>\
+         h1 { font-weight: normal }\
+         #a { color: #ff0000 }\
+         h1 { color: #0000ff !important }\
+         </style></head><body><h1 id=a>T</h1></body></html>",
+    );
+
+    let lauf = cssdump(&[&pfad, "h1"]);
+    assert_eq!(lauf.code(), 0, "{}", lauf.ausgabe);
+    // Autor schlaegt Standard: nicht mehr fett.
+    assert!(
+        lauf.ausgabe.contains("normal"),
+        "der Autor haette den Standard schlagen muessen:\n{}",
+        lauf.ausgabe
+    );
+    // !important schlaegt die Id-Regel.
+    assert!(
+        lauf.ausgabe.contains("#0000ff"),
+        "!important haette die Id-Regel schlagen muessen:\n{}",
+        lauf.ausgabe
+    );
+    assert!(lauf.ausgabe.contains("!important"), "der Hinweis fehlt");
+    // Und die ueberstimmte Regel wird genannt.
+    assert!(
+        lauf.ausgabe.contains("ueberstimmt"),
+        "die verlorene Regel muss sichtbar sein:\n{}",
+        lauf.ausgabe
+    );
+
+    serial_println!("  Kaskadenrang (Autor > Standard, !important) stimmt in Ring 3.");
+}
+
+/// Kaputtes CSS toetet den Prozess nicht.
+#[test_case]
+fn test_kaputtes_css_in_ring3() {
+    if !programme_vorhanden() {
+        return;
+    }
+    let faelle: &[(&str, &str)] = &[
+        ("css_leer.html", "<style></style><p>x</p>"),
+        (
+            "css_klammern.html",
+            "<style>}}}{{{ p { color: red </style><p>x</p>",
+        ),
+        (
+            "css_media.html",
+            "<style>@media print { p { color: green } } p { color: #ff0000 }</style><p>x</p>",
+        ),
+        ("css_muell.html", "<style>@@@ ;;; ::: p{{{color:::red}}}</style><p>x</p>"),
+        (
+            "css_zahlen.html",
+            "<style>p { color: rgb(999999999999,2,3); width: 99999999999px }</style><p>x</p>",
+        ),
+        ("css_umlaute.html", "<style>p.groesse { color: red }</style><p>x</p>"),
+    ];
+    for (name, inhalt) in faelle {
+        let pfad = testdatei(name, inhalt);
+        let lauf = cssdump(&[&pfad, "p"]);
+        assert_ne!(
+            lauf.code(),
+            CODE_PANIK,
+            "{} hat cssdump zum PANICKEN gebracht:\n{}",
+            name,
+            lauf.ausgabe
+        );
+        assert!(lauf.ende.is_some(), "{} hat cssdump haengen lassen", name);
+        assert_eq!(lauf.code(), 0, "{}: Exit {}", name, lauf.code());
+    }
+    serial_println!("  {} kaputte Stylesheets, 0 Paniken.", faelle.len());
+}
+
+/// `--befund` zeigt, was uebersprungen wurde — inklusive `@media`.
+#[test_case]
+fn test_cssdump_befund() {
+    if !programme_vorhanden() {
+        return;
+    }
+    let pfad = testdatei(
+        "befund.html",
+        "<style>@media print { p { color: green } } div > p { color: red } p { color: blue }</style><p>x</p>",
+    );
+    let lauf = cssdump(&[&pfad, "--befund"]);
+    assert_eq!(lauf.code(), 0, "{}", lauf.ausgabe);
+    assert!(
+        lauf.ausgabe.contains("At-Regel"),
+        "@media haette gemeldet werden muessen:\n{}",
+        lauf.ausgabe
+    );
+    assert!(
+        lauf.ausgabe.contains("koennen wir nicht"),
+        "der Kind-Kombinator haette gemeldet werden muessen:\n{}",
+        lauf.ausgabe
+    );
+    serial_println!("  --befund meldet @media und unerfuellbare Selektoren.");
+}
+
+/// Zehn Kaskaden-Durchlaeufe lecken nichts.
+#[test_case]
+fn test_kein_leck_cssdump() {
+    if !programme_vorhanden() || programme::TESTSEITE.is_empty() {
+        return;
+    }
+    let pfad = programme::testseite_pfad();
+    scheduler::aufraeumen();
+    let vorher = memory::frame_statistik().0;
+    for _ in 0..10 {
+        let lauf = cssdump(&[&pfad, "h1"]);
+        assert_eq!(lauf.code(), 0);
+    }
+    scheduler::aufraeumen();
+    let nachher = memory::frame_statistik().0;
+    let schranke = (10 * 340) / 512 + 2;
+    let verloren = vorher.saturating_sub(nachher);
+    serial_println!(
+        "  10 cssdump-Prozesse: {} Frames verloren (Schranke {}).",
+        verloren,
+        schranke
+    );
+    assert!(verloren <= schranke, "Frame-Leck: {verloren} > {schranke}");
 }
