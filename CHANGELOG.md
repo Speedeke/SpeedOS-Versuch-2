@@ -5,6 +5,36 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### Terminals sehen jetzt alle gleich aus — und heissen alle gleich
+
+Drei Kleinigkeiten, die zusammen unaufgeräumt wirkten:
+
+* **Nur das erste Terminal zeigte das SpeedOS-Banner.** Jedes weitere
+  begrüsste mit `SpeedShell-Sitzung 2 - eigenstaendig und unabhaengig.` —
+  einer Zeile, die eine interne Nummer nannte und sonst nichts sagte. Jetzt
+  bekommt **jede** Sitzung dasselbe Banner.
+* **Der Fenstertitel trug die Sitzungs-Id.** Die wächst monoton (sie darf
+  nie recyceln — eine wiederverwendete Id könnte auf eine längst
+  geschlossene Sitzung zeigen), also hiess das nächste Fenster nach dem
+  Schliessen der ersten beiden „Terminal 3". Für den Benutzer eine Zahl
+  ohne Bedeutung. Der Titel ist jetzt schlicht **„Terminal"**; die Id
+  bleibt intern (Task-Name, Diagnose).
+* **Das Kernel-Bootprotokoll wurde eingefügt und sofort weggewischt.** Der
+  Fenster-Manager reichte den gepufferten Log ins erste Terminal nach —
+  und eine Zeile später leerte das Banner des Shell-Tasks das Fenster.
+  Jetzt holt der **Shell-Task** den Log, direkt **nach** dem Banner. Das
+  Bootprotokoll ist damit im Fenster sichtbar statt nur auf der seriellen
+  Leitung.
+
+Dass Fenster und Sitzungen wirklich aufräumen, ist jetzt **nachgeprüft**
+statt angenommen: `sitzung::anzahl()` ist ein Messpunkt, und
+`test_app_zyklen_lecken_nicht` verlangt nach 23 Runden (je 1 Terminal +
+4 Apps) nicht nur eine unveränderte Heap-Bilanz, sondern auch **null offene
+Fenster und die Ausgangszahl an Sitzungen**. Ein Terminal, das seine
+Shell-Sitzung liegen lässt, fällt dem Heap-Vergleich allein nicht
+zwingend auf — ein einzelnes `Arc<Sitzung>` ist zu klein.
+
+
 ### SERIE 8, TEIL 2: Das Toolkit wohnt jetzt in einer eigenen Kiste
 
 Die eigentliche Architekturfrage der Serie — beantwortet mit Empfehlung

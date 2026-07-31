@@ -95,6 +95,16 @@ pub fn neu_registrieren() -> u64 {
     id
 }
 
+/// Wie viele Sitzungen sind OFFEN?
+///
+/// Die Zahl ist die Probe darauf, dass Terminal-Fenster wirklich
+/// aufräumen: Wer N Fenster öffnet und wieder schliesst, muss hinterher
+/// bei derselben Zahl landen. Sichtbar ist sie nirgends — sie ist ein
+/// Messpunkt, kein Zustand (`tests` und der Task-Manager).
+pub fn anzahl() -> usize {
+    mit_sitzungen(|sitzungen| sitzungen.len())
+}
+
 /// Holt die Sitzung zu einer Id (für den Shell-Task).
 pub fn holen(id: u64) -> Option<Arc<Sitzung>> {
     mit_sitzungen(|sitzungen| sitzungen.get(&id).cloned())

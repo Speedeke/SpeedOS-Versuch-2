@@ -162,7 +162,7 @@ pub async fn eingabe_router() {
 /// sitzung::ausgabe_setzen/zuruecksetzen — print! landet dadurch im
 /// EIGENEN Terminal-Fenster. Das ist race-frei, weil dazwischen kein
 /// await liegt (kooperatives Multitasking, siehe sitzung.rs).
-pub async fn sitzung_laufen(sitzungs_id: u64, mit_banner: bool) {
+pub async fn sitzung_laufen(sitzungs_id: u64, vollbild: bool) {
     let sitzung = match sitzung::holen(sitzungs_id) {
         Some(sitzung) => sitzung,
         None => return,
@@ -177,14 +177,32 @@ pub async fn sitzung_laufen(sitzungs_id: u64, mit_banner: bool) {
     let vervollstaendiger = FsVervollstaendiger;
 
     sitzung::ausgabe_setzen(sitzungs_id);
-    if mit_banner {
-        banner();
-        // Blinkenden Konsolen-Cursor einschalten (nur Vollbild aktiv).
+    // JEDE Sitzung bekommt dasselbe Banner. Vorher zeigte nur die erste
+    // eines („SpeedShell-Sitzung 2 - eigenstaendig und unabhaengig"),
+    // und diese Zeile nannte eine Nummer, die niemanden etwas angeht.
+    // Zwei Terminals nebeneinander sahen dadurch verschieden aus.
+    banner();
+    if vollbild {
+        // Der blinkende KONSOLEN-Cursor gehoert dem Vollbild; im
+        // Desktop-Modus malt das Terminal-Fenster seinen eigenen
+        // (`cursor_aktivieren` weiss das und tut dort nichts).
         konsole::cursor_aktivieren();
-    } else {
-        konsole::set_color(Color::LightCyan, Color::Black);
-        println!("SpeedShell-Sitzung {} - eigenstaendig und unabhaengig.", sitzungs_id);
-        konsole::set_color(Color::LightGray, Color::Black);
+    }
+    // DAS KERNEL-LOG NACHREICHEN — erst hier, denn `banner()` leert das
+    // Terminal. Frueher fuegte der Fenster-Manager den gepufferten Log
+    // ein, und eine Zeile spaeter wischte das Banner ihn weg.
+    if sitzung::haupt() == sitzungs_id {
+        for (text, vg, hg) in sitzung::log_abholen() {
+            // Direkt ins Terminal-Raster, weil die Log-Segmente ihre
+            // EIGENEN Farben tragen — `print!` wuerde die aktuellen
+            // Konsolen-Farben nehmen und das Bootprotokoll einfaerben.
+            crate::fenster::terminal_schreiben(
+                sitzungs_id,
+                format_args!("{}", text),
+                vg,
+                hg,
+            );
+        }
     }
     prompt(sitzungs_id, &kontext);
     sitzung::ausgabe_zuruecksetzen();

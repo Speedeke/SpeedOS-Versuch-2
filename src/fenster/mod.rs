@@ -926,21 +926,27 @@ impl FensterManager {
             theme::aktuell().terminal_hintergrund,
         );
         let sitzung = crate::shell::sitzung::neu_registrieren();
+        // DER TITEL TRAEGT KEINE NUMMER MEHR. Die Sitzungs-Id waechst
+        // monoton (sie darf nie recyceln — eine wiederverwendete Id
+        // koennte auf eine laengst geschlossene Sitzung zeigen), und sie
+        // im Titel zu zeigen hiess: Nach dem Schliessen der ersten beiden
+        // Fenster heisst das naechste „Terminal 3". Das ist fuer den
+        // Benutzer eine Zahl ohne Bedeutung. Die Id bleibt INTERN
+        // (Task-Name, Diagnose), sichtbar ist nur „Terminal".
         self.fenster_erstellen(
-            &format!("Terminal {}", sitzung),
+            "Terminal",
             x,
             y,
             breite,
             hoehe,
             Inhalt::Terminal { term, sitzung },
         );
-        // Das erste offene Terminal wird Kernel-Log-Ziel — und holt
-        // den in terminalloser Zeit gepufferten Log nach.
+        // Das erste offene Terminal wird Kernel-Log-Ziel. Den gepufferten
+        // Log holt der SHELL-TASK nach — nicht hier: Er zeichnet gleich
+        // erst sein Banner, und das leert das Fenster. Vorher wurde der
+        // Log hier eingefuegt und eine Zeile spaeter weggewischt.
         if crate::shell::sitzung::haupt() == 0 {
             crate::shell::sitzung::haupt_setzen(sitzung);
-            for (text, vg, hg) in crate::shell::sitzung::log_abholen() {
-                let _ = self.terminal_schreiben(sitzung, format_args!("{}", text), vg, hg);
-            }
         }
         sitzung
     }
@@ -3663,8 +3669,12 @@ mod tests {
         let haupt_vorher = crate::shell::sitzung::haupt();
         crate::shell::sitzung::haupt_setzen(0);
         let mut manager = FensterManager::neu(1000, 800);
-        let sitzungen_vorher = crate::shell::sitzung::haupt(); // 0
-        let _ = sitzungen_vorher;
+        // Der Ausgangsstand der SITZUNGEN — am Ende muss er wieder da
+        // sein. Ohne diesen Messpunkt konnte ein Terminal-Fenster seine
+        // Shell-Sitzung liegen lassen, ohne dass es jemand merkte: Der
+        // Heap-Vergleich unten faellt bei einem einzelnen `Arc<Sitzung>`
+        // nicht zwingend auf.
+        let sitzungen_start = crate::shell::sitzung::anzahl();
 
         let runde = |manager: &mut FensterManager| {
             // Terminal: öffnen, schreiben, rendern, schließen.
@@ -3726,6 +3736,14 @@ mod tests {
             vorher, nachher,
             "App-Zyklen lecken Heap: vorher {:?}, nachher {:?}",
             vorher, nachher
+        );
+        // JEDES Fenster ist wieder zu — und jede Terminal-Sitzung
+        // ausgetragen. 23 Runden a 1 Terminal + 4 Apps.
+        assert_eq!(manager.fenster.len(), 0, "es sind Fenster liegengeblieben");
+        assert_eq!(
+            crate::shell::sitzung::anzahl(),
+            sitzungen_start,
+            "Terminal-Fenster haben Shell-Sitzungen liegengelassen"
         );
         crate::shell::sitzung::haupt_setzen(haupt_vorher);
     }
