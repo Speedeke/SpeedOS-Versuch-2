@@ -51,13 +51,14 @@ extern crate alloc;
 
 pub mod dialog;
 pub mod editor;
+pub mod text;
 pub mod typen;
 pub mod umgebung;
 pub mod widgets;
 
 pub use typen::{icon_farbe, Farbe, Icon, Rechteck, Taste};
 pub use umgebung::{
-    Dateiquelle, Farbrolle, Leinwand, Maler, Mass, Schrift, Thema, Uhr, UiKontext,
+    Dateiquelle, Farbrolle, Leinwand, Maler, Mass, Schrift, Stil, Thema, Uhr, UiKontext,
 };
 
 use alloc::boxed::Box;

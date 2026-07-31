@@ -97,6 +97,36 @@ pub trait Thema {
 // (2) SCHRIFT — reine Metrik, keine Glyphen
 // ---------------------------------------------------------------------------
 
+/// Schriftschnitt: fett und/oder kursiv.
+///
+/// EIN STRUCT UND KEIN `fett: bool` MEHR, weil es ab jetzt zwei Achsen
+/// sind und ein zweiter `bool`-Parameter an jeder Signatur die Sorte
+/// Aufruf erzeugt, die man nicht mehr lesen kann (`text(.., true, false)`).
+///
+/// EHRLICH BENANNT: `kursiv` heisst „schraeg gestellt", nicht „kursiver
+/// Schnitt". Unsere Schrift HAT keinen kursiven Schnitt (siehe
+/// `Schrift::kursiv_echt`), der Wirt schert die Glyphen. Ein echter
+/// Italic-Font hat andere Buchstabenformen — ein geschertes `a` bleibt ein
+/// gerades `a`, das schief steht. Fuer einen Renderer, der `<i>` von
+/// normalem Text unterscheidbar machen soll, reicht das; wer etwas anderes
+/// behauptet, luegt ueber den Font-Bestand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Stil {
+    pub fett: bool,
+    pub kursiv: bool,
+}
+
+impl Stil {
+    pub const NORMAL: Stil = Stil { fett: false, kursiv: false };
+    pub const FETT: Stil = Stil { fett: true, kursiv: false };
+    pub const KURSIV: Stil = Stil { fett: false, kursiv: true };
+    pub const FETT_KURSIV: Stil = Stil { fett: true, kursiv: true };
+
+    pub const fn neu(fett: bool, kursiv: bool) -> Stil {
+        Stil { fett, kursiv }
+    }
+}
+
 /// Was das Layout ueber Text wissen muss.
 ///
 /// **Die Schrift selbst zieht NICHT mit**, auch nicht als Daten: Der Kernel
@@ -108,6 +138,27 @@ pub trait Thema {
 /// `groesse` ist eine Pixelhoehe als `i32` und kein `RasterHeight`: Der Typ
 /// der noto-Kiste ist genau die Sorte Abhaengigkeit, die hier nicht
 /// hindurchdarf. Welche Raster der Wirt aus der Zahl macht, ist seine Sache.
+///
+/// ===================================================================
+/// DIE ERWEITERUNG VON SERIE 8, TEIL 3
+///
+/// Ein Widget kam mit EINER Groesse aus. Ein HTML-Renderer nicht: Er hat
+/// Ueberschriften, Fliesstext und Kleingedrucktes GLEICHZEITIG auf einer
+/// Seite, und er muss die Breite eines Textstuecks kennen, BEVOR er es
+/// zeichnet — ohne das gibt es keinen Zeilenumbruch.
+///
+/// Dazu sind drei Dinge neu, und alle drei haben eine Voreinstellung,
+/// damit bestehende Wirte unveraendert weiterlaufen:
+///
+/// * `groessen()` — welche Groessen es WIRKLICH gibt. Ein Renderer darf
+///   nicht raten: Bei uns sind es vier vorgerasterte, keine beliebigen
+///   (die Begruendung und die Folgen stehen vollstaendig in
+///   docs/schrift-groessen.md).
+/// * `groesse_waehlen()` — `font-size: 13px` auf die naechstliegende
+///   vorhandene abbilden.
+/// * `text_breite_stil()` — die Metrik, die der Umbruch braucht. Sie ist
+///   STIL-ABHAENGIG, weil fett breiter sein kann als normal (bei uns ist
+///   es das nicht — bei einer Proportionalschrift schon).
 pub trait Schrift {
     /// Breite EINES Zeichens (die Schrift ist monospace).
     fn zeichen_breite(&self, groesse: i32) -> i32;
@@ -115,8 +166,73 @@ pub trait Schrift {
     fn zeilen_hoehe(&self, groesse: i32) -> i32;
     /// Breite eines Textes. Voreinstellung: Zeichenzahl x Zeichenbreite —
     /// ein Wirt mit Proportionalschrift ueberschreibt das.
+    ///
+    /// `chars().count()` UND NICHT `len()`: `len()` ist die Zahl der
+    /// UTF-8-BYTES. „Grüße" hat 5 Zeichen und 7 Bytes — wer `len()` nimmt,
+    /// rechnet fuer jeden Umlaut eine Zeichenbreite zu viel und bricht
+    /// deutsche Zeilen zu frueh um. Der Test dazu steht in
+    /// `speedui::text::tests`.
     fn text_breite(&self, text: &str, groesse: i32) -> i32 {
         text.chars().count() as i32 * self.zeichen_breite(groesse)
+    }
+
+    /// Die Groessen, die dieser Wirt WIRKLICH hat — aufsteigend sortiert.
+    ///
+    /// Voreinstellung: eine leere Liste, was „jede Groesse" bedeutet (ein
+    /// Wirt mit echtem Rasterizer sagt nichts anderes). Wer vorgerasterte
+    /// Bitmaps hat, zaehlt sie hier auf, und `groesse_waehlen` rundet
+    /// darauf.
+    fn groessen(&self) -> &[i32] {
+        &[]
+    }
+
+    /// Die vorhandene Groesse, die `wunsch` am naechsten kommt.
+    ///
+    /// BEI GLEICHSTAND DIE KLEINERE. Ein Wunsch genau zwischen zwei
+    /// Rastern (18 bei 16 und 20) wird abgerundet: Zu gross sprengt das
+    /// Layout, zu klein ist nur haesslich — und ein gesprengtes Layout
+    /// faellt mehr auf.
+    fn groesse_waehlen(&self, wunsch: i32) -> i32 {
+        let vorhandene = self.groessen();
+        if vorhandene.is_empty() {
+            return wunsch.max(1);
+        }
+        let mut beste = vorhandene[0];
+        let mut abstand = (beste - wunsch).abs();
+        for &g in vorhandene.iter().skip(1) {
+            let d = (g - wunsch).abs();
+            // `<` und nicht `<=`: Bei Gleichstand gewinnt die zuerst
+            // gesehene, und die Liste ist aufsteigend — also die kleinere.
+            if d < abstand {
+                beste = g;
+                abstand = d;
+            }
+        }
+        beste
+    }
+
+    /// Breite eines Textes in einem bestimmten Schnitt.
+    ///
+    /// Voreinstellung: wie `text_breite` — unsere Monospace-Raster sind in
+    /// jedem Schnitt gleich breit. Ein Wirt mit Proportionalschrift
+    /// ueberschreibt das, sonst umbricht er fetten Text falsch.
+    fn text_breite_stil(&self, text: &str, groesse: i32, _stil: Stil) -> i32 {
+        self.text_breite(text, groesse)
+    }
+
+    /// Hat die Schrift einen ECHTEN Fettschnitt (statt Doppelzeichnung)?
+    fn fett_echt(&self) -> bool {
+        false
+    }
+
+    /// Hat die Schrift einen ECHTEN Kursivschnitt (statt Scherung)?
+    ///
+    /// WOZU DAS EIN TRAIT-MITGLIED IST und kein Kommentar: Damit die
+    /// Auskunft im PROGRAMM steht und nicht nur in der Doku. Ein
+    /// Renderer, der wissen will, ob er `<i>` ehrlich darstellen kann,
+    /// fragt hier — und die Diagnose-Anzeige kann es zeigen.
+    fn kursiv_echt(&self) -> bool {
+        false
     }
 }
 
@@ -163,6 +279,23 @@ pub trait Leinwand {
     fn linie(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, farbe: Farbe);
     fn text(&mut self, x: i32, y: i32, text: &str, groesse: i32, fett: bool, farbe: Farbe);
     fn icon(&mut self, x: i32, y: i32, icon: &Icon, skalierung: i32);
+
+    /// Text mit vollem Schnitt (fett UND kursiv).
+    ///
+    /// WARUM ALS ZEHNTE OPERATION MIT VOREINSTELLUNG und nicht als
+    /// Aenderung an `text`: `text` steht in jedem Widget und in beiden
+    /// Wirten. Eine geaenderte Signatur waere ein Umbau von zwanzig
+    /// Aufrufstellen fuer eine Faehigkeit, die KEIN Widget benutzt — nur
+    /// der kommende Renderer. Die Voreinstellung wirft das Kursiv weg und
+    /// zeichnet den Rest korrekt; ein Wirt, der scheren kann,
+    /// ueberschreibt sie.
+    ///
+    /// Das ist dieselbe Ueberlegung wie bei den Zeilen-Schnellpfaden des
+    /// `Zeichenflaeche`-Traits im Kernel: eine Voreinstellung, die richtig
+    /// ist, und ein Wirt, der es besser kann, wenn er will.
+    fn text_stil(&mut self, x: i32, y: i32, text: &str, groesse: i32, stil: Stil, farbe: Farbe) {
+        self.text(x, y, text, groesse, stil.fett, farbe);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -300,5 +433,10 @@ impl<'a> Maler<'a> {
     #[inline]
     pub fn text_mit(&mut self, x: i32, y: i32, text: &str, groesse: i32, fett: bool, farbe: Farbe) {
         self.leinwand.text(x, y, text, groesse, fett, farbe)
+    }
+    /// Text mit ausdruecklicher Groesse und vollem Schnitt.
+    #[inline]
+    pub fn text_stil(&mut self, x: i32, y: i32, text: &str, groesse: i32, stil: Stil, farbe: Farbe) {
+        self.leinwand.text_stil(x, y, text, groesse, stil, farbe)
     }
 }

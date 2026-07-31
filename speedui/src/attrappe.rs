@@ -21,7 +21,7 @@
 // Anwender nuetzlich (ein Layout durchrechnen, ohne zu zeichnen).
 
 use crate::typen::{Farbe, Icon, Rechteck};
-use crate::umgebung::{Farbrolle, Leinwand, Mass, Schrift, Thema, Uhr, UiKontext};
+use crate::umgebung::{Farbrolle, Leinwand, Mass, Schrift, Stil, Thema, Uhr, UiKontext};
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::Cell;
@@ -98,6 +98,42 @@ impl Schrift for TestSchrift {
     }
 }
 
+/// Eine Schrift mit GENAU DEN VIER RASTERN DES KERNELS (16/20/24/32),
+/// echtem Fettschnitt und ohne Kursiv.
+///
+/// WARUM ES SIE ZUSAETZLICH ZU `TestSchrift` GIBT: `TestSchrift` kann
+/// jede Groesse — sie ist der bequeme Wirt fuer Layout-Tests. Genau
+/// deshalb taugt sie NICHT, um die Groessen-LUECKE zu pruefen: Bei ihr
+/// gibt es keine. `VierRaster` bildet den echten Font-Bestand nach
+/// (nachgesehen in `noto-sans-mono-bitmap`, nicht geraten), damit
+/// `speedui::text` gegen die WIRKLICHE Einschraenkung getestet wird und
+/// nicht gegen eine bequeme.
+pub struct VierRaster;
+
+/// Die Groessen, die es wirklich gibt. Aufsteigend — `groesse_waehlen`
+/// verlaesst sich darauf (bei Gleichstand gewinnt die kleinere).
+pub const RASTER: &[i32] = &[16, 20, 24, 32];
+
+impl Schrift for VierRaster {
+    fn zeichen_breite(&self, groesse: i32) -> i32 {
+        (self.groesse_waehlen(groesse) / 2).max(1)
+    }
+    fn zeilen_hoehe(&self, groesse: i32) -> i32 {
+        self.groesse_waehlen(groesse) + 4
+    }
+    fn groessen(&self) -> &[i32] {
+        RASTER
+    }
+    /// Der Kernel hat einen ECHTEN Fettschnitt (`FontWeight::Bold`).
+    fn fett_echt(&self) -> bool {
+        true
+    }
+    /// Und KEINEN Kursivschnitt — die Kiste liefert nur Light/Regular/Bold.
+    fn kursiv_echt(&self) -> bool {
+        false
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Uhr
 // ---------------------------------------------------------------------------
@@ -150,6 +186,14 @@ pub enum Strich {
     Linie(i32, i32, i32, i32, Farbe),
     Text(i32, i32, String, i32, bool, Farbe),
     Icon(i32, i32, i32),
+    /// Text mit vollem Schnitt (Serie 8, Teil 3).
+    ///
+    /// EIGENE VARIANTE UND KEIN FELD AN `Text`: Die bestehenden
+    /// Widget-Tests vergleichen `Strich::Text(..)` und sollen dabei
+    /// bleiben — sie sind aus Serie 3 und ihr Wert liegt darin, dass sie
+    /// UNVERAENDERT durchlaufen. Wer `text_stil` prueft, prueft etwas
+    /// anderes und darf dafuer hinsehen, wo es steht.
+    TextStil(i32, i32, String, i32, Stil, Farbe),
 }
 
 /// Eine Leinwand, die NICHTS malt und ALLES aufschreibt.
@@ -214,6 +258,14 @@ impl Leinwand for MalProtokoll {
     }
     fn icon(&mut self, x: i32, y: i32, _icon: &Icon, skalierung: i32) {
         self.striche.push(Strich::Icon(x, y, skalierung));
+    }
+    /// MITSCHREIBEN STATT WEGWERFEN: Die Voreinstellung des Traits wuerde
+    /// das Kursiv verlieren (sie leitet auf `text` um). Eine Attrappe, die
+    /// dasselbe taete, koennte nie beweisen, dass ein Aufrufer Kursiv
+    /// ANGEFORDERT hat — und genau das ist hier die interessante Frage.
+    fn text_stil(&mut self, x: i32, y: i32, text: &str, groesse: i32, stil: Stil, farbe: Farbe) {
+        self.striche
+            .push(Strich::TextStil(x, y, String::from(text), groesse, stil, farbe));
     }
 }
 

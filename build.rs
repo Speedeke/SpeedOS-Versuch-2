@@ -40,7 +40,22 @@ use std::process::Command;
 const PROGRAMME: &[&str] = &[
     "hallo", "kopiere", "netzhole", "zaehle", "filter", "elternprobe",
     "angreifer", "messung", "zertifikate", "tlsspike", "holes", "news",
-    "fenstertest", "uidemo",
+    "fenstertest", "uidemo", "bilder",
+];
+
+/// Die Testbilder, die mitreisen (erzeugt von tools/testbilder_erzeugen.py).
+///
+/// WARUM SIE INS IMAGE GEHOEREN: Ein Bilddekoder ohne Bilder ist nicht
+/// pruefbar, und ein Host-Werkzeug, das SpeedFS beschreiben kann, gibt es
+/// nicht (dieselbe Begruendung wie bei den Programmen und beim CA-Buendel).
+/// Die BOESARTIGEN sind dabei die wichtigeren — sie sind der Testfall,
+/// nicht die Verzierung.
+const TESTBILDER: &[&str] = &[
+    "verlauf.png", "gross.png", "rgba.png", "grau.png", "palette.png",
+    "abgeschnitten.png", "ohne_iend.png", "crc_kaputt.png",
+    "falsche_signatur.png", "absurde_masse.png", "null_masse.png",
+    "bombe.png", "riesige_chunk_laenge.png", "viele_chunks.png",
+    "leer.png", "nur_signatur.png", "kein_bild.png",
 ];
 
 fn main() {
@@ -65,6 +80,8 @@ fn main() {
     // Serie 7, Teil 2: das Bau-Datum und das CA-Buendel.
     bau_datum_setzen();
     ca_buendel_einbetten(&wurzel, &out_dir);
+    // Serie 8, Teil 3: die Testbilder fuer den Bilddekoder.
+    testbilder_einbetten(&wurzel, &out_dir);
 
     let ueberspringen = std::env::var("SPEEDOS_OHNE_USERLAND")
         .map(|wert| wert == "1")
@@ -242,5 +259,52 @@ fn ca_buendel_einbetten(wurzel: &Path, out_dir: &Path) {
             );
             std::fs::write(&ziel, []).expect("leeres CA-Buendel anlegen");
         }
+    }
+}
+
+// ===========================================================================
+// DIE TESTBILDER (Serie 8, Teil 3 — der Prueffall des Bilddekoders)
+// ===========================================================================
+
+/// Bettet `assets/testbilder/*.png` ein, soweit vorhanden.
+///
+/// FEHLT EINE DATEI, wird der Kernel trotzdem gebaut — mit einem LEEREN
+/// Eintrag und einer deutlichen Meldung, genau wie beim CA-Buendel. Der
+/// Grund ist hier aber ein anderer und schwaecher: Die Bilder sind
+/// REPRODUZIERBAR (`python tools/testbilder_erzeugen.py`), es geht also
+/// nichts verloren, was sich nicht in einer Sekunde wiederherstellen
+/// liesse. Der Bau soll nur nicht an einer Testdatei scheitern.
+///
+/// Ein leerer Eintrag ist dabei KEIN stiller Fehlschlag im Test: `leer.png`
+/// ist ohnehin einer der Testfaelle, und `tests/bilder.rs` prueft die
+/// GUTEN Bilder auf ihren Inhalt — ein leergefallenes `verlauf.png` faellt
+/// dort sofort auf.
+fn testbilder_einbetten(wurzel: &Path, out_dir: &Path) {
+    println!("cargo:rerun-if-changed=assets/testbilder");
+    let ordner = wurzel.join("assets").join("testbilder");
+    let mut gefunden = 0usize;
+    let mut bytes = 0usize;
+    for name in TESTBILDER {
+        let quelle = ordner.join(name);
+        let ziel = out_dir.join(format!("testbild_{name}"));
+        match std::fs::read(&quelle) {
+            Ok(inhalt) => {
+                gefunden += 1;
+                bytes += inhalt.len();
+                std::fs::write(&ziel, inhalt).expect("Testbild nach OUT_DIR kopieren");
+            }
+            Err(_) => {
+                std::fs::write(&ziel, []).expect("leeres Testbild anlegen");
+            }
+        }
+    }
+    if gefunden == TESTBILDER.len() {
+        eprintln!("[build] {gefunden} Testbilder eingebettet ({bytes} Byte).");
+    } else {
+        eprintln!(
+            "[build] NUR {gefunden} von {} Testbildern gefunden ({bytes} Byte). \
+             Erzeugen mit: python tools/testbilder_erzeugen.py",
+            TESTBILDER.len()
+        );
     }
 }

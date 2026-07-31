@@ -625,6 +625,137 @@
   will nur Masse), sondern der `Zeichner` — weil er keine Abhaengigkeit ist,
   sondern eine AUFRUF-KONVENTION.
 
+## BILDER UND SCHRIFTEN — DIE VORAUSSETZUNGEN DES RENDERERS (Serie 8, Teil 3)
+- **BILDER WERDEN IN RING 3 DEKODIERT, IMMER.** `libspeed::bild` ueber
+  `zune-png` + `zune-jpeg` (beide 0.5, no_std) — die Auswertung mit allen
+  Zahlen steht in docs/bild-entscheidung.md. Ein Bilddekoder ist ein PARSER
+  FUER FREMDE DATEN, dieselbe Sorte Code wie `pem.rs` und rustls, und er
+  gehoert aus demselben Grund nicht in den Kernel. **`png` und
+  `jpeg-decoder` bauen NICHT** fuer x86_64-unknown-none (beide brauchen
+  `std`) — das war die Frage des Spikes, und sie ist beantwortet.
+- **BEIDE zune-KISTEN IN VERSION 0.5, und das ist keine Kosmetik:**
+  zune-jpeg 0.4 haengt an zune-core 0.4, zune-png 0.5 an zune-core 0.5.
+  Gemischt liegt derselbe Unterbau ZWEIMAL im Programm, und die
+  `DecoderOptions` des einen sind nicht die des anderen.
+- **DIE DREI SCHRITTE SIND DIE VERTEIDIGUNG, und es sind DREI:**
+  `decode_headers()` (nur der Kopf) -> **GRENZEN PRUEFEN** ->
+  `decode_into()` in einen Puffer, den WIR angelegt haben. Der naive Weg
+  (`decode_raw` in einem Rutsch) ist mit EINER 48-KiB-Datei zu toeten:
+  `assets/testbilder/bombe.png` deklariert 4096x4096, dekodiert zu 50 MiB
+  und ist FORMAL EINWANDFREI — sie scheitert an keiner Plausibilitaet,
+  sondern MUSS an einer Grenze scheitern. Gemessen: 4 ms bis zur Ablehnung.
+- **`Grenzen` IST EIN ARGUMENT UND KEINE KONSTANTE.** Standard: 8192 Kante,
+  **1 Mi Pixel**, 4 MiB Datei. Die Pixelzahl ist eine **HEAP-Grenze, keine
+  Format-Grenze** (12 MiB Prozess-Heap = Datei + RGBA + Fensterpuffer) —
+  ein 1920x1080-Foto wird deshalb ABGELEHNT. In docs/grenzen.md
+  eingetragen, dieselbe Wurzel wie das 4K-Fenster aus Teil 1.
+- **DER TRICK, DER DIE SPITZE HALBIERT:** Der Puffer ist von Anfang an
+  `breite*hoehe*4` gross, der Dekoder schreibt seine 1/2/3/4 Byte je Pixel
+  in den VORDEREN Teil, danach wird VON HINTEN NACH VORN auf RGBA
+  auseinandergezogen (rueckwaerts, weil das Ziel jedes Pixels weiter hinten
+  liegt als seine Quelle). Dekoder-Vec + zweiter Vec waere die doppelte
+  Spitze.
+- **DIE AUSGABE IST IMMER RGBA** (`Vec<u8>`, R/G/B/A je Pixel) — egal ob
+  die Datei Grau, Palette, RGB, RGBA oder YCbCr enthielt. Kein Aufrufer
+  soll Farbraeume kennen muessen. `Vec<u8>` und NICHT `Vec<u32>`, weil
+  letzteres eine Umdeutung des Puffers braeuchte: **`bild.rs` hat NULL
+  unsafe-Bloecke**, wie pem/netz/tls auch. Die Umrechnung ins Fenster-ABI
+  (`0x00RRGGBB`, kein Alpha) passiert an EINER Stelle (`nach_fenster` /
+  `pixel_auf`), ganzzahlig (soft-float!).
+- **ZAHLEN:** PNG-Kette 46 KiB Code, JPEG weitere 83 KiB, ELF `bilder`
+  235 688 B. **Programme, die den Dekoder nicht benutzen, zahlen NICHTS** —
+  `hallo` ist byte-identisch 19 264 B geblieben (LTO + gc-sections). Heap:
+  8,8 KiB (32x32) bis 357 KiB (160x120); im Betrieb mit 720p-Fenster
+  3,0 MiB — **der Fensterpuffer ist der Speicherfresser, nicht das Bild.**
+- **DER PRUEFSTAND: 17 Bilder, davon 12 kaputt bis boesartig**, erzeugt von
+  `tools/testbilder_erzeugen.py` (NICHT eingecheckt als Binaerdateien — wer
+  eine Dekompressionsbombe erzeugt, hat eine LESBARE LISTE VON ANGRIFFEN).
+  `tests/bilder.rs` startet je Datei `bilder --pruefen` als Ring-3-Prozess
+  und liest die Ausgabe — dasselbe Muster wie `angreifer`. Ergebnis: 5
+  dekodiert, 9 abgelehnt, **0 Paniken**, 0 Frames verloren.
+  **DIE SCHAERFSTE ZUSAGE IST „kein Exit-Code 101":** Eine Panik waere ein
+  Programm, das VERSCHWINDET statt „kaputtes Bild" anzuzeigen — und im
+  Renderer ein Bild, das die ganze Seite abschiesst.
+- **GEPRUEFT WIRD PIXELGENAU, nicht nur die Groesse:** `verlauf.png` wird
+  gegen die FORMEL aus dem Erzeuger-Skript verglichen. Ein Dekoder, der RGB
+  als BGR ausliefert, liefert ein Bild in der richtigen Groesse — es ist
+  nur blau statt rot, und kein Groessenvergleich faengt das.
+- **ZWEI BEFUNDE, DIE KEIN FEHLER SIND und im Test so stehen:**
+  `crc_kaputt.png` dekodiert (zune prueft Chunk-Pruefsummen per
+  Voreinstellung nicht — richtig fuer einen Betrachter, und eine Pruefsumme
+  haelt ohnehin keinen Angreifer auf, der sie neu berechnet), und
+  `absurde_masse.png` meldet `kaputter-kopf` statt `zu-gross` (der
+  `max_width`-Riegel der Kiste greift frueher als unsere Pixelzahl —
+  BEIDE zu haben ist kein Uebereifer, die Bombe laeuft durch den einen
+  glatt hindurch).
+- **`starte bilder <datei> &` — das `&` ist Pflicht** (Compositor, siehe
+  Teil 1). Zoom ist ein BRUCH aus zwei ganzen Zahlen (soft-float!), der
+  Punkt unter der Maus bleibt beim Zoomen stehen, durchsichtige Stellen
+  zeigen ein Schachbrett. **Fehler werden IM FENSTER angezeigt**, nicht nur
+  auf der Konsole (Daten-Integritaets-Regel). `--pruefen` ist der
+  fensterlose Testmodus.
+
+## SCHRIFTEN: VIER GROESSEN, ECHTES FETT, GESCHERTES KURSIV (Serie 8, Teil 3)
+- **DER BESTAND, nachgesehen und nicht geraten:** `noto-sans-mono-bitmap`
+  liefert die Rasterhoehen **16, 20, 24, 32** und die Gewichte
+  Light/Regular/**Bold** — und **KEINEN Kursivschnitt**. `size_20` kam in
+  Teil 3 dazu, fuer genau eine Rolle: `<h3>` will 19 px und waere sonst auf
+  Fliesstextgroesse gefallen. Vollstaendig: docs/schrift-groessen.md.
+- **NACH OBEN REICHT ES, NACH UNTEN NICHT.** h1..h4 bekommen 32/24/20/16,
+  also vier unterscheidbare Stufen. **`<small>`, `<h5>` und `<h6>` wollen
+  KLEINER als Fliesstext sein und koennen es nicht** — die kleinste
+  Rasterung IST die Fliesstextgroesse. Sie werden ueber das GEWICHT
+  unterschieden. Bei UI-Skalierung 2.0 dreht es sich um: dann sehen h1 und
+  h2 gleich aus.
+- **DIE LUECKE IST EINE FUNKTION, KEIN KOMMENTAR:**
+  `speedui::text::exakt_moeglich(rolle, basis, schrift)` liefert fuer h3,
+  h5, h6 und small `false`. Eine Einschraenkung, die man ABFRAGEN kann, ist
+  dokumentiert; eine, die man nur bemerkt, wenn die Seite komisch aussieht,
+  ist ein Fehler. Der Shell-Befehl **`schrift`** zeigt die Tabelle gegen den
+  ECHTEN Wirt und die AKTUELLE Skalierung — eine Tabelle in der Doku waere
+  ab der ersten Aenderung eine Behauptung.
+- **FETT IST ECHT, KURSIV IST SIMULIERT — und das steht im Programm.**
+  `Schrift::fett_echt()` -> true, `Schrift::kursiv_echt()` -> **false**.
+  `grafik::Zeichner::text_kursiv` schert je Glyph-ZEILE um ~14 Grad. Ein
+  geschertes `a` bleibt ein gerades `a`, das schief steht; echte
+  Kursivformen gibt es nicht. **Die Breite aendert sich durch die Scherung
+  NICHT** (der Vorschub bleibt `raster.width()`), also misst `text_breite`
+  kursiven Text richtig.
+- **DIE UMLAUT-FALLE, an zwei Stellen getestet:** `text_breite` zaehlt
+  `chars().count()` und NIEMALS `len()`. „Grüße" hat 5 Zeichen und 7 Bytes —
+  wer Bytes zaehlt, rechnet je Umlaut eine Zeichenbreite zu viel und bricht
+  JEDE deutsche Zeile zu frueh um. Geprueft in `speedui::text::tests` (gegen
+  die Attrappe) UND in `ui::wirt::tests` (gegen den echten Kernel-Wirt),
+  inklusive € (3 Bytes) und Emoji (4 Bytes).
+- **`speedui::text::umbrechen` IST DER BEWEIS, dass die Metrik taugt:** Es
+  laeuft ausschliesslich ueber `text_breite_stil` und nie ueber
+  `chars().count()`. Ein zu langes Wort wird HART getrennt (eine lange URL
+  ist der Normalfall, nicht die Ausnahme), und die Schnittstellen liegen
+  IMMER auf Zeichengrenzen (aus `char_indices()`, nie aus einer Rechnung) —
+  deshalb panickt das Schneiden auch bei „Grüße öffnen Türen" nicht.
+- **DIE ERWEITERUNGEN HABEN ALLE EINE VOREINSTELLUNG** (`groessen`,
+  `groesse_waehlen`, `text_breite_stil`, `fett_echt`, `kursiv_echt`,
+  `Leinwand::text_stil`) — bestehende Wirte laufen UNVERAENDERT weiter.
+  `text_stil` ist eine ZEHNTE Leinwand-Operation und keine Aenderung an
+  `text`: Letzteres steht in jedem Widget und in beiden Wirten, und KEIN
+  Widget braucht Kursiv — nur der kommende Renderer. Dasselbe Muster wie
+  die Zeilen-Schnellpfade aus Serie 3.
+- **DIE ATTRAPPE `VierRaster` BILDET DEN ECHTEN BESTAND NACH**, und das ist
+  der Punkt: `TestSchrift` kann JEDE Groesse und haette deshalb gar keine
+  Luecke — sie taugt fuer Layout-Tests und NICHT fuer die Groessenfrage.
+  Zusaetzlich prueft `ui::wirt::tests` dieselbe Abbildung gegen den
+  WIRKLICHEN Wirt: Eine Attrappe beweist nur, dass die Kiste rechnet.
+- **EIN TEST WURDE NACHGEZOGEN, und die Begruendung steht dabei:**
+  `test_raster_hoehe_rundet_ab` erwartete fuer 23 die 16 und erwartet jetzt
+  die 20. Geaendert hat sich der BESTAND (vier statt drei Raster), nicht die
+  REGEL („nach unten runden") — das ist der Unterschied zwischen einem
+  Test, den man zu Recht nachzieht, und einem, den man passend macht.
+- **`raster_hoehe` (abrunden) UND `groesse_waehlen` (naechstliegende) sind
+  ABSICHTLICH verschieden** und beantworten verschiedene Fragen: Der
+  Renderer will die naechstliegende (19 -> 20), die rohe Rasterwahl rundet
+  ab (19 -> 16), damit eine ungeprueft durchgereichte Zahl das Layout nicht
+  sprengt. Bei Gleichstand gewinnt IMMER die kleinere.
+
 ## SERIE-7-ABSCHLUSS (Juli 2026) — Angriffe, Zahlen, Grenzen, Serie-8-Naht
 - **DIE EINE STELLE FUER ALLE LUECKEN: `docs/grenzen.md`.** Keine
   Sperrlisten-Pruefung (OCSP/CRL), manueller Root-Store OHNE Signatur, kein

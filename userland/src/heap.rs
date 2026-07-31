@@ -42,6 +42,12 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use linked_list_allocator::Heap;
 use spin::Mutex;
 
+/// Die Obergrenze, die der KERNEL setzt (`prozess::HEAP_MAX_BYTES`,
+/// docs/syscalls.md §9) — hier noch einmal abgeschrieben, wie jede andere
+/// ABI-Zahl in libspeed auch. Eine ABI ist ein VERTRAG, kein geteilter
+/// Header; wer sie aendert, aendert sie an beiden Stellen bewusst.
+pub const HEAP_MAX_BYTES: usize = 12 * 1024 * 1024;
+
 /// Wie viel beim ERSTEN Mal geholt wird. 64 KiB decken alles ab, was unsere
 /// bisherigen Programme brauchen wuerden; rustls waechst dann von selbst.
 const ERSTE_ANFORDERUNG: usize = 64 * 1024;
@@ -151,6 +157,28 @@ static HOECHSTSTAND: AtomicUsize = AtomicUsize::new(0);
 // Zahl hat die erste Fassung des Spikes verschwiegen (sie meldete 16 Byte,
 // obwohl 128 KiB gemappt waren). Fortgeschrieben wird sie in `alloc`, unter
 // dem Lock, den wir ohnehin schon halten.
+
+/// Passt eine Anforderung von `bytes` ueberhaupt noch in die Obergrenze?
+///
+/// WOZU DAS GUT IST, obwohl `try_reserve` den Fehlschlag ohnehin meldet:
+/// Ohne diese Frage waechst der Heap erst bis an die 12-MiB-Grenze — der
+/// Kernel mappt also mehrere MiB Seiten — und DANN scheitert die
+/// Allokation. Der Speicher ist dem Prozess bis zu seinem Ende zugeteilt
+/// (freigegeben wird nie, siehe oben), ein gescheiterter Versuch kostet
+/// ihn also dauerhaft. Wer vorher fragt, verliert nichts.
+///
+/// Die Antwort ist eine SCHAETZUNG NACH OBEN GUENSTIG: Sie rechnet mit dem
+/// bereits gemappten Heap und sagt nichts ueber Fragmentierung. Ein `true`
+/// heisst „koennte passen", ein `false` heisst „passt sicher nicht" — und
+/// nur die zweite Aussage wird gebraucht.
+pub fn passt_noch(bytes: usize) -> bool {
+    let heap = ALLOCATOR.innen.lock();
+    let belegt = heap.used();
+    match belegt.checked_add(bytes) {
+        Some(summe) => summe <= HEAP_MAX_BYTES,
+        None => false,
+    }
+}
 
 /// Wie viel Heap ist belegt, wie viel gemappt, und was war die SPITZE?
 pub fn heap_stand() -> (usize, usize, usize) {

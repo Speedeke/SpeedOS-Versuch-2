@@ -68,6 +68,7 @@ pub fn alle_befehle() -> Vec<Box<dyn Befehl>> {
         Box::new(Ticks),
         Box::new(MemInfo),
         Box::new(Version),
+        Box::new(Schriftprobe),
         Box::new(Farbtest),
         Box::new(Grafiktest),
         Box::new(Desktop),
@@ -2996,5 +2997,97 @@ impl Befehl for ZufallBefehl {
                 println!("Tipp: Tasten druecken oder die Maus bewegen fuellt den Pool.");
             }
         }
+    }
+}
+
+// ===========================================================================
+// schrift — WAS DER FONT-BESTAND WIRKLICH HERGIBT (Serie 8, Teil 3)
+// ===========================================================================
+
+/// schrift — zeigt die Schriftgroessen und die Rollen-Abbildung.
+///
+/// WOZU EIN BEFEHL DAFUER: Die Abbildung „h1..h6/p/small -> Pixelhoehe"
+/// ist die Grundlage jedes Renderer-Layouts, und sie haengt an zwei
+/// Dingen, die sich AENDERN — den eingebundenen Rastern (Cargo-Features)
+/// und der UI-Skalierung (zur Laufzeit umschaltbar). Eine Tabelle in der
+/// Doku waere ab der ersten Aenderung eine Behauptung; dieser Befehl
+/// fragt den WIRT.
+///
+/// Die Spalte „exakt" ist die wichtigste: Sie zeigt, wo gerundet werden
+/// MUSSTE — und damit genau die Luecke, die docs/schrift-groessen.md
+/// beschreibt.
+struct Schriftprobe;
+
+impl Befehl for Schriftprobe {
+    fn name(&self) -> &'static str {
+        "schrift"
+    }
+    fn beschreibung(&self) -> &'static str {
+        "Zeigt Schriftgroessen, Rollen-Abbildung (h1..small) und Fett/Kursiv"
+    }
+    fn ausfuehren(&self, _argumente: &str, _kontext: &mut ShellKontext, _registry: &[Box<dyn Befehl>]) {
+        use crate::ui::wirt::KernelSchrift;
+        use speedui::text::{self, Rolle};
+        use speedui::Schrift;
+
+        let schrift = KernelSchrift;
+        let basis = crate::theme::metrik().schrift_ui as i32;
+
+        konsole::set_color(Color::Yellow, Color::Black);
+        println!("Schrift-Bestand");
+        konsole::set_color(Color::LightGray, Color::Black);
+
+        print!("  Vorgerasterte Groessen:");
+        for g in schrift.groessen() {
+            print!(" {}", g);
+        }
+        println!(" (Pixel)");
+        println!("  Fliesstext-Groesse:    {} px", basis);
+        println!(
+            "  Fett:   {}",
+            if schrift.fett_echt() {
+                "ECHT (eigener Schnitt FontWeight::Bold)"
+            } else {
+                "simuliert"
+            }
+        );
+        println!(
+            "  Kursiv: {}",
+            if schrift.kursiv_echt() {
+                "ECHT (eigener Schnitt)"
+            } else {
+                "SIMULIERT (Scherung um ~14 Grad, keine Kursiv-Formen)"
+            }
+        );
+        println!();
+
+        konsole::set_color(Color::Yellow, Color::Black);
+        println!("  Rolle   Wunsch  ->  bekommt   exakt  fett");
+        konsole::set_color(Color::LightGray, Color::Black);
+        for rolle in Rolle::ALLE {
+            let wunsch = text::wunschgroesse(rolle, basis);
+            let echt = text::groesse_fuer(rolle, basis, &schrift);
+            let exakt = text::exakt_moeglich(rolle, basis, &schrift);
+            if !exakt {
+                konsole::set_color(Color::LightRed, Color::Black);
+            }
+            println!(
+                "  {:<6}  {:>4}    ->  {:>4}      {:<5}  {}",
+                rolle.name(),
+                wunsch,
+                echt,
+                if exakt { "ja" } else { "NEIN" },
+                if rolle.fett() { "ja" } else { "-" }
+            );
+            if !exakt {
+                konsole::set_color(Color::LightGray, Color::Black);
+            }
+        }
+        println!();
+        // ASCII-Bindestrich statt Gedankenstrich: Die FramebufferKonsole
+        // ist Latin-1, ein '—' wird dort zu '?' (docs/usb-boot.md).
+        println!("  Rot = musste gerundet werden. Unter der Fliesstextgroesse");
+        println!("  gibt es NICHTS - small/h5/h6 koennen nicht kleiner werden.");
+        println!("  Begruendung und Ausweg: docs/schrift-groessen.md");
     }
 }

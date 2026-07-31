@@ -206,9 +206,66 @@ Keine Threads. Kein SMP — SpeedOS läuft auf **einem** Kern.
   Zu dem Zeitpunkt gibt es den Heap für die Puffer noch nicht, und im
   `print!`-Pfad wird bewusst nie alloziert.
 * Kein Markieren und Kopieren mit der Maus im Terminal.
-* Schriftgrößen sind **vorgerastert** (16/24/32) — es gibt keinen
-  Rasterizer, also keine beliebigen Größen.
-* Keine Bild-Dekodierung (PNG/JPEG).
+
+### Schriften: vier Größen, kein Kursivschnitt
+
+*(Serie 8, Teil 3 — vollständig in `docs/schrift-groessen.md`, abfragbar
+mit dem Shell-Befehl `schrift`)*
+
+* Schriftgrößen sind **vorgerastert**: 16, 20, 24, 32. Es gibt keinen
+  Rasterizer, also keine beliebigen Größen — `font-size: 13px` wird auf
+  die nächstliegende vorhandene gerundet.
+* **Unterhalb der Fließtextgröße gibt es NICHTS.** Die kleinste Rasterung
+  ist zugleich die Fließtextgröße, deshalb können `<small>`, `<h5>` und
+  `<h6>` **nicht kleiner werden** als normaler Text; sie werden über das
+  Gewicht (fett) und die Farbe unterschieden. Eine Seite mit Fußnoten
+  sieht falsch aus. `speedui::text::exakt_moeglich` meldet das je Rolle,
+  damit die Einschränkung abfragbar ist statt nur beschrieben.
+* Bei **UI-Skalierung 2.0** (Basis 32) dreht es sich um: Dann ist der
+  Vorrat nach oben erschöpft, `h1` und `h2` sehen gleich aus.
+* **Kursiv ist SIMULIERT.** `noto-sans-mono-bitmap` liefert
+  Light/Regular/Bold und keinen Italic-Schnitt; SpeedOS schert die
+  Glyphen um ~14°. Ein geschertes `a` bleibt ein gerades `a`, das schief
+  steht — echte Kursivformen (einstöckiges `a`, geschwungenes `f`) gibt
+  es nicht. `Schrift::kursiv_echt()` liefert `false`, damit niemand etwas
+  anderes annimmt. **Fett dagegen ist echt.**
+* Nur **Monospace**, nur **Latin-1**. Eine Proportionalschrift gibt es
+  nicht, kyrillische/griechische/CJK-Zeichen werden zu `?`.
+* Der Ausweg für alles davon wäre ein **TrueType-Rasterizer**
+  (`ab_glyph`, `fontdue` — beide `no_std`-tauglich). Eigenes Vorhaben mit
+  eigenen Fragen (Glyph-Cache, Hinting, und woher ein Ring-3-Prozess die
+  Font-Datei bekommt — es gibt weiterhin keinen Schrift-Syscall).
+
+### Bilder: PNG und JPEG, aber nur so groß wie der Prozess-Heap
+
+*(Serie 8, Teil 3 — vollständig in `docs/bild-entscheidung.md`)*
+
+Seit Serie 8, Teil 3 dekodiert SpeedOS **PNG und JPEG** — in Ring 3
+(`libspeed::bild`, `zune-png`/`zune-jpeg`), Ausgabe immer RGBA. Was
+weiterhin fehlt:
+
+* **Ein Bild darf höchstens 1 Mi Pixel haben** (`Grenzen::max_pixel`,
+  z. B. 1024×1024 oder 1280×819). **Das ist eine HEAP-Grenze, keine
+  Format-Grenze:** Ein Prozess hat 12 MiB, und Dateibytes + RGBA-Puffer +
+  Fensterpuffer müssen zusammen hineinpassen. **Ein 1920×1080-Foto wird
+  abgelehnt.** Dieselbe Wurzel wie das 4K-Fenster oben: Das Prozess-Layout
+  ist zu klein, und es zu ändern ist eine ABI-Änderung.
+* **Kein GIF, BMP, WebP.** Sie werden an der Signatur *erkannt* und mit
+  „kann SpeedOS nicht" abgelehnt — das ist eine Auskunft, keine
+  Ratlosigkeit.
+* **Keine Animationen.** Von einem APNG wird das erste Bild gezeigt.
+* **Keine Farbprofile (ICC), kein Gamma.** Ein Bild mit exotischem Profil
+  sieht leicht falsch aus.
+* **Chunk-Prüfsummen werden nicht geprüft** (zunes Voreinstellung). Ein
+  gekipptes Byte ergibt ein leicht falsches Bild statt gar keins — für
+  einen Betrachter die richtige Wahl, und eine Prüfsumme hält ohnehin
+  keinen Angreifer auf, der sie neu berechnet.
+* **Kein Verkleinern beim Dekodieren.** Ein zu großes Bild wird
+  abgelehnt, statt in 1:2/1:4/1:8 dekodiert zu werden (`zune-jpeg` könnte
+  das) — der nächste Hebel, wenn die Heap-Grenze drückt.
+* Bilder **aus dem Netz** sind noch nicht verdrahtet: `libspeed::netz`
+  liefert Bytes, `bild::dekodieren` nimmt Bytes, aber verbunden hat es
+  noch niemand. Das macht der Renderer.
 
 ---
 
@@ -241,5 +298,7 @@ fehlen **mit Absicht**, und sie sollen fehlen:
 | Syscall-ABI | `docs/syscalls.md` |
 | Fenster aus Ring 3, Messzahlen, Umstiegskriterium | `docs/fenster-syscalls.md` |
 | Toolkit-Trennung, Traits, ehrlicher Bericht | `docs/speedui-trennung.md` |
+| Bild-Dekoder: Evaluation, Zahlen, Angriffe | `docs/bild-entscheidung.md` |
+| Schriftgrößen, Textmetrik, Fett/Kursiv | `docs/schrift-groessen.md` |
 | unsafe-Flächen | `docs/unsafe-audit-serie6.md`, `docs/unsafe-audit-serie7.md` |
 | Echte Hardware | `docs/hardware-log.md`, `docs/usb-boot.md` |

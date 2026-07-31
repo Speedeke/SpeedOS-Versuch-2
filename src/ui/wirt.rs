@@ -22,7 +22,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use noto_sans_mono_bitmap::{get_raster_width, FontWeight, RasterHeight};
 use pc_keyboard::{DecodedKey, KeyCode};
-use speedui::{Farbe, Farbrolle, Icon, Leinwand, Mass, Rechteck, Schrift, Taste, Thema, Uhr};
+use speedui::{Farbe, Farbrolle, Icon, Leinwand, Mass, Rechteck, Schrift, Stil, Taste, Thema, Uhr};
 
 // ---------------------------------------------------------------------------
 // (1) THEMA
@@ -85,17 +85,31 @@ impl Thema for KernelThema {
     }
 }
 
+/// Die Schriftgroessen, die der Kernel WIRKLICH hat.
+///
+/// AUFSTEIGEND SORTIERT — `Schrift::groesse_waehlen` verlaesst sich
+/// darauf (bei Gleichstand gewinnt die zuerst gesehene, also die
+/// kleinere). Mehr gibt `noto-sans-mono-bitmap` nicht her; die 20 kam in
+/// Serie 8, Teil 3 dazu, damit `<h3>` nicht auf Fliesstextgroesse faellt.
+/// Was das bedeutet und wo es nicht reicht: docs/schrift-groessen.md.
+pub const SCHRIFT_GROESSEN: &[i32] = &[16, 20, 24, 32];
+
 /// Pixelhoehe zurueck in das vorgerasterte `RasterHeight`.
 ///
-/// Der Kernel hat nur DREI Schriftgroessen (16/24/32, als Cargo-Features
-/// eingebunden) — eine Zahl dazwischen gibt es nicht. Statt zu raten wird
-/// auf die naechstkleinere abgerundet: Zu klein ist haesslich, zu gross
-/// sprengt das Layout.
+/// ABGERUNDET AUF DIE NAECHSTKLEINERE, und das ist bewusst etwas anderes
+/// als `Schrift::groesse_waehlen` (das auf die NAECHSTLIEGENDE rundet):
+/// Hier kommt eine Zahl an, die schon durch `groesse_waehlen` gegangen
+/// sein SOLLTE. Ist sie es nicht — weil ein Aufrufer `Mass::SchriftUi`
+/// direkt durchreicht oder eine Zahl selbst ausgerechnet hat —, ist zu
+/// klein der harmlosere Fehler: Zu gross sprengt das Layout, zu klein
+/// sieht nur mickrig aus.
 fn raster_hoehe(pixel: i32) -> RasterHeight {
     if pixel >= 32 {
         RasterHeight::Size32
     } else if pixel >= 24 {
         RasterHeight::Size24
+    } else if pixel >= 20 {
+        RasterHeight::Size20
     } else {
         RasterHeight::Size16
     }
@@ -115,8 +129,40 @@ impl Schrift for KernelSchrift {
     fn zeichen_breite(&self, groesse: i32) -> i32 {
         get_raster_width(FontWeight::Regular, raster_hoehe(groesse)) as i32
     }
-    fn zeilen_hoehe(&self, _groesse: i32) -> i32 {
-        metrik().zeilen_hoehe
+    fn zeilen_hoehe(&self, groesse: i32) -> i32 {
+        // FRUEHER STAND HIER `metrik().zeilen_hoehe` UND DER PARAMETER WAR
+        // UNBENUTZT — richtig, solange es genau eine Schriftgroesse gab.
+        // Ein Renderer setzt eine 32er-Ueberschrift ueber 16er-Fliesstext;
+        // faende er beide Zeilen gleich hoch, ueberlappten sie sich.
+        //
+        // Die Zeilenhoehe der UI-Groesse kommt weiter aus der Metrik (sie
+        // ist dort abgestimmt, nicht ausgerechnet); jede andere Groesse
+        // bekommt den ueblichen Durchschuss von 25 %.
+        let m = metrik();
+        // `RasterHeight` ist nicht `PartialEq` — verglichen wird deshalb
+        // ueber den Diskriminanten, und der IST die Pixelhoehe
+        // (`Size16 = 16`). Dieselbe Umdeutung benutzt `grafik::text_kursiv`
+        // fuer den Scherungs-Winkel.
+        if raster_hoehe(groesse) as usize == m.schrift_ui as usize {
+            m.zeilen_hoehe
+        } else {
+            let g = self.groesse_waehlen(groesse);
+            g + (g / 4)
+        }
+    }
+    fn groessen(&self) -> &[i32] {
+        SCHRIFT_GROESSEN
+    }
+    /// ECHTES FETT: `FontWeight::Bold` ist ein eigener vorgerasterter
+    /// Schnitt, keine Doppelzeichnung.
+    fn fett_echt(&self) -> bool {
+        true
+    }
+    /// KEIN ECHTES KURSIV: Die Kiste liefert Light/Regular/Bold und sonst
+    /// nichts. Wir SCHEREN (siehe `grafik::Zeichner::text_kursiv`) — und
+    /// sagen es hier, statt es zu verschweigen.
+    fn kursiv_echt(&self) -> bool {
+        false
     }
 }
 
@@ -191,6 +237,26 @@ impl Leinwand for FensterLeinwand<'_> {
     }
     fn icon(&mut self, x: i32, y: i32, icon: &Icon, skalierung: i32) {
         self.zeichner.icon(x, y, icon, skalierung);
+    }
+    /// DER KERNEL KANN SCHEREN — also ueberschreibt er die Voreinstellung
+    /// des Traits (die das Kursiv wegwirft). Wie die Scherung arbeitet und
+    /// warum sie kein echter Kursivschnitt ist: `grafik::Zeichner::
+    /// text_kursiv`.
+    fn text_stil(&mut self, x: i32, y: i32, text: &str, groesse: i32, stil: Stil, farbe: Farbe) {
+        let gewicht = if stil.fett {
+            FontWeight::Bold
+        } else {
+            FontWeight::Regular
+        };
+        self.zeichner.text_kursiv(
+            x,
+            y,
+            text,
+            raster_hoehe(groesse),
+            gewicht,
+            stil.kursiv,
+            rgba(farbe),
+        );
     }
 }
 
@@ -350,12 +416,20 @@ mod tests {
 
     /// Die Schriftgroessen-Umrechnung rundet nach UNTEN — zu gross wuerde
     /// das Layout sprengen.
+    ///
+    /// GEAENDERT IN SERIE 8, TEIL 3, und zwar nicht am Verhalten, sondern
+    /// am BESTAND: Mit `size_20` gibt es eine vierte Stufe, also rundet
+    /// 23 jetzt auf 20 statt auf 16. Die REGEL („nach unten") ist
+    /// dieselbe geblieben — das ist der Unterschied zwischen einem Test,
+    /// der zu Recht nachgezogen wird, und einem, den man passend macht.
     #[test_case]
     fn test_raster_hoehe_rundet_ab() {
         // `RasterHeight` kennt kein `PartialEq` — die Pixelhoehe `val()`
         // ist die Zahl, auf die es ankommt.
         assert_eq!(raster_hoehe(16).val(), 16);
-        assert_eq!(raster_hoehe(23).val(), 16);
+        assert_eq!(raster_hoehe(19).val(), 16);
+        assert_eq!(raster_hoehe(20).val(), 20);
+        assert_eq!(raster_hoehe(23).val(), 20);
         assert_eq!(raster_hoehe(24).val(), 24);
         assert_eq!(raster_hoehe(31).val(), 24);
         assert_eq!(raster_hoehe(32).val(), 32);
@@ -363,5 +437,116 @@ mod tests {
         // Auch Unsinn liefert etwas Gueltiges statt zu panicken:
         assert_eq!(raster_hoehe(0).val(), 16);
         assert_eq!(raster_hoehe(-5).val(), 16);
+    }
+
+    /// Der WIRT meldet genau die Groessen, die als Cargo-Features
+    /// eingebunden sind — und `raster_hoehe` kann jede davon liefern.
+    ///
+    /// DIESER TEST IST DIE KLAMMER zwischen Cargo.toml und Code: Wer eine
+    /// Groesse einbindet und hier nicht eintraegt (oder umgekehrt), faellt
+    /// auf. Ohne ihn koennte `SCHRIFT_GROESSEN` eine Wunschliste sein.
+    #[test_case]
+    fn test_gemeldete_groessen_gibt_es_wirklich() {
+        let s = KernelSchrift;
+        assert_eq!(s.groessen(), &[16, 20, 24, 32]);
+        for &g in s.groessen() {
+            assert_eq!(
+                raster_hoehe(g).val() as i32,
+                g,
+                "Groesse {g} wird gemeldet, aber nicht gerastert"
+            );
+            // Und sie hat eine Zeichenbreite > 0 — die Kiste liefert sie
+            // nur, wenn das Feature wirklich an ist.
+            assert!(s.zeichen_breite(g) > 0, "Groesse {g} hat keine Breite");
+        }
+    }
+
+    /// `groesse_waehlen` (Voreinstellung des Traits) rundet auf die
+    /// NAECHSTLIEGENDE, `raster_hoehe` auf die naechstkleinere. Beide sind
+    /// richtig — fuer verschiedene Fragen.
+    #[test_case]
+    fn test_groesse_waehlen_gegen_raster_hoehe() {
+        let s = KernelSchrift;
+        // 19 liegt naeher an 20: der Renderer bekommt 20 ...
+        assert_eq!(s.groesse_waehlen(19), 20);
+        // ... waehrend die rohe Rasterwahl abrundet.
+        assert_eq!(raster_hoehe(19).val(), 16);
+        // Bei Gleichstand (18) gewinnt die kleinere.
+        assert_eq!(s.groesse_waehlen(18), 16);
+    }
+
+    /// Verschiedene Schriftgroessen brauchen verschiedene Zeilenhoehen —
+    /// sonst ueberlappen eine 32er-Ueberschrift und 16er-Fliesstext.
+    #[test_case]
+    fn test_zeilenhoehe_haengt_an_der_groesse() {
+        let s = KernelSchrift;
+        let klein = s.zeilen_hoehe(16);
+        let gross = s.zeilen_hoehe(32);
+        assert!(
+            gross > klein,
+            "32er-Zeilen ({gross}) muessen hoeher sein als 16er ({klein})"
+        );
+        // Und mindestens so hoch wie die Schrift selbst.
+        assert!(gross >= 32, "eine 32er-Zeile darf nicht unter 32 px sein");
+    }
+
+    /// Die ehrliche Auskunft ueber den Font-Bestand: Fett ist ECHT,
+    /// Kursiv ist es NICHT.
+    ///
+    /// Faellt dieser Test, hat jemand einen Kursivschnitt eingebunden —
+    /// dann gehoert die Scherung in `grafik::text_kursiv` weg und
+    /// docs/schrift-groessen.md nachgezogen.
+    #[test_case]
+    fn test_fett_ist_echt_kursiv_nicht() {
+        let s = KernelSchrift;
+        assert!(s.fett_echt(), "FontWeight::Bold ist eingebunden");
+        assert!(
+            !s.kursiv_echt(),
+            "noto-sans-mono-bitmap hat keinen Kursivschnitt — wer hier \
+             'true' schreibt, luegt ueber den Font-Bestand"
+        );
+    }
+
+    /// Die Rollen-Abbildung auf dem ECHTEN Wirt: h1..h4 unterscheidbar,
+    /// h5/h6/small nicht.
+    ///
+    /// Dieselbe Aussage prueft `speedui::text` gegen die Attrappe
+    /// `VierRaster`. Hier steht sie noch einmal gegen den WIRKLICHEN
+    /// Kernel-Wirt — denn eine Attrappe beweist nur, dass die Kiste
+    /// rechnet, nicht dass der Kernel dieselben Raster hat.
+    #[test_case]
+    fn test_rollen_abbildung_auf_dem_kernel_wirt() {
+        use speedui::text::{self, Rolle};
+        let s = KernelSchrift;
+        assert_eq!(text::groesse_fuer(Rolle::H1, 16, &s), 32);
+        assert_eq!(text::groesse_fuer(Rolle::H2, 16, &s), 24);
+        assert_eq!(text::groesse_fuer(Rolle::H3, 16, &s), 20);
+        assert_eq!(text::groesse_fuer(Rolle::H4, 16, &s), 16);
+        assert_eq!(text::groesse_fuer(Rolle::P, 16, &s), 16);
+        // DIE LUECKE: unter der Fliesstextgroesse gibt es nichts.
+        assert_eq!(text::groesse_fuer(Rolle::H5, 16, &s), 16);
+        assert_eq!(text::groesse_fuer(Rolle::H6, 16, &s), 16);
+        assert_eq!(text::groesse_fuer(Rolle::Klein, 16, &s), 16);
+        assert!(!text::exakt_moeglich(Rolle::Klein, 16, &s));
+    }
+
+    /// Die Textmetrik des ECHTEN Wirts zaehlt ZEICHEN, nicht Bytes.
+    ///
+    /// `KernelSchrift` erbt `text_breite` vom Trait, misst also ueber
+    /// `chars().count()`. Der Test steht hier trotzdem: Wenn jemand die
+    /// Methode spaeter ueberschreibt (Proportionalschrift!), soll der
+    /// Umlaut-Fall sofort auffallen — hier wie in speedui::text.
+    #[test_case]
+    fn test_textbreite_mit_umlauten_auf_dem_kernel_wirt() {
+        let s = KernelSchrift;
+        let z = s.zeichen_breite(16);
+        assert!(z > 0);
+        assert_eq!(s.text_breite("", 16), 0);
+        assert_eq!(s.text_breite("abc", 16), 3 * z);
+        // 5 Zeichen, 7 Bytes.
+        assert_eq!(s.text_breite("Grüße", 16), 5 * z);
+        assert_eq!(s.text_breite("äöüÄÖÜß", 16), 7 * z);
+        // Und die Breite waechst mit der Groesse.
+        assert!(s.zeichen_breite(32) > s.zeichen_breite(16));
     }
 }

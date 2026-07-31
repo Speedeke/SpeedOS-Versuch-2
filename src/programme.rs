@@ -117,6 +117,11 @@ pub static PROGRAMME: &[Programm] = &[
         elf: include_bytes!(concat!(env!("OUT_DIR"), "/uidemo")),
     },
     Programm {
+        name: "bilder",
+        beschreibung: "bilder <datei.png|.jpg> — Bildbetrachter in Ring 3 (mit & starten!)",
+        elf: include_bytes!(concat!(env!("OUT_DIR"), "/bilder")),
+    },
+    Programm {
         name: "elternprobe",
         beschreibung: "elternprobe [ms] — startet ein Kind und wartet auf es (Ring 3)",
         elf: include_bytes!(concat!(env!("OUT_DIR"), "/elternprobe")),
@@ -221,6 +226,7 @@ pub fn nach_mount_wechsel() -> usize {
     );
     let geschrieben = installieren();
     ca_buendel_installieren();
+    testbilder_installieren();
     geschrieben
 }
 
@@ -427,11 +433,11 @@ mod tests {
     /// userland-Crate nicht — und zwar BEVOR jemand versucht, sie zu starten.
     #[test_case]
     fn test_eingebettete_programme_sind_gueltig() {
-        // Vierzehn seit Serie 8, Teil 2 (`uidemo` kam dazu). Die Zahl ist
+        // Fuenfzehn seit Serie 8, Teil 3 (`bilder` kam dazu). Die Zahl ist
         // Absicht: Wer ein Programm ergaenzt, muss es an DREI Stellen tun
         // (userland/Cargo.toml, build.rs, PROGRAMME) — dieser Test faengt
         // die vergessene dritte.
-        assert_eq!(PROGRAMME.len(), 14, "es sollen vierzehn Programme mitkommen");
+        assert_eq!(PROGRAMME.len(), 15, "es sollen fuenfzehn Programme mitkommen");
         for programm in PROGRAMME {
             // Mit SPEEDOS_OHNE_USERLAND=1 gebaut? Dann gibt es nichts zu
             // pruefen — aber das ist der Notfall-Pfad, nicht der Normalfall.
@@ -536,3 +542,148 @@ mod tests {
     }
 }
 
+
+// ===========================================================================
+// DIE TESTBILDER (Serie 8, Teil 3)
+// ===========================================================================
+//
+// Denselben Weg wie die Programme und das CA-Buendel, aus demselben Grund
+// (kein Host-Werkzeug fuer SpeedFS). Sie landen unter /platte/bilder und
+// sind danach gewoehnliche Dateien:
+//
+//     starte bilder /platte/bilder/verlauf.png &
+//
+// WARUM DIE KAPUTTEN MITKOMMEN: Sie sind der eigentliche Testfall. Ein
+// Dekoder, der nur gute Bilder gesehen hat, ist ungeprueft — und
+// `tests/bilder.rs` braucht sie AUF DEM DATEISYSTEM, weil es den ganzen Weg
+// prueft (Datei lesen, dekodieren, ablehnen) und nicht nur eine Funktion.
+//
+// Die Namen stehen hier ein zweites Mal (nach build.rs). Das ist dieselbe
+// bewusste Doppelung wie bei den Programmen: `include_bytes!` braucht einen
+// literalen Pfad, eine Schleife gibt es dafuer nicht.
+
+/// Ein eingebettetes Testbild.
+pub struct Testbild {
+    pub name: &'static str,
+    pub daten: &'static [u8],
+    /// Was der Dekoder damit tun MUSS — die Spalte aus
+    /// tools/testbilder_erzeugen.py, hier als Typ statt als Kommentar.
+    pub erwartung: Erwartung,
+}
+
+/// Was ein Testbild beweisen soll.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Erwartung {
+    /// Muss dekodieren.
+    Gut,
+    /// MUSS abgelehnt werden — mit einem Fehler, nicht mit einer Panik.
+    Abgelehnt,
+    /// Darf beides, solange es weder abstuerzt noch haengt.
+    Egal,
+}
+
+macro_rules! testbild {
+    ($name:literal, $erwartung:expr) => {
+        Testbild {
+            name: $name,
+            daten: include_bytes!(concat!(env!("OUT_DIR"), "/testbild_", $name)),
+            erwartung: $erwartung,
+        }
+    };
+}
+
+pub static TESTBILDER: &[Testbild] = &[
+    testbild!("verlauf.png", Erwartung::Gut),
+    testbild!("gross.png", Erwartung::Gut),
+    testbild!("rgba.png", Erwartung::Gut),
+    testbild!("grau.png", Erwartung::Gut),
+    testbild!("palette.png", Erwartung::Gut),
+    testbild!("abgeschnitten.png", Erwartung::Abgelehnt),
+    testbild!("ohne_iend.png", Erwartung::Egal),
+    testbild!("crc_kaputt.png", Erwartung::Egal),
+    testbild!("falsche_signatur.png", Erwartung::Abgelehnt),
+    testbild!("absurde_masse.png", Erwartung::Abgelehnt),
+    testbild!("null_masse.png", Erwartung::Abgelehnt),
+    testbild!("bombe.png", Erwartung::Abgelehnt),
+    testbild!("riesige_chunk_laenge.png", Erwartung::Abgelehnt),
+    testbild!("viele_chunks.png", Erwartung::Egal),
+    testbild!("leer.png", Erwartung::Abgelehnt),
+    testbild!("nur_signatur.png", Erwartung::Abgelehnt),
+    testbild!("kein_bild.png", Erwartung::Abgelehnt),
+];
+
+const BILDER_PLATTE: &str = "/platte/bilder";
+const BILDER_RAM: &str = "/bilder";
+
+/// Wohin die Testbilder installiert werden.
+pub fn bilder_verzeichnis() -> &'static str {
+    fs::persistenter_pfad(BILDER_PLATTE, BILDER_RAM)
+}
+
+/// Der volle Pfad eines Testbildes — nachgesehen wie `pfad`, aus demselben
+/// Grund (ein Mount mitten in der Sitzung verschiebt den Ort).
+pub fn bild_pfad(name: &str) -> String {
+    let bevorzugt = fs::pfad_anhaengen(bilder_verzeichnis(), name);
+    if datei_vorhanden(&bevorzugt) {
+        return bevorzugt;
+    }
+    let anderes = if bilder_verzeichnis() == BILDER_PLATTE {
+        BILDER_RAM
+    } else {
+        BILDER_PLATTE
+    };
+    let anderer = fs::pfad_anhaengen(anderes, name);
+    if datei_vorhanden(&anderer) {
+        return anderer;
+    }
+    bevorzugt
+}
+
+/// Schreibt die Testbilder aufs Dateisystem. Liefert die Zahl der
+/// geschriebenen Dateien.
+///
+/// `leer.png` ist NULL BYTE GROSS und wird trotzdem geschrieben — es ist
+/// ein Testfall, kein Versehen. Deshalb prueft diese Funktion (anders als
+/// `installieren`) nicht auf `is_empty()`; sie kann es auch nicht, denn ein
+/// nicht gefundenes Testbild sieht genauso aus.
+pub fn testbilder_installieren() -> usize {
+    let ordner = String::from(bilder_verzeichnis());
+    if fs::mit_fs(|dateisystem| dateisystem.node_typ(&ordner)).is_err() {
+        if let Err(fehler) = fs::mit_fs(|dateisystem| dateisystem.mkdir(&ordner)) {
+            crate::serial_println!(
+                "[bilder] Verzeichnis {} liess sich nicht anlegen: {:?}",
+                ordner,
+                fehler
+            );
+            return 0;
+        }
+    }
+
+    let mut geschrieben = 0usize;
+    for bild in TESTBILDER {
+        let ziel = fs::pfad_anhaengen(&ordner, bild.name);
+        if ist_aktuell(&ziel, bild.daten) {
+            continue;
+        }
+        match fs::mit_fs(|dateisystem| dateisystem.schreiben(&ziel, bild.daten)) {
+            Ok(()) => geschrieben += 1,
+            Err(fehler) => crate::serial_println!(
+                "[bilder] {} liess sich NICHT schreiben: {:?}",
+                ziel,
+                fehler
+            ),
+        }
+    }
+
+    if geschrieben > 0 {
+        if let Err(fehler) = fs::sync() {
+            crate::serial_println!("[bilder] sync fehlgeschlagen: {:?}", fehler);
+        }
+        crate::serial_println!(
+            "[bilder] {} Testbild(er) nach {} installiert.",
+            geschrieben,
+            ordner
+        );
+    }
+    geschrieben
+}

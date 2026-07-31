@@ -201,6 +201,9 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // Der Vertrauensanker für TLS (Serie 7, Teil 2). Fehlt er, wird das
     // deutlich gemeldet und SpeedOS läuft ohne — siehe docs/tls-vertrauen.md.
     speed_os::programme::ca_buendel_installieren();
+    // Die Testbilder für den Bilddekoder (Serie 8, Teil 3) — dieselbe
+    // Mechanik, derselbe Grund: kein Host-Werkzeug für SpeedFS.
+    speed_os::programme::testbilder_installieren();
 
     serial_println!("[BOOT] GDT/IDT/PIC, Speicher, Heap, Grafik und RamFs initialisiert.");
 

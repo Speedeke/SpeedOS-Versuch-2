@@ -111,6 +111,26 @@ impl Schrift for DemoSchrift {
     fn zeilen_hoehe(&self, _groesse: i32) -> i32 {
         ZEICHEN_HOEHE + 3
     }
+    /// EINE EINZIGE GROESSE — und das ist die ehrliche Auskunft dieses
+    /// Wirts. Das 5x7-Raster ist genau ein Raster; jede Groessenangabe
+    /// landet darauf.
+    ///
+    /// Genau dafuer gibt es `groessen()`: Ein Renderer, der hier `<h1>`
+    /// setzen will, erfaehrt, dass er es nicht groesser bekommt, statt es
+    /// zu glauben und ein kaputtes Layout zu rechnen.
+    fn groessen(&self) -> &[i32] {
+        &[8]
+    }
+    /// Weder Fett noch Kursiv: `Fenster::text` malt EIN Raster. Beide
+    /// Voreinstellungen des Traits (`false`) waeren richtig — sie stehen
+    /// hier trotzdem ausgeschrieben, weil dieser Wirt die Aufstellung
+    /// dessen ist, was ein Wirt liefern MUSS.
+    fn fett_echt(&self) -> bool {
+        false
+    }
+    fn kursiv_echt(&self) -> bool {
+        false
+    }
 }
 
 // ---------------------------------------------------------------------------

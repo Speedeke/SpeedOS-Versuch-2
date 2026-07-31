@@ -65,6 +65,25 @@ rustls-rustcrypto = { version = "0.0.2-alpha", default-features = false, feature
 # die Implementierung (libspeed::tls, ueber Syscall 12).
 getrandom = { version = "0.2", default-features = false, features = ["custom"] }
 
+# --- BILDER (Serie 8, Teil 3) ---
+# Die Auswertung steht in docs/bild-entscheidung.md. Kurz: zune-png und
+# zune-jpeg sind die EINZIGEN der geprueften Kisten, die gegen
+# x86_64-unknown-none ueberhaupt uebersetzen (`png` und `jpeg-decoder`
+# brauchen std). Beide sind no_std + alloc, beide liefern die drei
+# Operationen, auf denen unsere Verteidigung steht: `decode_headers`,
+# `output_buffer_size` und `decode_into` — Kopf lesen, Grenze pruefen,
+# in UNSEREN Puffer schreiben.
+#
+# BEIDE IN VERSION 0.5, und das ist kein Schoenheitswunsch: zune-jpeg 0.4
+# haengt an zune-core 0.4, zune-png 0.5 an zune-core 0.5. Gemischt liege
+# derselbe Unterbau ZWEIMAL im Programm, und die `DecoderOptions` des einen
+# waeren nicht die des anderen (der Compiler sagt es einem, aber erst spaet).
+zune-png = { version = "0.5", default-features = false }
+zune-jpeg = { version = "0.5", default-features = false }
+# Der gemeinsame Unterbau beider — wir brauchen ihn direkt fuer
+# `DecoderOptions` (die Grenzen!), `ZCursor` und `ColorSpace`.
+zune-core = { version = "0.5", default-features = false }
+
 [lib]
 name = "libspeed"
 path = "src/lib.rs"
@@ -148,6 +167,12 @@ path = "src/bin/fenstertest.rs"
 [[bin]]
 name = "uidemo"
 path = "src/bin/uidemo.rs"
+
+# DER BEWEIS DER BILD-KETTE (Serie 8, Teil 3): PNG/JPEG von der Platte,
+# dekodiert in Ring 3, angezeigt im eigenen Fenster, zoombar.
+[[bin]]
+name = "bilder"
+path = "src/bin/bilder.rs"
 
 # panic = "abort" ist Pflicht: Abwickeln (unwinding) bräuchte eine
 # Personality-Funktion und Landing Pads — beides gibt es ohne std nicht.

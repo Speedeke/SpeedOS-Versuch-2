@@ -121,6 +121,7 @@ pub const STAT_BYTES: usize = 32;
 
 /// Ein eigenes FENSTER aus Ring 3 (Serie 8, Teil 1) — Pixelpuffer,
 /// Ereignisschleife, Titel. Die Naht, auf der der Browser aufsetzt.
+pub mod bild;
 pub mod fenster;
 pub mod heap;
 /// Die wiederverwendbare Abruf-Schicht (Serie 7, Teil 5): „hol mir diese

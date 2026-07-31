@@ -391,7 +391,55 @@ impl<'a, F: Zeichenflaeche> Zeichner<'a, F> {
         gewicht: FontWeight,
         farbe: Rgba,
     ) {
+        self.text_kursiv(x, y, text, groesse, gewicht, false, farbe);
+    }
+
+    /// Text, wahlweise SCHRÄG GESTELLT.
+    ///
+    /// =====================================================================
+    /// KURSIV IST HIER SIMULIERT, UND ZWAR ZUGEGEBENERMASSEN
+    ///
+    /// `noto-sans-mono-bitmap` liefert die Gewichte Light, Regular und Bold
+    /// — und KEINEN Kursivschnitt (nachgesehen in ihrer Cargo.toml, nicht
+    /// vermutet). Es gibt also nichts, was man laden könnte; entweder man
+    /// verzichtet auf `<i>`, oder man schert.
+    ///
+    /// Geschert wird pro Glyph-ZEILE: Je weiter oben eine Zeile liegt,
+    /// desto weiter rückt sie nach rechts. Der Faktor ist 1/4 (etwa 14°) —
+    /// dieselbe Größenordnung wie ein echter Italic-Winkel und flach genug,
+    /// dass benachbarte Zeichen sich nicht ineinanderschieben.
+    ///
+    /// WAS DAS NICHT IST: ein Kursivschnitt. Ein echter hat ANDERE
+    /// BUCHSTABENFORMEN (das einstöckige `a`, das geschwungene `f`); ein
+    /// geschertes `a` bleibt ein gerades `a`, das schief steht. Für einen
+    /// Renderer, der `<i>` vom Fließtext unterscheidbar machen soll, reicht
+    /// es — und `speedui::Schrift::kursiv_echt()` meldet ehrlich `false`,
+    /// damit niemand etwas anderes annimmt.
+    ///
+    /// DIE BREITE ÄNDERT SICH NICHT. Das ist Absicht: Der Vorschub bleibt
+    /// `raster.width()`, also misst `text_breite` kursiven Text richtig.
+    /// Nur das letzte Zeichen ragt oben um bis zu `hoehe/4` Pixel nach
+    /// rechts heraus — beim Clipping abgeschnitten, nie über den Puffer
+    /// hinaus (`pixel` klemmt).
+    ///
+    /// Acht Argumente sind eins mehr, als clippy mag. Ein Struct daraus zu
+    /// machen wäre hier keine Verbesserung: Es sind zwei Koordinaten, ein
+    /// Text und vier unabhängige Darstellungs-Eigenschaften, und jede
+    /// Aufrufstelle setzt sie einzeln. Die einzige Aufrufstelle mit allen
+    /// acht ist `ui::wirt`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn text_kursiv(
+        &mut self,
+        x: i32,
+        y: i32,
+        text: &str,
+        groesse: RasterHeight,
+        gewicht: FontWeight,
+        kursiv: bool,
+        farbe: Rgba,
+    ) {
         let mut cx = x;
+        let hoehe = groesse as usize as i32;
         for zeichen in text.chars() {
             let raster = match get_raster(zeichen, gewicht, groesse)
                 .or_else(|| get_raster('?', gewicht, groesse))
@@ -400,6 +448,13 @@ impl<'a, F: Zeichenflaeche> Zeichner<'a, F> {
                 None => continue,
             };
             for (dy, zeile) in raster.raster().iter().enumerate() {
+                // Die Scherung: oben am weitesten nach rechts, unten gar
+                // nicht. `hoehe - 1 - dy` ist der Abstand zur Grundlinie.
+                let schub = if kursiv {
+                    (hoehe - 1 - dy as i32).max(0) / 4
+                } else {
+                    0
+                };
                 for (dx, &intensitaet) in zeile.iter().enumerate() {
                     if intensitaet == 0 {
                         continue;
@@ -407,7 +462,7 @@ impl<'a, F: Zeichenflaeche> Zeichner<'a, F> {
                     // Glyph-Intensität und Farb-Alpha kombinieren:
                     let a = (intensitaet as u16 * farbe.a as u16 / 255) as u8;
                     self.pixel(
-                        cx + dx as i32,
+                        cx + dx as i32 + schub,
                         y + dy as i32,
                         Rgba::mit_alpha(farbe.r, farbe.g, farbe.b, a),
                     );

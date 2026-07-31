@@ -1,0 +1,27 @@
+# .gitattributes — wo Git die Finger von den Bytes lassen muss
+#
+# ===========================================================================
+# DIE TESTBILDER SIND BYTE-GENAU, AUCH DIE, DIE WIE TEXT AUSSEHEN
+#
+# `assets/testbilder/` enthaelt Pruefdateien fuer den Bilddekoder
+# (tools/testbilder_erzeugen.py, docs/bild-entscheidung.md). Sie sind
+# ABSICHTLICH kaputt, und ihre Byte-Groesse ist Teil des Testfalls:
+# `tests/bilder.rs` vergleicht sie gegen die eingebettete Fassung.
+#
+# Git erkennt die meisten davon als binaer und laesst sie in Ruhe. NICHT
+# ABER `kein_bild.png` — das ist eine Textdatei (genau das ist sein
+# Testfall: "eine Datei, die gar kein Bild ist"). Ohne diese Regel
+# tauschte Git auf Windows beim Auschecken LF gegen CRLF, die Datei waere
+# 8 Byte groesser als beim Einchecken, und der Groessenvergleich schluege
+# fehl — auf jedem Rechner anders, je nach core.autocrlf.
+#
+# Dasselbe gilt fuer `abgeschnitten.png` und `crc_kaputt.png`: Bei
+# absichtlich beschaedigten Dateien kann Gits Binaer-Erkennung danebenliegen,
+# und eine Datei, deren Kaputtheit sich beim Klonen aendert, ist als
+# Testfall wertlos.
+assets/testbilder/** binary
+
+# Das CA-Buendel ist PEM (also Text), aber sein SHA-256 steht in
+# assets/ca-bundle.herkunft.txt und wird dagegen geprueft. Eine
+# Zeilenende-Umwandlung wuerde die Pruefsumme brechen.
+assets/ca-bundle.pem -text
