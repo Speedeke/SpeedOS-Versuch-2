@@ -1,0 +1,51 @@
+Herkunft der Testseiten
+=======================
+
+Diese Dateien sind ECHTE, HERUNTERGELADENE Webseiten. Sie sind Testdaten
+fuer `speedhtml` (Tokenizer + DOM) und zugleich die Pruefseiten aus
+docs/browser-v1.md Abschnitt 4.
+
+WARUM SIE IM REPOSITORY LIEGEN und nicht beim Testen geholt werden:
+Eine Testsuite darf nicht von fremden Servern abhaengen (dieselbe
+Methodik wie bei den Netz-Tests: das harte Gate liegt auf dem, was wir
+kontrollieren). Ausserdem aendern sich echte Seiten — ein Test, dessen
+Eingabe sich unter der Hand aendert, ist kein Test.
+
+GEHOLT VON HAND mit tools/testseiten_holen.ps1, nicht vom build.rs.
+Dasselbe Prinzip wie beim CA-Buendel (docs/tls-vertrauen.md): Was von
+aussen ins Repository kommt, kommt bewusst und mit Datum.
+
+WAS SIE NICHT SIND: Teil des SpeedOS-Images. Sie werden ausschliesslich
+von den HOST-Tests der Kiste `speedhtml` per `include_str!` gelesen und
+landen nie im Kernel.
+
+URHEBERRECHT: Die Inhalte gehoeren ihren jeweiligen Urhebern. Sie liegen
+hier unveraendert und ausschliesslich als Testeingabe fuer einen Parser.
+Der Wikipedia-Artikel steht unter CC BY-SA 4.0.
+
+Abgerufen am: 2026-07-31
+
+
+cern-theproject.html
+  Quelle: http://info.cern.ch/hypertext/WWW/TheProject.html
+  Groesse: 2217 Byte
+  SHA-256: d78ac003f36a0ed898bcda19b10daaf5a928a250014fbb4a1daa823ef4e6b71b
+  Zweck:  Die erste Webseite der Welt (1991). Pruefseite A: reines HTML, kein CSS,
+  kein JavaScript - und nach heutigen Massstaeben kaputt (nicht geschlossene
+  <P>, <DT>/<DD> ohne Endtags, Grossschreibung, Attribute ohne
+  Anfuehrungszeichen). Der ehrlichste Massstab fuer einen Parser.
+
+wikipedia-betriebssystem.html
+  Quelle: https://de.wikipedia.org/wiki/Betriebssystem
+  Groesse: 300157 Byte
+  SHA-256: 460a14b2ea534fbfc0e13e1daf6792edd5a667952711db09446af6ef26dcdb47
+  Zweck:  Pruefseite B: viel Text, Listen, Links, TABELLEN, Bilder, Infobox,
+  <script>, <style>, ein Formular (die Suche). Der Gegenpol zu CERN -
+  alles, was 1991 fehlte.
+
+example.com.html
+  Quelle: https://example.com
+  Groesse: 559 Byte
+  SHA-256: ff67a9d764d6a2367a187734e697f6a53217db9a21c101d410a113ca871a299d
+  Zweck:  Die kleinste denkbare gueltige Seite. Kontrollfall: Wenn selbst die
+  schiefgeht, liegt es nicht an der Seite.

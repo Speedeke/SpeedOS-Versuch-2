@@ -122,6 +122,11 @@ pub static PROGRAMME: &[Programm] = &[
         elf: include_bytes!(concat!(env!("OUT_DIR"), "/bilder")),
     },
     Programm {
+        name: "htmldump",
+        beschreibung: "htmldump <datei|url> [--befund|--text|--tags] — den HTML-Baum anzeigen",
+        elf: include_bytes!(concat!(env!("OUT_DIR"), "/htmldump")),
+    },
+    Programm {
         name: "elternprobe",
         beschreibung: "elternprobe [ms] — startet ein Kind und wartet auf es (Ring 3)",
         elf: include_bytes!(concat!(env!("OUT_DIR"), "/elternprobe")),
@@ -227,6 +232,7 @@ pub fn nach_mount_wechsel() -> usize {
     let geschrieben = installieren();
     ca_buendel_installieren();
     testbilder_installieren();
+    testseite_installieren();
     geschrieben
 }
 
@@ -433,11 +439,11 @@ mod tests {
     /// userland-Crate nicht — und zwar BEVOR jemand versucht, sie zu starten.
     #[test_case]
     fn test_eingebettete_programme_sind_gueltig() {
-        // Fuenfzehn seit Serie 8, Teil 3 (`bilder` kam dazu). Die Zahl ist
+        // Sechzehn seit Serie 8, Teil 4 (`htmldump` kam dazu). Die Zahl ist
         // Absicht: Wer ein Programm ergaenzt, muss es an DREI Stellen tun
         // (userland/Cargo.toml, build.rs, PROGRAMME) — dieser Test faengt
         // die vergessene dritte.
-        assert_eq!(PROGRAMME.len(), 15, "es sollen fuenfzehn Programme mitkommen");
+        assert_eq!(PROGRAMME.len(), 16, "es sollen sechzehn Programme mitkommen");
         for programm in PROGRAMME {
             // Mit SPEEDOS_OHNE_USERLAND=1 gebaut? Dann gibt es nichts zu
             // pruefen — aber das ist der Notfall-Pfad, nicht der Normalfall.
@@ -686,4 +692,72 @@ pub fn testbilder_installieren() -> usize {
         );
     }
     geschrieben
+}
+
+
+// ===========================================================================
+// DIE TESTSEITE (Serie 8, Teil 4)
+// ===========================================================================
+
+/// Die erste Webseite der Welt (1991), eingebettet — damit `htmldump` auch
+/// ohne Netz etwas zu tun hat.
+///
+/// Sie ist zugleich Pruefseite A aus docs/browser-v1.md: reines HTML, kein
+/// CSS, kein JavaScript — und nach heutigen Massstaeben kaputt (nicht
+/// geschlossene `<P>`, Grossschreibung, Attribute ohne Anfuehrungszeichen).
+/// Herkunft und Datum: assets/testseiten/HERKUNFT.txt.
+pub static TESTSEITE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/testseite.html"));
+
+const SEITEN_PLATTE: &str = "/platte/seiten";
+const SEITEN_RAM: &str = "/seiten";
+
+/// Wohin die Testseite installiert wird.
+pub fn seiten_verzeichnis() -> &'static str {
+    fs::persistenter_pfad(SEITEN_PLATTE, SEITEN_RAM)
+}
+
+/// Der Pfad der Testseite — nachgesehen wie `pfad`, aus demselben Grund.
+pub fn testseite_pfad() -> String {
+    let bevorzugt = fs::pfad_anhaengen(seiten_verzeichnis(), "cern.html");
+    if datei_vorhanden(&bevorzugt) {
+        return bevorzugt;
+    }
+    let anderes = if seiten_verzeichnis() == SEITEN_PLATTE { SEITEN_RAM } else { SEITEN_PLATTE };
+    let anderer = fs::pfad_anhaengen(anderes, "cern.html");
+    if datei_vorhanden(&anderer) {
+        return anderer;
+    }
+    bevorzugt
+}
+
+/// Schreibt die Testseite aufs Dateisystem. Liefert `true`, wenn
+/// geschrieben wurde.
+pub fn testseite_installieren() -> bool {
+    if TESTSEITE.is_empty() {
+        return false;
+    }
+    let ordner = String::from(seiten_verzeichnis());
+    if fs::mit_fs(|dateisystem| dateisystem.node_typ(&ordner)).is_err() {
+        if let Err(fehler) = fs::mit_fs(|dateisystem| dateisystem.mkdir(&ordner)) {
+            crate::serial_println!("[seiten] {} liess sich nicht anlegen: {:?}", ordner, fehler);
+            return false;
+        }
+    }
+    let ziel = fs::pfad_anhaengen(&ordner, "cern.html");
+    if ist_aktuell(&ziel, TESTSEITE) {
+        return false;
+    }
+    match fs::mit_fs(|dateisystem| dateisystem.schreiben(&ziel, TESTSEITE)) {
+        Ok(()) => {
+            crate::serial_println!("[seiten] {} geschrieben ({} Byte).", ziel, TESTSEITE.len());
+            if let Err(fehler) = fs::sync() {
+                crate::serial_println!("[seiten] sync fehlgeschlagen: {:?}", fehler);
+            }
+            true
+        }
+        Err(fehler) => {
+            crate::serial_println!("[seiten] {} liess sich NICHT schreiben: {:?}", ziel, fehler);
+            false
+        }
+    }
 }

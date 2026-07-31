@@ -1,0 +1,39 @@
+# speedhtml — HTML zerlegen und zu einem Baum machen. Sonst nichts.
+#
+# DIE DRITTE WIRTSFREIE KISTE nach `speedhttp` (Serie 7, Teil 4) und
+# `speedui` (Serie 8, Teil 2), und aus denselben zwei Gruenden:
+#
+#  (1) HTML zu zerlegen ist REINE BYTE-LOGIK. Sie kennt kein Netz, kein
+#      Fenster, keine Schrift und kein CSS — also soll sie auch nichts
+#      davon einbinden koennen.
+#  (2) Wer keinen Wirt braucht, laesst sich auf dem HOST testen. Die Tests
+#      dieser Kiste laufen in Millisekunden statt in einem QEMU-Start, und
+#      genau deshalb sind es viele.
+#
+# Der Zuschnitt des Browsers, zu dem sie gehoert: docs/browser-v1.md.
+
+[package]
+name = "speedhtml"
+version = "0.1.0"
+edition = "2021"
+description = "HTML5-naher Tokenizer und DOM-Aufbau mit Fehlererholung — no_std"
+
+# ABSICHTLICH LEER, und das wird geprueft (tools/speedhtml_allein_bauen.ps1).
+# Wer hier etwas eintraegt, sollte sich fragen, ob es wirklich noetig ist,
+# um aus Bytes einen Baum zu machen. Die Antwort war bisher immer nein.
+[dependencies]
+
+# DIE TESTS LAUFEN OPTIMIERT — dieselbe Entscheidung wie beim Kernel
+# (siehe dessen Cargo.toml) und aus demselben Grund: Unoptimiert ist der
+# Parser rund hundertmal langsamer, und der Muell-Test wirft ihm 20 MB in
+# fuenf Varianten vor. Optimiert kostet der ganze Durchlauf unter einer
+# Sekunde; unoptimiert waren es Minuten, und ein Test, der Minuten
+# braucht, wird nicht mehr ausgefuehrt.
+#
+# Debug-Infos und Overflow-Pruefungen bleiben an — nur der Codegen wird
+# scharf gestellt.
+[profile.test]
+opt-level = 2
+
+[profile.dev]
+opt-level = 2

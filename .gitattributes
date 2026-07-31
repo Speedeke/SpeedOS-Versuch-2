@@ -25,3 +25,16 @@ assets/testbilder/** binary
 # assets/ca-bundle.herkunft.txt und wird dagegen geprueft. Eine
 # Zeilenende-Umwandlung wuerde die Pruefsumme brechen.
 assets/ca-bundle.pem -text
+
+# ===========================================================================
+# DIE TESTSEITEN SIND ECHTE DOWNLOADS — mit vermerkter Pruefsumme
+#
+# `assets/testseiten/` enthaelt unveraendert heruntergeladene Webseiten;
+# ihre SHA-256 stehen in HERKUNFT.txt. Wuerde Git beim Auschecken LF gegen
+# CRLF tauschen, stimmte die Pruefsumme nicht mehr mit der Datei ueberein —
+# und eine Herkunftsangabe, die nicht nachrechenbar ist, ist keine.
+#
+# Ausserdem sind es TESTEINGABEN fuer einen Parser: Sie sollen exakt so
+# aussehen wie das, was ein Server geliefert hat, und nicht wie das, was
+# das lokale Git daraus gemacht haette.
+assets/testseiten/** -text

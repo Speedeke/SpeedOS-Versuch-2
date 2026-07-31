@@ -204,6 +204,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // Die Testbilder für den Bilddekoder (Serie 8, Teil 3) — dieselbe
     // Mechanik, derselbe Grund: kein Host-Werkzeug für SpeedFS.
     speed_os::programme::testbilder_installieren();
+    // Die erste Webseite der Welt fuer `htmldump` (Serie 8, Teil 4).
+    speed_os::programme::testseite_installieren();
 
     serial_println!("[BOOT] GDT/IDT/PIC, Speicher, Heap, Grafik und RamFs initialisiert.");
 

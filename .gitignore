@@ -9,6 +9,9 @@
 # getrennt bleiben, sonst wartet der innere cargo-Aufruf aus build.rs auf
 # die Dateisperre des äußeren):
 /userland/target
+# ... und die von speedhtml (ebenfalls aus dem Kernel-Workspace
+# ausgeschlossen, weil der Kernel es nicht benutzt — siehe Cargo.toml):
+/speedhtml/target
 
 # Persistente Daten-Platten-Images (Nutzerdaten der VM — kein Build-Artefakt,
 # aber auch nichts fuers Repository; werden vom Runner bei Bedarf neu angelegt):

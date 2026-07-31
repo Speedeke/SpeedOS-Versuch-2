@@ -625,6 +625,102 @@
   will nur Masse), sondern der `Zeichner` — weil er keine Abhaengigkeit ist,
   sondern eine AUFRUF-KONVENTION.
 
+## HTML VERSTEHEN — TOKENIZER UND DOM (Serie 8, Teil 4, speedhtml/)
+- **DER ZUSCHNITT STAND VOR DEM CODE: docs/browser-v1.md.** Was V1 kann,
+  was es AUSDRUECKLICH nicht kann (JavaScript, Flexbox/Grid, Positionierung,
+  Animationen, Video/Audio, Web-Fonts, iframes, Canvas/SVG, Cookies,
+  Formulare ABSENDEN), und — das Wichtigste — die **MESSBARE ZIELMARKE mit
+  zehn einzeln pruefbaren Kriterien und einer REISSLEINE**: Erfuellt
+  Pruefseite A (`info.cern.ch`, die erste Webseite der Welt, kein CSS) die
+  Kriterien 1-7 nicht, wird nicht an Wikipedia weitergebastelt. Dieselbe
+  Methodik wie bei der TCP-Reissleine; Kriterien werden nachtraeglich NICHT
+  verschoben.
+- **`speedhtml` IST DIE DRITTE WIRTSFREIE KISTE** (nach speedhttp und
+  speedui), leerer `[dependencies]`-Block, geprueft von
+  `tools/speedhtml_allein_bauen.ps1`. **SIE IST KEIN WORKSPACE-MITGLIED**
+  (der Kernel benutzt sie nicht, nur `userland/htmldump` und der kommende
+  Browser) — ein `cargo build` im Wurzelverzeichnis prueft sie also NICHT
+  mit, das Skript ist die einzige Stelle, an der ihr Bare-Metal-Bau geprueft
+  wird.
+- **DIE STRUKTUR DER HTML5-ZUSTANDSMASCHINE, nicht der Umfang.** Rund
+  zwanzig der ueber achtzig Zustaende. Der Grund fuer das Vorbild: Sie ist
+  RUECKWIRKEND aufgeschrieben worden, um zu beschreiben, was Browser mit
+  KAPUTTEM HTML tun — sie hat fuer jeden unmoeglichen Zustand einen
+  definierten Ausgang, und keiner heisst „Fehler".
+- **DIE EINE ZUSAGE: JEDE BYTEFOLGE ERGIBT EINEN BAUM.** `parsen` hat kein
+  `Result` — es gibt keinen Fehlerfall. Kaputtes HTML ist der Normalfall im
+  Web; ein Parser, der aufgibt, zeigt nie eine Seite an.
+- **WAS ZURECHTGEBOGEN WURDE, WIRD GEZAEHLT (`dom::Befund`).** Ohne
+  Buchhaltung waere die Fehlererholung eine Blackbox, und bei jeder schiefen
+  Seite bliebe offen, ob das Dokument kaputt war oder der Parser. `htmldump`
+  gibt die Zahlen aus, die Tests pruefen sie — „hat er den `<p>` implizit
+  geschlossen?" ist damit eine Frage an eine ZAHL. Gemessen an der
+  CERN-Seite: 122 Knoten, 18 implizit geschlossen, 1 unerwartetes Endtag,
+  2 Ebenen mitgeschlossen.
+- **DIE ZWEI ROHTEXT-ZUSTAENDE SIND DIE WICHTIGSTEN.** In `<script>` steht
+  `if (a < b)`. Ein Tokenizer ohne RohText-Zustand findet dort einen
+  Tag-Anfang und verschluckt den Rest der Seite — das ist kein Randfall,
+  sondern das erste, woran ein selbstgebauter Parser stirbt. UNTERSCHIEDEN
+  WIRD: `script`/`style` = RohText (KEINE Referenzen, dort ist `&amp;`
+  Programmtext), `title`/`textarea` = RcData (MIT Referenzen).
+- **ARENA-BAUM (`Vec<Knoten>` + `KnotenId`), KEIN `Rc<RefCell<..>>`:** Der
+  naheliegende Rust-Baum haette drei Nachteile, die hier alle wehtun —
+  `Weak::upgrade` bei jedem Schritt nach oben (ein Layout laeuft dauernd
+  nach oben), `RefCell` verschiebt Aliasing-Fehler in die LAUFZEIT (ein
+  `already borrowed` waere eine Panik, und die sind verboten), und
+  Referenzzaehler kosten Speicher je Knoten. Kein Zyklus moeglich, kein
+  unsafe, alles in EINEM Block.
+- **GRENZEN WIE BEIM BILDDEKODER:** 200 000 Knoten, Tiefe 100, 1 MiB je
+  Textknoten, 256 Attribute je Tag. Ueberschritten wird ABGESCHNITTEN
+  (`Befund::abgeschnitten`), nicht abgelehnt — ein halbes Dokument ist
+  lesbar, ein Fehler zeigt nichts. **DIE TIEFENGRENZE SCHUETZT NICHT DEN
+  PARSER, sondern alles, was den Baum danach REKURSIV durchlaeuft** — der
+  User-Stack ist 64 KiB.
+- **DER FEHLER, DEN DER MUELL-TEST FAND UND DAS NACHDENKEN NICHT:**
+  `<p>a<b</p>` — ein `<` INNERHALB eines Tags liess den Tokenizer in einer
+  ENDLOSSCHLEIFE laufen (`name_lesen` bricht bei `<` ab, liefert einen
+  leeren Namen und bewegt die Position nicht; der Zustandswechsel fuehrte
+  zurueck an dieselbe Stelle). Daraus wurde die INVARIANTE: **Jeder
+  Durchlauf der Tag-Schleife muss die Position bewegen ODER den Tag
+  beenden.** Regressionswaechter:
+  `test_kleinerzeichen_im_tag_haengt_nicht`.
+- **KEIN IMPLIZITES `<tbody>`, und das ist eine Entscheidung gegen die
+  Browser:** Der Baum bildet ab, was im Dokument STEHT (`table > tr`); das
+  Layout behandelt beide Formen gleich. Ein synthetischer Knoten waere
+  bequem und wuerde `htmldump` zu einer LUEGE machen — man saehe etwas im
+  Baum, das die Seite nie gesagt hat, und bei der Fehlersuche ist das der
+  teuerste Fehler. Browser synthetisieren, weil ihr DOM fuer JavaScript
+  sichtbar ist; wir haben kein JavaScript.
+- **UNBEKANNTE ZEICHENREFERENZEN WERDEN DURCHGELASSEN, NICHT VERSCHLUCKT.**
+  `&foo;` bleibt `&foo;`. Ein Parser, der Unbekanntes wegwirft, macht aus
+  „Tom & Jerry" ein „Tom Jerry". Die Tabelle hat ~120 der 2231 Eintraege
+  (die gaengigen plus den kompletten Latin-1-Block) — der Rest ist im
+  schlimmsten Fall SICHTBAR falsch statt unsichtbar falsch. **MIT
+  WINDOWS-1252-AUSNAHME** (HTML5 §13.2.5.80): `&#151;` ist laut Unicode ein
+  Steuerzeichen und laut jedem Browser ein Gedankenstrich.
+- **`htmldump` GEHOERT IN DIESEN SCHRITT UND NICHT IN EINEN SPAETEREN.**
+  Sobald der Renderer da ist, lautet bei jeder schiefen Seite die erste
+  Frage „Parser oder Layout?". Ein Werkzeug, das man erst baut, wenn man es
+  braucht, baut man unter Druck und deshalb schlecht. `--befund`, `--text`,
+  `--tags`, `--tiefe=N`; grosse Seiten durch `| filter` — der erste
+  Pipe-Nutzer, der nicht selbst dafuer gebaut wurde.
+- **ARBEITSTEILUNG DER TESTS:** 63 Tests auf dem HOST in 0,6 s (Parser-Logik,
+  20 MB Muell in fuenf Varianten, Wikipedia-Artikel, Zeichenreferenzen) und
+  6 in QEMU (`tests/html.rs`: laeuft es bare-metal in Ring 3, durch eine
+  Pipe, ohne Leck?). Die Host-Tests in QEMU zu wiederholen waere
+  Verschwendung — jeder Fall kostete einen QEMU-Start.
+- **DIE TESTS LAUFEN OPTIMIERT** (`[profile.test] opt-level = 2`), dieselbe
+  Entscheidung wie beim Kernel: Unoptimiert ist der Parser rund hundertmal
+  langsamer, und der Muell-Test wirft ihm 20 MB vor. Optimiert 0,6 s,
+  unoptimiert Minuten — und ein Test, der Minuten braucht, wird nicht mehr
+  ausgefuehrt.
+- **ECHTE SEITEN ALS TESTEINGABE** (`assets/testseiten/`, geholt von Hand
+  mit `tools/testseiten_holen.ps1`, Herkunft + SHA-256 in HERKUNFT.txt —
+  dasselbe Prinzip wie beim CA-Buendel). Sie liegen IM Repository, weil eine
+  Testsuite nicht von fremden Servern abhaengen darf UND weil echte Seiten
+  sich aendern. Nur die CERN-Seite (2,2 KiB) wird zusaetzlich ins
+  Kernel-Image eingebettet; die 300 KiB Wikipedia sind reine Host-Testdaten.
+
 ## BILDER UND SCHRIFTEN — DIE VORAUSSETZUNGEN DES RENDERERS (Serie 8, Teil 3)
 - **BILDER WERDEN IN RING 3 DEKODIERT, IMMER.** `libspeed::bild` ueber
   `zune-png` + `zune-jpeg` (beide 0.5, no_std) — die Auswertung mit allen

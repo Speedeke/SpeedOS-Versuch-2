@@ -267,6 +267,33 @@ weiterhin fehlt:
   liefert Bytes, `bild::dekodieren` nimmt Bytes, aber verbunden hat es
   noch niemand. Das macht der Renderer.
 
+### HTML: geparst, aber noch nicht dargestellt
+
+*(Serie 8, Teil 4 — Zuschnitt in `docs/browser-v1.md`)*
+
+SpeedOS **versteht** HTML seit Serie 8, Teil 4 (`speedhtml`, Tokenizer +
+DOM mit Fehlererholung, sichtbar mit `htmldump`) — **zeigen** kann es
+noch nichts. Es gibt kein CSS, kein Layout und keinen Browser; das sind
+die nächsten Schritte. Was am Parser selbst fehlt:
+
+* **Keine Zeichensatz-Erkennung.** Bytes werden als UTF-8 gelesen
+  (`from_utf8_lossy`); eine Seite in Latin-1 oder Windows-1252 bekommt
+  Ersatzzeichen statt Umlauten. Weder `Content-Type: charset=` noch
+  `<meta charset>` werden ausgewertet. Sichtbar falsch, nicht still
+  falsch — aber falsch.
+* **Nur ~120 benannte Zeichenreferenzen** von 2231. Unbekannte werden
+  **durchgelassen** (`&foo;` bleibt stehen), gehen also nicht verloren.
+* **Keine CDATA-Abschnitte**, kein Quirks-Modus, kein
+  `<template>`-Sonderfall, keine SVG-/MathML-Fremdinhalte.
+* **Kein implizites `<tbody>`.** Der Baum bildet ab, was im Dokument
+  steht — ein synthetischer Knoten würde `htmldump` zu einer Lüge machen.
+  Das Layout muss beide Formen behandeln.
+* **Grenzen:** 200 000 Knoten, Tiefe 100, 1 MiB je Textknoten, 256
+  Attribute je Tag. Darüber wird der Baum **abgeschnitten** (nicht
+  abgelehnt) und `Befund::abgeschnitten` gesetzt. Die Tiefengrenze
+  schützt nicht den Parser, sondern alles, was den Baum danach rekursiv
+  durchläuft — der User-Stack ist 64 KiB.
+
 ---
 
 ## 7. Was ausdrücklich KEINE Lücke ist
@@ -300,5 +327,6 @@ fehlen **mit Absicht**, und sie sollen fehlen:
 | Toolkit-Trennung, Traits, ehrlicher Bericht | `docs/speedui-trennung.md` |
 | Bild-Dekoder: Evaluation, Zahlen, Angriffe | `docs/bild-entscheidung.md` |
 | Schriftgrößen, Textmetrik, Fett/Kursiv | `docs/schrift-groessen.md` |
+| Browser-V1: Zuschnitt, Zielmarke, Reißleine | `docs/browser-v1.md` |
 | unsafe-Flächen | `docs/unsafe-audit-serie6.md`, `docs/unsafe-audit-serie7.md` |
 | Echte Hardware | `docs/hardware-log.md`, `docs/usb-boot.md` |

@@ -38,6 +38,12 @@ speedhttp = { path = "../speedhttp" }
 # Leinwand), VERLANGT es als Trait, und `uidemo` liefert es.
 speedui = { path = "../speedui" }
 
+# DER HTML-PARSER (Serie 8, Teil 4) — dieselbe Ueberlegung wie bei
+# `speedhttp` und `speedui`: Verboten ist die Abhaengigkeit vom KERNEL,
+# nicht die von einer wirtsfreien Bibliothek. `speedhtml` hat selbst
+# KEINE Abhaengigkeiten und kennt weder Netz noch Fenster.
+speedhtml = { path = "../speedhtml" }
+
 # Der Heap-Allocator des User-Space (Serie 7, Teil 3) — dieselbe Kiste, die
 # auch der Kernel benutzt (src/allocator.rs). Sie ist no_std und kann
 # `extend`, und genau das braucht ein Heap, der auf Anforderung waechst.
@@ -173,6 +179,13 @@ path = "src/bin/uidemo.rs"
 [[bin]]
 name = "bilder"
 path = "src/bin/bilder.rs"
+
+# DAS WERKZEUG FUER DIE FEHLERSUCHE (Serie 8, Teil 4): den geparsten
+# HTML-Baum eingerueckt ausgeben. Beantwortet bei jeder spaeteren
+# Layout-Merkwuerdigkeit die erste Frage — Parser oder Layout?
+[[bin]]
+name = "htmldump"
+path = "src/bin/htmldump.rs"
 
 # panic = "abort" ist Pflicht: Abwickeln (unwinding) bräuchte eine
 # Personality-Funktion und Landing Pads — beides gibt es ohne std nicht.

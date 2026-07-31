@@ -40,7 +40,7 @@ use std::process::Command;
 const PROGRAMME: &[&str] = &[
     "hallo", "kopiere", "netzhole", "zaehle", "filter", "elternprobe",
     "angreifer", "messung", "zertifikate", "tlsspike", "holes", "news",
-    "fenstertest", "uidemo", "bilder",
+    "fenstertest", "uidemo", "bilder", "htmldump",
 ];
 
 /// Die Testbilder, die mitreisen (erzeugt von tools/testbilder_erzeugen.py).
@@ -72,6 +72,8 @@ fn main() {
     println!("cargo:rerun-if-changed=userland/.cargo/config.toml");
     // Der geteilte HTTP-Parser (Serie 7, Teil 4) haengt an BEIDEN Seiten.
     println!("cargo:rerun-if-changed=speedhttp/src");
+    // Der HTML-Parser (Serie 8, Teil 4) haengt an userland/htmldump.
+    println!("cargo:rerun-if-changed=speedhtml/src");
     // Notausgang, falls die verschachtelte cargo-Ausfuehrung in einer
     // fremden Umgebung Probleme macht: SPEEDOS_OHNE_USERLAND=1 baut den
     // Kernel mit LEEREN Programmen (er bootet dann ohne /platte/programme).
@@ -82,6 +84,9 @@ fn main() {
     ca_buendel_einbetten(&wurzel, &out_dir);
     // Serie 8, Teil 3: die Testbilder fuer den Bilddekoder.
     testbilder_einbetten(&wurzel, &out_dir);
+    // Serie 8, Teil 4: die erste Webseite der Welt, damit `htmldump` auch
+    // OHNE Netz etwas zu tun hat.
+    testseite_einbetten(&wurzel, &out_dir);
 
     let ueberspringen = std::env::var("SPEEDOS_OHNE_USERLAND")
         .map(|wert| wert == "1")
@@ -306,5 +311,39 @@ fn testbilder_einbetten(wurzel: &Path, out_dir: &Path) {
              Erzeugen mit: python tools/testbilder_erzeugen.py",
             TESTBILDER.len()
         );
+    }
+}
+
+
+// ===========================================================================
+// DIE TESTSEITE (Serie 8, Teil 4)
+// ===========================================================================
+
+/// Bettet `assets/testseiten/cern-theproject.html` ein — 2,2 KiB.
+///
+/// WARUM NUR DIESE EINE von den dreien: Die anderen beiden (Wikipedia,
+/// example.com) werden ausschliesslich von den HOST-Tests der Kiste
+/// `speedhtml` gelesen und muessen deshalb nicht ins Image. Diese hier
+/// soll IN SpeedOS liegen, damit `starte htmldump /platte/seiten/cern.html`
+/// ohne Netz funktioniert — und weil sie die Pruefseite A aus
+/// docs/browser-v1.md ist.
+///
+/// 300 KiB Wikipedia mitzuschleppen waere fuer denselben Zweck unnoetig;
+/// wer sie in SpeedOS braucht, holt sie mit `holes`.
+fn testseite_einbetten(wurzel: &Path, out_dir: &Path) {
+    println!("cargo:rerun-if-changed=assets/testseiten/cern-theproject.html");
+    let quelle = wurzel.join("assets").join("testseiten").join("cern-theproject.html");
+    let ziel = out_dir.join("testseite.html");
+    match std::fs::read(&quelle) {
+        Ok(inhalt) => {
+            eprintln!("[build] Testseite eingebettet ({} Byte).", inhalt.len());
+            std::fs::write(&ziel, inhalt).expect("Testseite nach OUT_DIR kopieren");
+        }
+        Err(_) => {
+            eprintln!(
+                "[build] KEINE Testseite unter assets/testseiten/ — `htmldump`                  braucht dann eine eigene Datei oder eine URL. Holen mit:                  tools/testseiten_holen.ps1"
+            );
+            std::fs::write(&ziel, []).expect("leere Testseite anlegen");
+        }
     }
 }
