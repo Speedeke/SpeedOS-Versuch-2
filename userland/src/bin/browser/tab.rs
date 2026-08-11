@@ -22,6 +22,7 @@
 
 use crate::ort::Ort;
 use crate::seiten;
+use crate::stil;
 use alloc::string::String;
 use alloc::vec::Vec;
 use libspeed::leinwand::RasterMetrik;
@@ -148,6 +149,8 @@ pub struct Tab {
     pub sicht: Sicht,
     pub bilder: BildSammlung,
     pub zustand: TabZustand,
+    /// Was beim Beschaffen der Stylesheets herauskam (Zahlen, Meldung).
+    pub stil_befund: stil::StilBefund,
     /// Kurztext des letzten Fehlers (fuer die Statuszeile).
     pub fehler: Option<String>,
     pub unsicher: bool,
@@ -179,6 +182,7 @@ impl Tab {
             sicht: Sicht::neu(Rechteck::neu(0, 0, 100, 100), 0),
             bilder: BildSammlung::default(),
             zustand: TabZustand::Leer,
+            stil_befund: stil::StilBefund::default(),
             fehler: None,
             unsicher: false,
             verlauf: Vec::new(),
@@ -193,14 +197,37 @@ impl Tab {
     // INHALT
     // -----------------------------------------------------------------
 
-    /// Neuen Inhalt uebernehmen: parsen, kaskadieren, Titel holen.
+    /// Das Dokument uebernehmen: parsen, Titel holen, alles Alte wegwerfen.
     ///
-    /// Das Layout passiert NICHT hier — es braucht die Fensterbreite, und
-    /// die kennt nur der Aufrufer.
-    pub fn inhalt_setzen(&mut self, bytes: &[u8], ort: Ort, fehler: Option<String>, unsicher: bool) {
+    /// ===================================================================
+    /// WARUM DAS NICHT MEHR IN EINEM SCHRITT GEHT
+    ///
+    /// Bis Serie 8 war „Inhalt setzen" eine Sache: parsen und sofort
+    /// kaskadieren. Seit die Autor-Blaetter aus dem NETZ kommen koennen,
+    /// sind es zwei — und zwar in dieser Reihenfolge und nicht anders:
+    ///
+    ///   1. Parsen. **Erst danach weiss irgendjemand, welche
+    ///      Stylesheets die Seite ueberhaupt will** — die `<link>`-Tags
+    ///      stehen im Dokument.
+    ///   2. Blaetter holen (das kann der Tab nicht: kein Klient, kein
+    ///      Cache — die gehoeren dem Browser) und kaskadieren.
+    ///
+    /// Kaskadiert wird deshalb GENAU EINMAL. Der bequeme Weg waere,
+    /// hier schon mit den `<style>`-Bloecken zu rechnen und nach dem
+    /// Abruf noch einmal — das kostete auf einem Wikipedia-Artikel
+    /// glatte 11 ms fuer ein Ergebnis, das sofort weggeworfen wird.
+    ///
+    /// Das Layout passiert auch hier nicht: Es braucht die Fensterbreite,
+    /// und die kennt nur der Aufrufer.
+    pub fn dokument_setzen(
+        &mut self,
+        bytes: &[u8],
+        ort: Ort,
+        fehler: Option<String>,
+        unsicher: bool,
+    ) {
         let html = String::from_utf8_lossy(bytes);
         self.dokument = speedhtml::parsen(&html);
-        self.stile = kaskadieren(&self.dokument);
         self.titel = titel_von(&self.dokument).unwrap_or_else(|| ort.kurzname());
         self.ort = ort;
         self.fehler = fehler;
@@ -210,11 +237,35 @@ impl Tab {
         } else {
             TabZustand::Fertig
         };
+        self.stile = leerer_stilbaum();
+        self.stil_befund = stil::StilBefund::default();
         self.bilder.leeren();
         self.offene_bilder.clear();
         self.layout_breite = 0;
         self.js_hinweis = false;
         self.sicht.versatz_setzen(0);
+    }
+
+    /// Die beschafften Blaetter kaskadieren.
+    ///
+    /// Die Reihenfolge steckt schon in `Stilquellen` (Standard zuerst,
+    /// dann die Autor-Blaetter in Dokumentreihenfolge) — hier wird sie
+    /// nur noch angewandt. Die Blaetter selbst werden danach
+    /// FALLENGELASSEN; warum, steht bei `stil::StilBefund`.
+    pub fn stile_setzen(&mut self, quellen: stil::Stilquellen) {
+        let standard = speedcss::standard_stylesheet();
+        let blaetter = quellen.kaskaden_blaetter(&standard);
+        self.stile =
+            speedcss::kaskade::berechnen(&self.dokument, &blaetter, speedcss::Zustand::default());
+        self.stil_befund = quellen.befund();
+    }
+
+    /// Der bequeme Weg fuer alles, was NICHT aus dem Netz kommt: parsen
+    /// und mit den `<style>`-Bloecken kaskadieren, ohne einen Abruf.
+    pub fn inhalt_setzen(&mut self, bytes: &[u8], ort: Ort, fehler: Option<String>, unsicher: bool) {
+        self.dokument_setzen(bytes, ort, fehler, unsicher);
+        let quellen = stil::nur_inline(&self.dokument);
+        self.stile_setzen(quellen);
     }
 
     /// Ein fertiges HTML-Dokument einsetzen, das der Browser selbst

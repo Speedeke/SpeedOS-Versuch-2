@@ -37,6 +37,7 @@ mod laden;
 mod merkliste;
 mod ort;
 mod seiten;
+mod stil;
 mod tab;
 
 use alloc::string::String;
@@ -157,9 +158,42 @@ impl Browser {
         let bereich = self.seiten_bereich();
         let breite = self.layout_breite();
         let endgueltig = geladen.ort.clone();
+
+        // ===============================================================
+        // ZWEI SCHRITTE, UND DIE REIHENFOLGE IST ZWINGEND
+        //
+        // Erst parsen — denn welche Stylesheets die Seite will, steht IM
+        // Dokument. Dann holen und kaskadieren. Dazwischen liegt bei
+        // einer fremden Seite echte Netz-Zeit; deshalb bleibt die
+        // Ladeanzeige bis hierher stehen.
+        //
+        // FEHLERSEITEN UND ERZEUGTE SEITEN GEHEN DEN NETZFREIEN WEG: Bei
+        // einem Ladefehler ist die Verbindung gerade nachweislich kaputt,
+        // und unsere eigenen Seiten haben kein `<link>`.
         {
             let tab = &mut self.tabs[self.aktiv];
-            tab.inhalt_setzen(&geladen.bytes, endgueltig.clone(), geladen.fehler, geladen.unsicher);
+            tab.dokument_setzen(
+                &geladen.bytes,
+                endgueltig.clone(),
+                geladen.fehler,
+                geladen.unsicher,
+            );
+        }
+        let hole_stile = self.tabs[self.aktiv].fehler.is_none()
+            && !matches!(endgueltig, Ort::Intern(_));
+        let quellen = if hole_stile {
+            stil::autor_blaetter(
+                &self.tabs[self.aktiv].dokument,
+                &endgueltig,
+                &mut self.klient,
+                &mut self.cache,
+            )
+        } else {
+            stil::nur_inline(&self.tabs[self.aktiv].dokument)
+        };
+        {
+            let tab = &mut self.tabs[self.aktiv];
+            tab.stile_setzen(quellen);
             tab.setzen(breite, bereich);
         }
 
@@ -190,7 +224,10 @@ impl Browser {
 
         self.tabs[self.aktiv].bilder_einsammeln();
         self.chrome.adresse_setzen(&endgueltig.als_text());
-        self.chrome.meldung = None;
+        // EIN BLATT, DAS FEHLT, GEHOERT GESAGT. Ohne diese Meldung sieht
+        // eine Seite mit halbem CSS genauso aus wie eine, die so aussehen
+        // soll — und die Fehlersuche faengt bei null an.
+        self.chrome.meldung = self.tabs[self.aktiv].stil_befund.meldung.clone();
         self.alles_zeichnen();
     }
 
@@ -322,7 +359,13 @@ impl Browser {
             }
         };
 
-        let bytes = laden::nebensache_laden(&bild_ort, &mut self.klient, &mut self.cache);
+        let bytes = laden::nebensache_laden(
+            &bild_ort,
+            &mut self.klient,
+            &mut self.cache,
+            laden::MAX_BILD,
+            laden::FRIST_MS,
+        );
         let daten = bytes.and_then(|b| libspeed::bild::dekodieren(&b).ok()).map(|bild| {
             tab::BildDaten {
                 breite: bild.breite() as i32,
@@ -649,36 +692,37 @@ fn phasenmodus(b: &mut Browser, quelle: &str) {
     }
     let knoten = dokument.anzahl();
 
-    // --- (3) CSS. AUFGETEILT, weil es zwei verschiedene Probleme sind:
-    // Stylesheets PARSEN (Textarbeit, haengt an der CSS-Menge) und
-    // KASKADIEREN (jede Regel gegen jeden Knoten, haengt am Produkt).
-    // Wer nur die Summe kennt, optimiert die falsche Haelfte.
+    // --- (3) CSS. AUFGETEILT, weil es DREI verschiedene Probleme sind:
+    // die externen Blaetter HOLEN (Netz — seit Serie 9, Teil 1 die
+    // dickste Stufe nach dem Dokument selbst), Stylesheets PARSEN
+    // (Textarbeit, haengt an der CSS-Menge) und KASKADIEREN (jede Regel
+    // gegen jeden Knoten, haengt am PRODUKT). Wer nur die Summe kennt,
+    // optimiert die falsche Stufe.
+    //
+    // Das Holen wird EINMAL gemessen und nicht wiederholt: Ab dem zweiten
+    // Durchgang antwortet der Sitzungs-Cache, und dann misst man ihn.
+    let t = libspeed::zeit_jetzt();
+    let quellen = stil::autor_blaetter(&dokument, &ort, &mut b.klient, &mut b.cache);
+    let css_extern_ms = libspeed::zeit_jetzt().saturating_sub(t);
+    let stil_befund = quellen.befund();
+
     let mut css_standard_ms = u64::MAX;
-    let mut css_autor_ms = u64::MAX;
     let mut css_kaskade_ms = u64::MAX;
-    let mut stile = tab::kaskadieren(&dokument);
     let mut regeln_standard = 0usize;
-    let mut regeln_autor = 0usize;
+    let mut stile = tab::kaskadieren(&dokument);
     for _ in 0..RUNDEN {
         let t = libspeed::zeit_jetzt();
         let standard = speedcss::standard_stylesheet();
         css_standard_ms = css_standard_ms.min(libspeed::zeit_jetzt().saturating_sub(t));
-
-        let t = libspeed::zeit_jetzt();
-        let autor = speedcss::autor_stylesheet(&dokument);
-        css_autor_ms = css_autor_ms.min(libspeed::zeit_jetzt().saturating_sub(t));
-
         regeln_standard = standard.regeln.len();
-        regeln_autor = autor.regeln.len();
-        let blaetter: Vec<(&speedcss::Stylesheet, speedcss::Herkunft)> = alloc::vec![
-            (&standard, speedcss::Herkunft::Standard),
-            (&autor, speedcss::Herkunft::Autor),
-        ];
+
+        let blaetter = quellen.kaskaden_blaetter(&standard);
         let t = libspeed::zeit_jetzt();
         stile = speedcss::kaskade::berechnen(&dokument, &blaetter, speedcss::Zustand::default());
         css_kaskade_ms = css_kaskade_ms.min(libspeed::zeit_jetzt().saturating_sub(t));
     }
-    let css_ms = wert(css_standard_ms) + wert(css_autor_ms) + wert(css_kaskade_ms);
+    let regeln_autor = stil_befund.regeln;
+    let css_ms = css_extern_ms + wert(css_standard_ms) + wert(css_kaskade_ms);
 
     // --- (4) LAYOUT ---
     let bereich = b.seiten_bereich();
@@ -726,11 +770,14 @@ fn phasenmodus(b: &mut Browser, quelle: &str) {
     println!("NETZ_MS={}", netz_ms);
     println!("HTML_MS={}", wert(html_ms));
     println!("CSS_MS={}", css_ms);
+    println!("CSS_EXTERN_MS={}", css_extern_ms);
     println!("CSS_STANDARD_MS={}", wert(css_standard_ms));
-    println!("CSS_AUTOR_MS={}", wert(css_autor_ms));
     println!("CSS_KASKADE_MS={}", wert(css_kaskade_ms));
     println!("REGELN_STANDARD={}", regeln_standard);
     println!("REGELN_AUTOR={}", regeln_autor);
+    println!("STIL_EXTERN_GELADEN={}", stil_befund.extern_geladen);
+    println!("STIL_EXTERN_GESCHEITERT={}", stil_befund.extern_gescheitert);
+    println!("STIL_BYTES={}", stil_befund.bytes);
     println!("LAYOUT_MS={}", wert(layout_ms));
     println!("MALEN_MS={}", wert(malen_ms));
     println!("KOPIE_MS={}", wert(kopie_ms));
@@ -864,6 +911,32 @@ fn pruefmodus(b: &Browser) {
         tab.fehler.as_deref().unwrap_or("-")
     );
     println!("JS_HINWEIS={}", if tab.js_hinweis { 1 } else { 0 });
+
+    // DIE STYLESHEET-BILANZ. Sie beantwortet die Frage, die man sonst nur
+    // durch Hinsehen beantworten kann: „Sieht die Seite falsch aus, weil
+    // wir sie falsch setzen — oder weil ihr CSS gar nicht angekommen ist?"
+    let s = &tab.stil_befund;
+    println!("STIL_INLINE={}", s.inline_blaetter);
+    println!("STIL_EXTERN_VERSUCHT={}", s.extern_versucht);
+    println!("STIL_EXTERN_GELADEN={}", s.extern_geladen);
+    println!("STIL_EXTERN_GESCHEITERT={}", s.extern_gescheitert);
+    println!("STIL_EXTERN_UEBERSPRUNGEN={}", s.extern_uebersprungen);
+    println!("STIL_IMPORTE_GELADEN={}", s.importe_geladen);
+    println!("STIL_IMPORTE_IGNORIERT={}", s.importe_ignoriert);
+    println!("STIL_DOPPELT={}", s.doppelt);
+    println!("STIL_BYTES={}", s.bytes);
+    println!("STIL_REGELN={}", s.regeln);
+    println!("STIL_MELDUNG={}", s.meldung.as_deref().unwrap_or("-"));
+    // Wie viele Elemente die Kaskade unsichtbar gemacht hat. DAS ist die
+    // Zahl, an der man den Fix von Serie 9, Teil 1 sieht: Ohne externe
+    // Blaetter ist sie auf fast jeder Seite 0, mit ihnen dreistellig.
+    println!("STIL_VERSTECKT={}", versteckte_elemente(tab));
+    // WAS WIRKLICH DASTEHT. Die Zahl `BEFEHLE` sagt, wie VIEL gezeichnet
+    // wurde; diese Zeile sagt, WAS — und erst damit laesst sich pruefen,
+    // dass etwas WEG ist. „Der Screenreader-Text ist verschwunden" ist
+    // sonst nur mit einem Bildschirmfoto zu belegen.
+    println!("TEXT={}", sichtbarer_text(tab, 400));
+
     println!("VERLAUF={}", tab.verlauf.len());
     println!("LESEZEICHEN={}", b.merkliste.eintraege.len());
     println!("LESEZEICHEN_PFAD={}", b.merkliste.pfad);
@@ -892,6 +965,66 @@ fn pruefmodus(b: &Browser) {
     println!("LINKS={}", gezeigt);
     let (_, _, spitze) = libspeed::heap::heap_stand();
     println!("HEAP_SPITZE={}", spitze);
+}
+
+/// Der sichtbare Text der Seite, aus den ANZEIGE-BEFEHLEN.
+///
+/// ===================================================================
+/// AUS DER ANZEIGELISTE UND NICHT AUS DEM DOKUMENT
+///
+/// `Dokument::text_von` liefert, was im HTML STEHT. Diese Funktion
+/// liefert, was am Ende GEZEICHNET wird — und der Unterschied ist genau
+/// die Wirkung des CSS. Ein `display: none` faellt im Kastenbaum weg,
+/// erzeugt also keinen Textbefehl und taucht hier nicht auf.
+///
+/// Nur deshalb ist „der Screenreader-Text ist verschwunden" eine
+/// pruefbare Aussage statt eines Bildschirmfotos.
+fn sichtbarer_text(tab: &Tab, hoechstens: usize) -> String {
+    let mut aus = String::new();
+    for befehl in &tab.liste.befehle {
+        if let speedlayout::Befehl::Text { text, .. } = befehl {
+            if aus.len() + text.len() + 1 > hoechstens {
+                break;
+            }
+            if !aus.is_empty() {
+                aus.push(' ');
+            }
+            aus.push_str(text);
+        }
+    }
+    // Zeilenumbrueche wuerden die Zeile zerreissen, an der ein Test haengt.
+    aus.replace(['\n', '\r'], " ")
+}
+
+/// Wie viele ELEMENTE die Kaskade auf `display: none` gesetzt hat.
+///
+/// ===================================================================
+/// DIE ZAHL, DIE DEN FIX SICHTBAR MACHT
+///
+/// Gezaehlt werden nur Elemente, deren ELTERNTEIL noch sichtbar ist —
+/// sonst zaehlte ein verstecktes Menue mit hundert Eintraegen als
+/// hundertundeins, und die Zahl saehe je nach Seitenstruktur beliebig
+/// aus. So zaehlt sie WURZELN versteckter Teilbaeume, und das ist die
+/// Groesse, die einen interessiert: „wie viele Bloecke sind aus der
+/// Seite verschwunden?"
+fn versteckte_elemente(tab: &Tab) -> usize {
+    let mut anzahl = 0usize;
+    for (id, knoten) in tab.dokument.alle() {
+        if !knoten.ist_element() {
+            continue;
+        }
+        if tab.stile.stil(id).display != speedcss::Display::Keine {
+            continue;
+        }
+        let eltern_versteckt = knoten
+            .eltern
+            .map(|e| tab.stile.stil(e).display == speedcss::Display::Keine)
+            .unwrap_or(false);
+        if !eltern_versteckt {
+            anzahl += 1;
+        }
+    }
+    anzahl
 }
 
 fn kurzfehler(fehler: ort::OrtFehler) -> &'static str {

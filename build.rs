@@ -341,6 +341,19 @@ fn testbilder_einbetten(wurzel: &Path, out_dir: &Path) {
 ///
 /// example.com bleibt draussen: 559 Byte, die nichts zeigen, was die
 /// CERN-Seite nicht auch zeigt.
+/// Und seit Serie 9, Teil 1 den STYLESHEET-PRUEFSTAND — fuenf kleine,
+/// SELBST GESCHRIEBENE Dateien (zusammen unter 6 KiB).
+///
+/// WARUM LOKAL UND NICHT GEGEN EINEN SERVER: Externe Stylesheets zu
+/// pruefen heisst, Reihenfolge, Grenzen, `@import`-Tiefe und den
+/// Schleifenschutz zu pruefen — lauter Dinge, die man an einer FREMDEN
+/// Seite nicht festnageln kann, weil sie sich aendert. Dasselbe
+/// Testmethodik-Argument wie ueberall seit Serie 5: Das harte Gate liegt
+/// auf dem, was wir kontrollieren; der Realitaets-Bericht ist Bericht.
+///
+/// Der Weg ueber das VFS ist derselbe wie beim CA-Buendel und bei den
+/// Programmen (es gibt kein Host-Werkzeug fuer SpeedFS) — und er traegt
+/// die Dateien durch `cargo run`, `cargo test` UND `cargo image`.
 fn testseite_einbetten(wurzel: &Path, out_dir: &Path) {
     seite_kopieren(wurzel, out_dir, "cern-theproject.html", "testseite.html");
     seite_kopieren(
@@ -349,6 +362,11 @@ fn testseite_einbetten(wurzel: &Path, out_dir: &Path) {
         "wikipedia-betriebssystem.html",
         "grosse_testseite.html",
     );
+    seite_kopieren(wurzel, out_dir, "stiltest.html", "stiltest.html");
+    seite_kopieren(wurzel, out_dir, "stiltest.css", "stiltest.css");
+    seite_kopieren(wurzel, out_dir, "stiltest-basis.css", "stiltest_basis.css");
+    seite_kopieren(wurzel, out_dir, "stiltest-tief.css", "stiltest_tief.css");
+    seite_kopieren(wurzel, out_dir, "stilgrenze.html", "stilgrenze.html");
 }
 
 /// Eine Testseite nach OUT_DIR kopieren — oder eine LEERE anlegen.

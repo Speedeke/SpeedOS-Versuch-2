@@ -1066,3 +1066,270 @@ fn test_tausendstel_text() {
     assert_eq!(tausendstel_text(500), "0.5");
     assert_eq!(tausendstel_text(1_050), "1.05");
 }
+
+// ===========================================================================
+// EXTERNE STYLESHEETS — WAS EIN DOKUMENT BRAUCHT (Serie 9, Teil 1)
+// ===========================================================================
+//
+// Diese Kiste HOLT nichts; sie sagt nur, WAS zu holen waere. Getestet wird
+// deshalb genau das: die Liste und — wichtiger — ihre REIHENFOLGE.
+
+use crate::Blattbedarf;
+
+/// Kurzform: die Bedarfsliste eines HTML-Schnipsels.
+fn bedarf(html: &str) -> Vec<Blattbedarf> {
+    crate::blaetter_einsammeln(&speedhtml::parsen(html))
+}
+
+/// Die externen Verweise daraus, als Text.
+fn externe(html: &str) -> Vec<String> {
+    bedarf(html)
+        .into_iter()
+        .filter_map(|b| match b {
+            Blattbedarf::Extern(href) => Some(href),
+            Blattbedarf::Inline(_) => None,
+        })
+        .collect()
+}
+
+/// **DIE REIHENFOLGE IST DAS EIGENTLICHE ERGEBNIS.**
+///
+/// Ein `<style>` VOR einem `<link>` ist schwaecher, ein `<style>` DANACH
+/// staerker. Wer erst alle externen und dann alle inline einsortiert,
+/// bekommt auf jeder Seite, die beides mischt, eine andere Darstellung
+/// als jeder echte Browser.
+#[test]
+fn test_blaetter_in_dokumentreihenfolge() {
+    let liste = bedarf(
+        "<html><head>\
+         <style>p{color:#ff0000}</style>\
+         <link rel=stylesheet href=\"a.css\">\
+         <style>p{color:#00ff00}</style>\
+         <link rel=stylesheet href=\"b.css\">\
+         </head><body><p>x</p></body></html>",
+    );
+    assert_eq!(liste.len(), 4);
+    assert!(matches!(&liste[0], Blattbedarf::Inline(css) if css.contains("#ff0000")));
+    assert_eq!(liste[1], Blattbedarf::Extern(String::from("a.css")));
+    assert!(matches!(&liste[2], Blattbedarf::Inline(css) if css.contains("#00ff00")));
+    assert_eq!(liste[3], Blattbedarf::Extern(String::from("b.css")));
+}
+
+/// Ein `<link>` im `<body>` zaehlt auch — echte Seiten tun das, und der
+/// Arena-Index bildet die Dokumentreihenfolge ohnehin richtig ab.
+#[test]
+fn test_link_im_body_zaehlt_und_bleibt_hinten() {
+    let liste = bedarf(
+        "<html><head><link rel=stylesheet href=\"kopf.css\"></head>\
+         <body><p>x</p><link rel=stylesheet href=\"rumpf.css\"></body></html>",
+    );
+    assert_eq!(
+        liste,
+        alloc::vec![
+            Blattbedarf::Extern(String::from("kopf.css")),
+            Blattbedarf::Extern(String::from("rumpf.css")),
+        ]
+    );
+}
+
+/// `rel` ist eine LISTE — und `alternate stylesheet` ist ein Angebot,
+/// keine Anweisung.
+#[test]
+fn test_rel_wird_richtig_gefiltert() {
+    assert_eq!(externe("<link rel=stylesheet href=a.css>"), alloc::vec!["a.css"]);
+    // Gross-/Kleinschreibung ist egal.
+    assert_eq!(externe("<link rel=STYLESHEET href=a.css>"), alloc::vec!["a.css"]);
+    // Mehrere Woerter, `stylesheet` dabei.
+    assert_eq!(
+        externe("<link rel=\"stylesheet preload\" href=a.css>"),
+        alloc::vec!["a.css"]
+    );
+    // Alternative Stylesheets: NICHT anwenden.
+    let leer: Vec<String> = Vec::new();
+    assert_eq!(externe("<link rel=\"alternate stylesheet\" href=a.css>"), leer);
+    // Alles andere auch nicht.
+    assert_eq!(externe("<link rel=icon href=f.ico>"), leer);
+    assert_eq!(externe("<link rel=preload href=a.css>"), leer);
+    assert_eq!(externe("<link rel=canonical href=/x>"), leer);
+    // Ohne href und mit leerem href gibt es nichts zu holen.
+    assert_eq!(externe("<link rel=stylesheet>"), leer);
+    assert_eq!(externe("<link rel=stylesheet href=\"   \">"), leer);
+}
+
+/// `media` gilt fuer `<link>` und `<style>` gleich — und die Richtung ist
+/// die vorsichtige: Was wir nicht auswerten koennen, wenden wir nicht an.
+#[test]
+fn test_media_wird_beachtet() {
+    let leer: Vec<String> = Vec::new();
+    assert_eq!(externe("<link rel=stylesheet media=screen href=a.css>"), alloc::vec!["a.css"]);
+    assert_eq!(externe("<link rel=stylesheet media=all href=a.css>"), alloc::vec!["a.css"]);
+    assert_eq!(
+        externe("<link rel=stylesheet media=\"only screen\" href=a.css>"),
+        alloc::vec!["a.css"]
+    );
+    assert_eq!(
+        externe("<link rel=stylesheet media=\"print, screen\" href=a.css>"),
+        alloc::vec!["a.css"]
+    );
+    // Eine Druckformatierung auf dem Schirm ist genau der Schaden, den das
+    // Ueberspringen von `@media` verhindern soll.
+    assert_eq!(externe("<link rel=stylesheet media=print href=a.css>"), leer);
+    // Feature-Abfragen koennen wir nicht auswerten — also nicht anwenden.
+    assert_eq!(
+        externe("<link rel=stylesheet media=\"screen and (max-width: 600px)\" href=a.css>"),
+        leer
+    );
+    // Dasselbe fuer `<style media=print>`.
+    assert!(bedarf("<style media=print>p{color:#ff0000}</style>").is_empty());
+    assert_eq!(bedarf("<style media=screen>p{color:#ff0000}</style>").len(), 1);
+}
+
+/// Ein leerer `<style>`-Block ist kein Blatt.
+#[test]
+fn test_leerer_style_block_faellt_weg() {
+    assert!(bedarf("<style></style><style>   </style>").is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// `@import` — gemeldet, nicht geholt
+// ---------------------------------------------------------------------------
+
+/// Beide Schreibweisen, und die Adresse kommt sauber heraus.
+#[test]
+fn test_import_beide_schreibweisen() {
+    let blatt = parser::parsen("@import url(\"reset.css\"); @import 'basis.css'; p{color:#ff0000}");
+    assert_eq!(blatt.importe, alloc::vec!["reset.css", "basis.css"]);
+    // Die Regel dahinter ist trotzdem da — Ueberspringen heisst nicht
+    // Verschlucken.
+    assert_eq!(blatt.regeln.len(), 1);
+    // Ohne Anfuehrungszeichen in `url()` geht es auch.
+    let blatt = parser::parsen("@import url(a.css);");
+    assert_eq!(blatt.importe, alloc::vec!["a.css"]);
+}
+
+/// **NUR VOR DER ERSTEN REGEL.** Ein `@import` weiter unten ist laut
+/// Spezifikation ungueltig und wirkt in keinem Browser — ihn zu holen
+/// hiesse, eine Datei zu laden, die auf der Seite nichts tut.
+#[test]
+fn test_import_nach_der_ersten_regel_zaehlt_nicht() {
+    let blatt = parser::parsen("p{color:#ff0000} @import \"spaet.css\";");
+    assert!(blatt.importe.is_empty());
+    // Uebersprungen wurde er trotzdem sauber.
+    assert_eq!(blatt.regeln.len(), 1);
+}
+
+/// Die Medienliste hinter einem `@import` gilt genau wie bei `<link>`.
+#[test]
+fn test_import_mit_medienliste() {
+    assert!(parser::parsen("@import \"d.css\" print;").importe.is_empty());
+    assert_eq!(
+        parser::parsen("@import \"s.css\" screen;").importe,
+        alloc::vec!["s.css"]
+    );
+    assert_eq!(
+        parser::parsen("@import url(a.css) all;").importe,
+        alloc::vec!["a.css"]
+    );
+}
+
+/// Kaputtes `@import` liefert nichts und haengt nicht.
+#[test]
+fn test_import_muell() {
+    for muell in [
+        "@import;",
+        "@import ;",
+        "@import url(;",
+        "@import url();",
+        "@import \"\";",
+        "@import nichts;",
+        "@import url(\"unbeendet",
+        "@import",
+    ] {
+        let blatt = parser::parsen(muell);
+        assert!(
+            blatt.importe.is_empty(),
+            "aus {muell:?} kam ein Import heraus: {:?}",
+            blatt.importe
+        );
+    }
+}
+
+/// Die Speichergrenze fuer gemeldete Importe greift.
+#[test]
+fn test_import_grenze() {
+    let mut css = String::new();
+    for i in 0..200 {
+        css.push_str(&alloc::format!("@import \"a{i}.css\";\n"));
+    }
+    let blatt = parser::parsen(&css);
+    assert_eq!(blatt.importe.len(), parser::Grenzen::standard().max_importe);
+}
+
+// ---------------------------------------------------------------------------
+// Die Kaskade ueber MEHRERE Autor-Blaetter
+// ---------------------------------------------------------------------------
+
+/// **Standard < externes Blatt < spaeteres Blatt < `style`-Attribut.**
+///
+/// Die Reihenfolge ist die halbe Aufgabe: Falsch einsortiert sieht es
+/// anders falsch aus als vorher, nicht besser.
+#[test]
+fn test_kaskade_ueber_mehrere_blaetter() {
+    let dokument = speedhtml::parsen("<p style=\"color:#0000ff\">x</p><p>y</p>");
+    let standard = standard_stylesheet();
+    // Zwei Autor-Blaetter mit DERSELBEN Spezifitaet — es entscheidet
+    // allein die Position in der Liste.
+    let erstes = parser::parsen("p { color: #ff0000; margin-top: 5px }");
+    let zweites = parser::parsen("p { color: #00ff00 }");
+    let blaetter: Vec<(&Stylesheet, Herkunft)> = alloc::vec![
+        (&standard, Herkunft::Standard),
+        (&erstes, Herkunft::Autor),
+        (&zweites, Herkunft::Autor),
+    ];
+    let baum = kaskade::berechnen(&dokument, &blaetter, Zustand::default());
+
+    let mut absaetze = dokument
+        .alle()
+        .filter(|(_, k)| k.name() == Some("p"))
+        .map(|(id, _)| id);
+    let erster = absaetze.next().expect("erster <p>");
+    let zweiter = absaetze.next().expect("zweiter <p>");
+
+    // Das spaetere Blatt gewinnt bei gleicher Spezifitaet.
+    assert_eq!(baum.stil(zweiter).farbe, Farbe::rgb(0, 255, 0));
+    // Was nur im ersten Blatt steht, bleibt stehen.
+    assert_eq!(baum.stil(zweiter).margin.oben, Laenge::Px(5_000));
+    // Das `style`-Attribut schlaegt BEIDE.
+    assert_eq!(baum.stil(erster).farbe, Farbe::rgb(0, 0, 255));
+    // Und der Standard wirkt weiter, wo niemand widerspricht.
+    assert_eq!(baum.stil(zweiter).display, Display::Block);
+}
+
+/// **`display: none` aus einem externen Blatt muss wirken** — das ist der
+/// sichtbarste Teil des Fixes (Screenreader-Text, Overlays).
+///
+/// Hier wird nur die Kaskade geprueft; dass der Kasten dann wirklich aus
+/// dem Baum faellt, prueft `speedlayout`.
+#[test]
+fn test_display_none_aus_externem_blatt() {
+    let dokument = speedhtml::parsen(
+        "<div class=\"sr-only\">Nur fuer Screenreader</div><div>sichtbar</div>",
+    );
+    let standard = standard_stylesheet();
+    // Das „externe" Blatt — fuer die Kaskade ist es ein Blatt wie jedes.
+    let extern_blatt = parser::parsen(".sr-only { display: none }");
+    let blaetter: Vec<(&Stylesheet, Herkunft)> = alloc::vec![
+        (&standard, Herkunft::Standard),
+        (&extern_blatt, Herkunft::Autor),
+    ];
+    let baum = kaskade::berechnen(&dokument, &blaetter, Zustand::default());
+
+    let mut divs = dokument
+        .alle()
+        .filter(|(_, k)| k.name() == Some("div"))
+        .map(|(id, _)| id);
+    let versteckt = divs.next().unwrap();
+    let sichtbar = divs.next().unwrap();
+    assert_eq!(baum.stil(versteckt).display, Display::Keine);
+    assert_eq!(baum.stil(sichtbar).display, Display::Block);
+}

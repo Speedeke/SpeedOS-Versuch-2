@@ -53,6 +53,14 @@ pub struct Grenzen {
     pub max_deklarationen_je_regel: usize,
     /// Wie tief `@media` und Konsorten verschachtelt sein duerfen.
     pub max_block_tiefe: usize,
+    /// Wie viele `@import`-Adressen ein Blatt hoechstens MELDEN darf.
+    ///
+    /// Das ist keine Aussage darueber, wie viele davon jemand holt (das
+    /// entscheidet der Aufrufer) — es ist die Obergrenze fuer den
+    /// SPEICHER, den ein fremdes Stylesheet hier belegen kann. Ohne sie
+    /// waere eine Datei mit einer Million `@import`-Zeilen eine
+    /// Million Strings.
+    pub max_importe: usize,
 }
 
 impl Grenzen {
@@ -62,6 +70,7 @@ impl Grenzen {
             max_selektoren_je_regel: 256,
             max_deklarationen_je_regel: 256,
             max_block_tiefe: 16,
+            max_importe: 32,
         }
     }
 }
@@ -219,6 +228,22 @@ impl Befund {
 pub struct Stylesheet {
     pub regeln: Vec<Regel>,
     pub befund: Befund,
+    /// Die Adressen aus `@import` — **gemeldet, nicht geholt**.
+    ///
+    /// ===================================================================
+    /// WARUM DIESE KISTE SIE NUR MELDET
+    ///
+    /// Ein `@import` aufzuloesen hiesse, aus dem Parsen eine NETZ-Operation
+    /// zu machen — mit Frist, Fehlerfall und Groessengrenze. Dieselbe
+    /// Ueberlegung wie bei `<link rel=stylesheet>` (siehe
+    /// `blaetter_einsammeln`): speedcss kennt kein Netz und soll keins
+    /// kennen. Es sagt, WAS fehlt; wer es holt, entscheidet der Wirt.
+    ///
+    /// Aufgenommen wird nur, was laut Spezifikation ueberhaupt zaehlt:
+    /// `@import` VOR der ersten Regel. Ein `@import` weiter unten ist
+    /// ungueltig und wird von jedem Browser ignoriert — wer ihn trotzdem
+    /// befolgte, laedt eine Datei, die auf der Seite gar nicht wirkt.
+    pub importe: Vec<String>,
 }
 
 impl Stylesheet {
@@ -447,10 +472,110 @@ pub fn parsen_mit(css: &str, grenzen: Grenzen) -> Stylesheet {
 /// FOLGE, ehrlich benannt: Auf Seiten, die ihr gesamtes Layout in
 /// `@media`-Bloecken haben (das ist bei „mobile first" die Regel), sieht
 /// V1 nur die Grundregeln.
-fn at_regel(leser: &mut Leser, blatt: &mut Stylesheet, _nummer: &mut usize, _grenzen: Grenzen) {
+///
+/// ===================================================================
+/// DIE EINE AT-REGEL, DIE NICHT SPURLOS VERSCHWINDET: `@import`
+///
+/// Sie wird genauso uebersprungen wie jede andere — aber ihre Adresse
+/// wird VORHER notiert (`Stylesheet::importe`). Das ist der ganze
+/// Unterschied: Der Parser tut nichts damit, er sagt nur, dass da etwas
+/// fehlt.
+fn at_regel(leser: &mut Leser, blatt: &mut Stylesheet, _nummer: &mut usize, grenzen: Grenzen) {
     blatt.befund.at_regeln_uebersprungen += 1;
+
+    // Den Namen und den Vorspann auf einer KOPIE lesen. Das Ueberspringen
+    // bleibt Sache von `block_ueberspringen` — es soll genau EINE Stelle
+    // geben, die Klammern und Zeichenketten zaehlt.
+    let mut blick = Leser {
+        text: leser.text,
+        pos: leser.pos,
+    };
+    blick.vor(); // das `@`
+    let name = kleinschreiben(blick.bis_zu(&[' ', '\t', '\r', '\n', '{', ';', '}', '"', '\'', '(']));
+    if name == "import" {
+        let vorspann = blick.bis_zu(&['{', ';', '}']);
+        // NUR VOR DER ERSTEN REGEL (CSS-Spezifikation). Ein `@import`
+        // weiter unten wirkt in keinem Browser — ihn zu holen hiesse,
+        // eine Datei zu laden, die auf der Seite nichts tut.
+        if blatt.regeln.is_empty() && blatt.importe.len() < grenzen.max_importe {
+            if let Some(ziel) = import_ziel(vorspann) {
+                blatt.importe.push(ziel);
+            }
+        }
+    }
+
     // `block_ueberspringen` behandelt beide Formen: mit Block und mit `;`.
     leser.block_ueberspringen();
+}
+
+/// Die Adresse aus einem `@import`-Vorspann.
+///
+/// Erlaubt sind beide Schreibweisen — `@import url("a.css");` und
+/// `@import "a.css";` — sowie eine Medienliste dahinter. Liefert `None`,
+/// wenn nichts Brauchbares dasteht ODER die Medienliste nicht fuer den
+/// Bildschirm gilt (siehe `medien_gelten`).
+fn import_ziel(vorspann: &str) -> Option<String> {
+    let text = vorspann.trim();
+    let klein = kleinschreiben(text);
+    let (roh, rest) = if klein.starts_with("url(") {
+        let ende = text.find(')')?;
+        (&text[4..ende], text[ende + 1..].trim())
+    } else {
+        // Eine nackte Zeichenkette.
+        let anfuehrung = text.chars().next()?;
+        if anfuehrung != '"' && anfuehrung != '\'' {
+            return None;
+        }
+        let ende = text[1..].find(anfuehrung)? + 1;
+        (&text[1..ende], text[ende + 1..].trim())
+    };
+    let ziel = roh.trim().trim_matches('"').trim_matches('\'').trim();
+    if ziel.is_empty() || !medien_gelten(rest) {
+        return None;
+    }
+    Some(String::from(ziel))
+}
+
+/// Gilt diese Medienliste fuer unseren Bildschirm?
+///
+/// ===================================================================
+/// DIE VORSICHTIGE RICHTUNG, UND ZWAR AUS DEMSELBEN GRUND WIE BEI `@media`
+///
+/// Eine leere Liste heisst „alle Medien" und gilt. Sonst muss MINDESTENS
+/// EIN Eintrag `all` oder `screen` sein — **ohne Feature-Abfrage**.
+///
+/// `media="print"` wird also abgelehnt (eine Druckformatierung auf dem
+/// Schirm ist genau der Schaden, den das Ueberspringen von `@media`
+/// verhindern soll), und `media="screen and (max-width: 600px)"` ebenso:
+/// Wir koennen die Abfrage nicht auswerten, und sie unbesehen anzuwenden
+/// hiesse, ein Handy-Layout auf einen 4K-Schirm zu legen. Nicht raten ist
+/// hier billiger als falsch raten.
+/// Dieselbe Pruefung fuer `<link media=…>` und `<style media=…>`.
+///
+/// Die Regel steht bewusst an EINER Stelle: Ein `media="print"` bedeutet
+/// im `@import` genau dasselbe wie im `<link>`, und zwei Kopien derselben
+/// Regel gehen irgendwann auseinander.
+pub fn medien_gelten_oeffentlich(liste: &str) -> bool {
+    medien_gelten(liste)
+}
+
+fn medien_gelten(liste: &str) -> bool {
+    let text = liste.trim().trim_end_matches(';').trim();
+    if text.is_empty() {
+        return true;
+    }
+    for eintrag in text.split(',') {
+        let voll = kleinschreiben(eintrag.trim());
+        // `only screen` ist dieselbe Angabe mit einem Hoeflichkeitswort.
+        let e = voll.strip_prefix("only ").unwrap_or(voll.as_str()).trim();
+        if e.contains('(') {
+            continue; // Feature-Abfrage — koennen wir nicht auswerten
+        }
+        if e == "all" || e == "screen" {
+            return true;
+        }
+    }
+    false
 }
 
 /// `selektor, selektor { deklarationen }`

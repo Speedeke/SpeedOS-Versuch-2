@@ -1,0 +1,85 @@
+<!doctype html>
+<!--
+  stiltest.html - die Pruefseite fuer externe Stylesheets (Serie 9, Teil 1)
+
+  ANDERS ALS DIE UEBRIGEN SEITEN IN DIESEM ORDNER IST SIE SELBST GESCHRIEBEN
+  und steht deshalb nicht in HERKUNFT.txt: Die anderen sind echte Seiten aus
+  dem Netz (Testeingabe fuer den Parser), diese hier ist ein PRUEFSTAND - sie
+  bringt jede Entscheidung der Stylesheet-Beschaffung in eine Form, die
+  `browser --pruefen` als Zahl ausgibt.
+
+  JEDER ABSATZ TRAEGT SEINEN EIGENEN NAMEN im Text. Dadurch ist "ist die
+  Kaskaden-Reihenfolge richtig?" eine Frage an die Zeile TEXT= und nicht an
+  ein Bildschirmfoto: Was sichtbar sein muss, steht dort; was verschwinden
+  muss, darf dort nicht stehen.
+
+  Die Datei ist ASCII - die Browser-Schrift ist das 5x7-Raster (nur ASCII,
+  alles gross, docs/schrift-groessen.md).
+-->
+<html>
+<head>
+<title>Stylesheet-Pruefstand</title>
+
+<!-- (1) EIN <style> VOR DEM <link>. Es setzt REGEL-A auf none; das
+     externe Blatt setzt es zurueck auf block. Wenn die Reihenfolge
+     stimmt, ist REGEL-A SICHTBAR - das externe Blatt steht spaeter. -->
+<style>
+.regel-a { display: none }
+</style>
+
+<!-- (2) Das Hauptblatt, relativ verwiesen. -->
+<link rel="stylesheet" href="stiltest.css">
+
+<!-- (3) Ein Blatt, das es NICHT GIBT. Es darf die Seite nicht
+     verhindern - nur gezaehlt und in der Statuszeile genannt werden. -->
+<link rel="stylesheet" href="gibt-es-garantiert-nicht-4711.css">
+
+<!-- (4) DASSELBE BLATT NOCH EINMAL. Der Schleifenschutz muss es
+     erkennen (STIL_DOPPELT=1) und darf es nicht erneut holen. -->
+<link rel="stylesheet" href="stiltest.css">
+
+<!-- (5) Drei Verweise, die KEIN anzuwendendes Stylesheet sind. Keiner
+     davon darf einen Abruf ausloesen. -->
+<link rel="icon" href="stiltest-verboten.css">
+<link rel="alternate stylesheet" href="stiltest-verboten.css">
+<link rel="stylesheet" media="print" href="stiltest-verboten.css">
+
+<!-- (6) EIN <style> NACH DEM <link>. Es setzt REGEL-B auf none,
+     nachdem das externe Blatt es auf block gesetzt hat. Wenn die
+     Reihenfolge stimmt, ist REGEL-B VERSCHWUNDEN. -->
+<style>
+.regel-b { display: none }
+</style>
+</head>
+
+<body>
+
+<p class="regel-a">REGEL-A SICHTBAR EXTERN SCHLAEGT STYLE DAVOR</p>
+<p class="regel-b">REGEL-B FEHLER STYLE DANACH WURDE NICHT ANGEWANDT</p>
+
+<!-- Was per CSS versteckt sein soll - der eigentliche Punkt des ganzen
+     Schrittes. Ohne externes Blatt stand dieser Text mitten auf der
+     Seite (github, Rust-Buch). -->
+<p class="nur-screenreader">SCREENREADER HINWEIS DER VERSCHWINDEN MUSS</p>
+<div class="overlay">
+  <p>TASTATUR OVERLAY DAS VERSCHWINDEN MUSS</p>
+  <p>ZWEITE ZEILE IM OVERLAY</p>
+</div>
+
+<!-- REGEL-C: das importierte Blatt sagt none, das importierende sagt
+     block. Gleiche Spezifitaet - das SPAETERE Blatt gewinnt, und der
+     Import steht VOR seinem Elternblatt. Also sichtbar. -->
+<p class="regel-c">REGEL-C SICHTBAR IMPORT STEHT VOR SEINEM BLATT</p>
+
+<!-- REGEL-D: nur das importierte Blatt sagt etwas dazu. Verschwindet
+     der Absatz, ist der @import wirklich geholt worden. -->
+<p class="regel-d">REGEL-D FEHLER IMPORT WURDE NICHT GEHOLT</p>
+
+<!-- REGEL-E: das sagt erst die ZWEITE Ebene (stiltest-tief.css). Die
+     verfolgen wir bewusst nicht - der Absatz MUSS stehen bleiben. -->
+<p class="regel-e">REGEL-E SICHTBAR ZWEITE IMPORT EBENE WIRD NICHT GEFOLGT</p>
+
+<p id="ende">ENDE DES PRUEFSTANDS</p>
+
+</body>
+</html>

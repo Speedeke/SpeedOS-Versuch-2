@@ -41,6 +41,7 @@ pub mod stil;
 pub mod werte;
 
 pub use kaskade::{berechnen, erklaeren, Erklaerung, Herkunft, Quelle, StilBaum, Zustand};
+pub use werte::kleinschreiben;
 pub use parser::{parsen, parsen_mit, Befund, Grenzen, Regel, Selektor, Spezifitaet, Stylesheet};
 pub use standard::STANDARD_CSS;
 pub use stil::{
@@ -63,21 +64,136 @@ pub fn standard_stylesheet() -> Stylesheet {
     parser::parsen(standard::STANDARD_CSS)
 }
 
+// ===========================================================================
+// WAS EIN DOKUMENT AN STILEN BRAUCHT
+// ===========================================================================
+
+/// Ein Stylesheet, das ein Dokument haben will.
+///
+/// ===================================================================
+/// GEMELDET, NICHT GEHOLT — DIE KISTE KENNT WEITER KEIN NETZ
+///
+/// Bis Serie 8, Teil 8 stand hier, `<link rel=stylesheet>` werde nicht
+/// geholt, „weil das aus dem Parsen eine Netz-Operation machte". Der Satz
+/// war richtig und ist es geblieben — was fehlte, war die Trennung:
+///
+///   * **WAS** ein Dokument braucht, steht IM Dokument. Das kann diese
+///     Kiste beantworten, und sonst niemand so gut.
+///   * **OB und WIE** es ankommt, ist eine Frage von Frist, Fehlerfall,
+///     Groessengrenze und Cache. Das gehoert dem Wirt.
+///
+/// `blaetter_einsammeln` beantwortet die erste Frage. Der Browser holt,
+/// parst und reicht die Ergebnisse an `kaskade::berechnen` — die sich
+/// dadurch NICHT geaendert hat, sie nimmt seit Teil 5 eine Liste von
+/// Blaettern entgegen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Blattbedarf {
+    /// `<link rel="stylesheet" href="…">` — muss geholt werden.
+    Extern(String),
+    /// `<style>…</style>` — der Text steht schon da.
+    Inline(String),
+}
+
+/// Was ein Dokument an Stylesheets braucht — **in Dokumentreihenfolge**.
+///
+/// ===================================================================
+/// DIE REIHENFOLGE IST DAS EIGENTLICHE ERGEBNIS
+///
+/// Nicht die Liste ist die Auskunft, sondern ihre Ordnung. Ein externes
+/// Blatt und ein `<style>`-Block sind fuer die Kaskade DASSELBE (beide
+/// Herkunft „Autor", beide gleich stark); wer gewinnt, entscheidet bei
+/// gleicher Spezifitaet allein die Position im Dokument.
+///
+/// Deshalb wird hier NICHT nach Sorte getrennt, sondern der Baum von
+/// vorn nach hinten durchlaufen. Ein `<style>` VOR einem `<link>` ist
+/// schwaecher als das `<link>`; ein `<style>` DANACH ist staerker. Wer
+/// erst alle externen und dann alle inline einsortiert, bekommt auf
+/// jeder Seite, die beides mischt, eine andere Darstellung als jeder
+/// echte Browser — und zwar eine, die genauso falsch aussieht wie vorher,
+/// nur anders.
+///
+/// **Der Arena-Index IST die Dokumentreihenfolge** (speedhtml legt jeden
+/// Knoten an, wenn er ihm begegnet), also genuegt ein Lauf ueber `alle()`.
+///
+/// AUSGELASSEN WIRD:
+///   * `rel`, das nicht `stylesheet` ist (`icon`, `preload`, `canonical`);
+///   * `rel="alternate stylesheet"` — ein Vorschlag, den ein Browser erst
+///     auf Wunsch anwendet, und wir haben keinen Wunsch-Schalter;
+///   * `media`, das nicht fuer den Bildschirm gilt (dieselbe vorsichtige
+///     Regel wie bei `@import`, siehe `parser::medien_gelten`);
+///   * ein leeres `href`.
+pub fn blaetter_einsammeln(dokument: &Dokument) -> Vec<Blattbedarf> {
+    let mut aus = Vec::new();
+    for (id, knoten) in dokument.alle() {
+        match knoten.name() {
+            Some("link") => {
+                if !ist_stylesheet_verweis(knoten.attribut("rel").unwrap_or("")) {
+                    continue;
+                }
+                if !parser::medien_gelten_oeffentlich(knoten.attribut("media").unwrap_or("")) {
+                    continue;
+                }
+                let Some(href) = knoten.attribut("href") else { continue };
+                if href.trim().is_empty() {
+                    continue;
+                }
+                aus.push(Blattbedarf::Extern(String::from(href.trim())));
+            }
+            Some("style") => {
+                if !parser::medien_gelten_oeffentlich(knoten.attribut("media").unwrap_or("")) {
+                    continue;
+                }
+                let mut css = String::new();
+                // NICHT `text_von`: Das ueberspringt `style` absichtlich
+                // (siehe `autor_stylesheet`).
+                for kind in &knoten.kinder {
+                    if let Some(text) = dokument.knoten(*kind).and_then(|k| k.text()) {
+                        css.push_str(text);
+                    }
+                }
+                let _ = id;
+                if !css.trim().is_empty() {
+                    aus.push(Blattbedarf::Inline(css));
+                }
+            }
+            _ => {}
+        }
+    }
+    aus
+}
+
+/// Ist das ein `rel`, das ein anzuwendendes Stylesheet meint?
+///
+/// `rel` ist eine LISTE (`rel="stylesheet"`, aber auch
+/// `rel="alternate stylesheet"`). Das Wort `stylesheet` muss darin
+/// vorkommen — und `alternate` darf es NICHT, denn ein alternatives
+/// Stylesheet ist ein Angebot und keine Anweisung.
+fn ist_stylesheet_verweis(rel: &str) -> bool {
+    let mut hat_stylesheet = false;
+    for wort in rel.split_whitespace() {
+        let klein = werte::kleinschreiben(wort);
+        if klein == "alternate" {
+            return false;
+        }
+        if klein == "stylesheet" {
+            hat_stylesheet = true;
+        }
+    }
+    hat_stylesheet
+}
+
 /// Alle `<style>`-Bloecke eines Dokuments einsammeln und parsen.
 ///
 /// ===================================================================
-/// WAS HIER NICHT PASSIERT: `<link rel=stylesheet>` WIRD NICHT GEHOLT
+/// DAS IST DIE KLEINE FASSUNG — sie holt nichts
 ///
-/// Das ist eine Entscheidung des Zuschnitts (docs/browser-v1.md §2.3) und
-/// keine Vergesslichkeit: Ein externes Stylesheet zu holen hiesse, aus dem
-/// Parsen eine NETZ-Operation zu machen — mit Frist, Fehlerfall,
-/// Groessenlimit und der Frage, was passiert, wenn es nicht ankommt. Diese
-/// Kiste kennt kein Netz und soll keins kennen.
+/// Sie sieht NUR die `<style>`-Bloecke; `<link rel=stylesheet>` bleibt
+/// aussen vor, weil diese Kiste kein Netz kennt. Wer die externen Blaetter
+/// will, benutzt `blaetter_einsammeln` und holt sie selbst.
 ///
-/// Die FOLGE ist ehrlich zu benennen: Auf Seiten, die ihr gesamtes Aussehen
-/// aus externen Dateien beziehen — das ist heute die Regel —, wirkt nur
-/// das Standard-Stylesheet. Der Browser kann die Dateien spaeter selbst
-/// holen und hier hereinreichen; die Kaskade aendert sich dadurch nicht.
+/// Die Funktion bleibt, weil sie genau richtig ist, wenn es nichts zu
+/// holen GIBT: `cssdump` auf einer lokalen Datei, die Tests, und jeder
+/// Wirt ohne Netz.
 pub fn autor_stylesheet(dokument: &Dokument) -> Stylesheet {
     let mut css = String::new();
     for id in dokument.alle_mit_tag("style") {

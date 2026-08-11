@@ -1,0 +1,17 @@
+/* stiltest-tief.css - die ZWEITE Import-Ebene (Serie 9, Teil 1)
+ *
+ * DIESES BLATT DARF NIE WIRKEN. Es wird von stiltest-basis.css
+ * angefordert, und das ist bereits selbst ein Import - wir folgen nur
+ * EINER Ebene.
+ *
+ * Es liegt trotzdem im Repository und nicht nur als Kommentar: Ein
+ * Blatt, das es gar nicht gibt, wuerde denselben Test auch bestehen,
+ * wenn wir die zweite Ebene versehentlich verfolgten (der Abruf
+ * scheiterte dann eben). So ist der Test scharf - die Datei ist da und
+ * wird trotzdem nicht angewandt.
+ */
+
+.regel-e { display: none }
+
+/* Und noch eine Ebene tiefer, die es erst recht nicht geben darf. */
+@import "stiltest-noch-tiefer.css";

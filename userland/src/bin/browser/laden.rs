@@ -177,11 +177,27 @@ pub fn seite_laden(ort: &Ort, klient: &mut Klient, cache: &mut Cache) -> Geladen
     }
 }
 
-/// Ein Bild oder Stylesheet holen — kleiner, mit Cache, ohne Fehlerseite.
+/// Ein Bild oder Stylesheet holen — mit Cache, ohne Fehlerseite.
+///
+/// ===================================================================
+/// GRENZE UND FRIST SIND ARGUMENTE UND KEINE KONSTANTEN
+///
+/// Ein Bild und ein Stylesheet sind beides „Nebensachen" — sie duerfen
+/// die Seite nicht aufhalten und nicht verhindern. Aber sie sind
+/// verschieden teuer und verschieden wichtig: Ein Bild darf 2 MiB gross
+/// sein und 15 s brauchen, ein Stylesheet soll nach 8 s aufgeben, weil
+/// es NACH dem Dokument geholt wird und der Benutzer solange auf eine
+/// halbfertige Seite sieht.
+///
+/// Dieselbe Ueberlegung wie bei `libspeed::bild::Grenzen` (Serie 8,
+/// Teil 3): Wer die Zahl kennt, gehoert nicht in die Funktion, die sie
+/// anwendet.
 pub fn nebensache_laden(
     ort: &Ort,
     klient: &mut Klient,
     cache: &mut Cache,
+    max_bytes: usize,
+    frist_ms: u64,
 ) -> Option<Vec<u8>> {
     match ort {
         Ort::Intern(_) => None,
@@ -190,6 +206,9 @@ pub fn nebensache_laden(
                 return Some(bytes.to_vec());
             }
             let bytes = libspeed::netz::datei_lesen(pfad).ok()?;
+            if bytes.len() > max_bytes {
+                return None;
+            }
             cache.legen(pfad, &bytes);
             Some(bytes)
         }
@@ -198,8 +217,8 @@ pub fn nebensache_laden(
             if let Some(bytes) = cache.holen(&adresse) {
                 return Some(bytes.to_vec());
             }
-            klient.frist_ms = FRIST_MS;
-            klient.max_bytes = MAX_BILD;
+            klient.frist_ms = frist_ms;
+            klient.max_bytes = max_bytes;
             let abruf = klient.holen(&adresse).ok()?;
             let rumpf = abruf.antwort.rumpf;
             cache.legen(&adresse, &rumpf);

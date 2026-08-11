@@ -1,0 +1,36 @@
+/* stiltest.css - das Hauptblatt des Pruefstands (Serie 9, Teil 1)
+ *
+ * Es wird per <link rel=stylesheet href="stiltest.css"> geholt, also
+ * RELATIV zur Seite aufgeloest (speedhttp::verweis_aufloesen bei
+ * Netzseiten, pfad_normalisieren bei lokalen Dateien - dieselbe
+ * Funktion, die auch jeden <a href> aufloest).
+ */
+
+/* EINE EBENE TIEF: Der Import wird geholt und VOR dieses Blatt
+ * einsortiert. stiltest-basis.css importiert seinerseits weiter - das
+ * wird gezaehlt und NICHT verfolgt. */
+@import "stiltest-basis.css";
+
+/* Ein @import NACH der ersten Regel ist laut Spezifikation ungueltig
+ * und wirkt in keinem Browser. Er darf also NICHT geholt werden -
+ * sonst laedt der Browser eine Datei, die auf der Seite nichts tut.
+ * (Steht hier absichtlich unter einer Regel.) */
+.regel-a { display: block }
+@import "stiltest-zu-spaet.css";
+
+/* Das externe Blatt macht rueckgaengig, was der <style>-Block DAVOR
+ * gesagt hat. Gleiche Spezifitaet, spaetere Position - es gewinnt. */
+.regel-b { display: block }
+
+/* Was das importierte Blatt versteckt hat, holt dieses zurueck: Der
+ * Import steht VOR seinem Elternblatt. */
+.regel-c { display: block }
+
+/* DER EIGENTLICHE PUNKT: Was per CSS versteckt gehoert, verschwindet
+ * jetzt wirklich aus dem Kastenbaum. */
+.nur-screenreader { display: none }
+.overlay { display: none }
+
+/* Etwas Sichtbares, damit die Seite auch anders aussieht als ohne
+ * Blatt - nicht nur kuerzer. */
+#ende { color: #0000cc; font-weight: bold }

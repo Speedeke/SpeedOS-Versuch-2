@@ -1,0 +1,25 @@
+/* stiltest-basis.css - die ERSTE Import-Ebene (Serie 9, Teil 1)
+ *
+ * Wird von stiltest.css per @import geholt. Das ist der Normalfall auf
+ * gewachsenen Seiten: @import "reset.css" ganz oben in der Hauptdatei.
+ * Wer diese Ebene ignoriert, laedt das Hauptblatt und laesst die
+ * Grundlagen weg - das Ergebnis sieht kaputter aus als gar kein CSS.
+ */
+
+/* REGEL-C: Der Import sagt none, sein Elternblatt sagt danach block.
+ * Das Elternblatt gewinnt, weil ein Import VOR ihm einsortiert wird. */
+.regel-c { display: none }
+
+/* REGEL-D: Dazu sagt NUR dieses Blatt etwas. Verschwindet der Absatz,
+ * ist der Import wirklich geholt worden. */
+.regel-d { display: none }
+
+/* DIE ZWEITE EBENE. Sie wird gezaehlt und NICHT verfolgt - jede
+ * weitere Ebene ist ein weiterer blockierender Abruf, den die Seite
+ * selbst bestimmt. Der Absatz REGEL-E bleibt deshalb stehen. */
+@import "stiltest-tief.css";
+
+/* DER SCHLEIFENSCHUTZ: zurueck auf das Blatt, das uns geholt hat.
+ * Zweite Ebene, wird also ohnehin nicht verfolgt - und selbst wenn,
+ * stuende die Adresse schon in `gesehen`. */
+@import "stiltest.css";

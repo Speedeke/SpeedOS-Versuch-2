@@ -730,6 +730,29 @@ pub static TESTSEITE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/testseit
 pub static GROSSE_TESTSEITE: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/grosse_testseite.html"));
 
+/// Der STYLESHEET-PRUEFSTAND (Serie 9, Teil 1) — fuenf kleine Dateien.
+///
+/// ===================================================================
+/// WARUM DIE .css-DATEIEN MITREISEN MUESSEN
+///
+/// Eine HTML-Datei mit `<link rel=stylesheet href="stiltest.css">` ist
+/// ohne ihr Blatt kein Pruefstand, sondern der Zustand VOR diesem
+/// Schritt. Die Seite und ihre Blaetter gehoeren also zusammen ins
+/// Dateisystem — und zwar in DENSELBEN Ordner, denn der Verweis ist
+/// relativ und wird ueber `Ort::aufloesen` gegen den Ordner der Seite
+/// aufgeloest. Genau das soll er ja auch beweisen.
+///
+/// Die Namen im Dateisystem tragen den Bindestrich (`stiltest-basis.css`),
+/// die OUT_DIR-Kopien den Unterstrich — `concat!(env!("OUT_DIR"), ...)`
+/// mag keine Bindestriche im Makro-Argument nicht, aber der Ordnername
+/// waere sonst die einzige Stelle, an der zwei Schreibweisen kollidieren.
+pub static STILTEST_HTML: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/stiltest.html"));
+pub static STILTEST_CSS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/stiltest.css"));
+pub static STILTEST_BASIS_CSS: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/stiltest_basis.css"));
+pub static STILTEST_TIEF_CSS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/stiltest_tief.css"));
+pub static STILGRENZE_HTML: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/stilgrenze.html"));
+
 const SEITEN_PLATTE: &str = "/platte/seiten";
 const SEITEN_RAM: &str = "/seiten";
 
@@ -747,6 +770,11 @@ pub fn testseite_pfad() -> String {
 /// Der Pfad der grossen Testseite.
 pub fn grosse_testseite_pfad() -> String {
     seite_pfad("wikipedia.html")
+}
+
+/// Der Pfad einer beliebigen installierten Testseite (Serie 9, Teil 1).
+pub fn seite_pfad_von(name: &str) -> String {
+    seite_pfad(name)
 }
 
 /// NACHSEHEN, wo eine Testseite wirklich liegt.
@@ -780,6 +808,13 @@ pub fn testseite_installieren() -> bool {
     }
     let mut geschrieben = seite_installieren(&ordner, "cern.html", TESTSEITE);
     geschrieben |= seite_installieren(&ordner, "wikipedia.html", GROSSE_TESTSEITE);
+    // Der Stylesheet-Pruefstand. Die Blaetter MUESSEN in denselben Ordner
+    // wie die Seite — der Verweis ist relativ.
+    geschrieben |= seite_installieren(&ordner, "stiltest.html", STILTEST_HTML);
+    geschrieben |= seite_installieren(&ordner, "stiltest.css", STILTEST_CSS);
+    geschrieben |= seite_installieren(&ordner, "stiltest-basis.css", STILTEST_BASIS_CSS);
+    geschrieben |= seite_installieren(&ordner, "stiltest-tief.css", STILTEST_TIEF_CSS);
+    geschrieben |= seite_installieren(&ordner, "stilgrenze.html", STILGRENZE_HTML);
     if geschrieben {
         if let Err(fehler) = fs::sync() {
             crate::serial_println!("[seiten] sync fehlgeschlagen: {:?}", fehler);

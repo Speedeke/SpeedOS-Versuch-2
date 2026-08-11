@@ -365,6 +365,219 @@ fn test_leere_js_seite_wird_erkannt() {
 }
 
 // ===========================================================================
+// (4a) EXTERNE STYLESHEETS (Serie 9, Teil 1)
+// ===========================================================================
+//
+// Der Realitaets-Bericht hat die haeufigste Fehlerursache benannt: nicht
+// JavaScript, sondern das nicht geholte `<link rel=stylesheet>`. Diese
+// Tests pruefen den Fix — und zwar an einer Seite, die WIR kontrollieren
+// (assets/testseiten/stiltest.*), nicht an einer fremden. Dieselbe
+// Testmethodik wie seit Serie 5: Das harte Gate liegt auf dem Eigenen,
+// der Bericht auf der Realitaet.
+//
+// DER PRUEFSTAND IST SO GEBAUT, DASS JEDE ENTSCHEIDUNG EINE ZEILE IM
+// TEXT IST: Was sichtbar bleiben muss, traegt „SICHTBAR" im Text; was
+// verschwinden muss, traegt „FEHLER". Ein Test, der `TEXT=` liest, sagt
+// damit unmittelbar, WAS schiefging.
+
+/// Alle Marker, die im sichtbaren Text stehen MUESSEN.
+const MUSS_STEHEN: &[&str] = &[
+    "REGEL-A SICHTBAR",
+    "REGEL-C SICHTBAR",
+    "REGEL-E SICHTBAR",
+    "ENDE DES PRUEFSTANDS",
+];
+
+/// Alle Marker, die aus dem sichtbaren Text VERSCHWUNDEN sein muessen.
+const MUSS_WEG: &[&str] = &[
+    "REGEL-B",
+    "SCREENREADER",
+    "OVERLAY",
+    "REGEL-D",
+];
+
+/// **DER FIX, in einem Test.** Externe Stylesheets werden geholt, in der
+/// richtigen Reihenfolge kaskadiert — und `display: none` wirkt.
+#[test_case]
+fn test_externe_stylesheets_wirken() {
+    if !programme_vorhanden() {
+        return;
+    }
+    let pfad = programme::seite_pfad_von("stiltest.html");
+    let ausgabe = pruefen(&pfad);
+    serial_println!("--- browser --pruefen {} ---\n{}", pfad, ausgabe);
+
+    assert_eq!(feld(&ausgabe, "ZUSTAND="), "fertig");
+    let text = feld(&ausgabe, "TEXT=");
+
+    // (1) DIE REIHENFOLGE. `REGEL-A` beweist „externes Blatt schlaegt den
+    // <style>-Block DAVOR", `REGEL-B` das Gegenstueck („<style> DANACH
+    // schlaegt das externe Blatt"). Nur beide zusammen zeigen, dass nach
+    // DOKUMENTREIHENFOLGE einsortiert wird und nicht nach Sorte.
+    for marker in MUSS_STEHEN {
+        assert!(
+            text.contains(marker),
+            "'{}' fehlt im sichtbaren Text — Kaskaden-Reihenfolge falsch?\nTEXT={}",
+            marker,
+            text
+        );
+    }
+    // (2) `display: none` AUS EINEM GELADENEN BLATT ENTFERNT DEN KASTEN.
+    // Das ist der sichtbarste Teil des Fixes: Screenreader-Text und
+    // Overlays verschwinden.
+    for marker in MUSS_WEG {
+        assert!(
+            !text.contains(marker),
+            "'{}' steht noch im sichtbaren Text — display:none hat nicht gewirkt\nTEXT={}",
+            marker,
+            text
+        );
+    }
+
+    // (3) Die Zahlen dazu.
+    assert_eq!(
+        feld(&ausgabe, "STIL_EXTERN_GELADEN="),
+        "1",
+        "genau ein externes Blatt kommt an (eines fehlt, eines ist doppelt)"
+    );
+    assert_eq!(
+        feld(&ausgabe, "STIL_EXTERN_VERSUCHT="),
+        "2",
+        "das doppelte <link> zaehlt NICHT als Versuch — sonst stuende in der \
+         Statuszeile '1 von 3', wo zwei davon dieselbe Datei waren"
+    );
+    assert_eq!(
+        feld(&ausgabe, "STIL_IMPORTE_GELADEN="),
+        "1",
+        "genau ein @import — die zweite Ebene wird nicht verfolgt"
+    );
+    assert_eq!(
+        feld(&ausgabe, "STIL_DOPPELT="),
+        "1",
+        "das zweite <link> auf dieselbe Datei wird erkannt und nicht erneut geholt"
+    );
+    assert_eq!(
+        feld(&ausgabe, "STIL_INLINE="),
+        "2",
+        "die beiden <style>-Bloecke zaehlen mit"
+    );
+    // Ein Blatt, das nicht laedt, wird GEZAEHLT und GENANNT.
+    assert_eq!(feld(&ausgabe, "STIL_EXTERN_GESCHEITERT="), "1");
+    assert_ne!(
+        feld(&ausgabe, "STIL_MELDUNG="),
+        "-",
+        "ein fehlendes Blatt gehoert in die Statuszeile"
+    );
+    // FUENF versteckte Wurzeln, und die fuenfte ist die lehrreiche:
+    // regel-b, nur-screenreader, overlay, regel-d — plus `<head>`, den
+    // schon das STANDARD-Stylesheet unsichtbar macht
+    // (`speedcss::test_kopfbereich_ist_unsichtbar`). Die Zahl misst also
+    // die Kaskade als Ganzes und nicht nur die geholten Blaetter; genau
+    // deshalb steht sie hier mit der Aufzaehlung dabei.
+    assert_eq!(
+        feld(&ausgabe, "STIL_VERSTECKT="),
+        "5",
+        "vier Teilbaeume aus den Blaettern plus <head> aus dem Standard"
+    );
+
+    serial_println!(
+        "[BROWSER] Stylesheets: {} extern, {} import, {} versteckt, {} Regeln, {} B",
+        zahl(&ausgabe, "STIL_EXTERN_GELADEN="),
+        zahl(&ausgabe, "STIL_IMPORTE_GELADEN="),
+        zahl(&ausgabe, "STIL_VERSTECKT="),
+        zahl(&ausgabe, "STIL_REGELN="),
+        zahl(&ausgabe, "STIL_BYTES=")
+    );
+}
+
+/// **Ein Stylesheet, das nicht laedt, darf die Seite nicht verhindern** —
+/// und die Obergrenze greift.
+///
+/// Zwoelf `<link>` auf Dateien, die es nicht gibt: hoechstens zehn
+/// Versuche, zwei uebersprungen, und der Text steht trotzdem da.
+#[test_case]
+fn test_stylesheet_grenze_und_fehlschlag() {
+    if !programme_vorhanden() {
+        return;
+    }
+    let pfad = programme::seite_pfad_von("stilgrenze.html");
+    let ausgabe = pruefen(&pfad);
+    serial_println!("--- browser --pruefen {} ---\n{}", pfad, ausgabe);
+
+    // DIE WICHTIGERE HAELFTE: Die Seite lebt.
+    assert_eq!(feld(&ausgabe, "ZUSTAND="), "fertig");
+    assert_eq!(
+        feld(&ausgabe, "UNSICHER="),
+        "0",
+        "ein fehlendes Stylesheet ist kein Sicherheitsfehler"
+    );
+    let text = feld(&ausgabe, "TEXT=");
+    assert!(
+        text.contains("DIE SEITE STEHT TROTZ"),
+        "der Seitentext muss trotz zwoelf fehlender Blaetter dastehen\nTEXT={}",
+        text
+    );
+
+    // DIE GRENZE: zehn versucht, zwei uebersprungen, keins geladen.
+    assert_eq!(feld(&ausgabe, "STIL_EXTERN_VERSUCHT="), "10");
+    assert_eq!(feld(&ausgabe, "STIL_EXTERN_UEBERSPRUNGEN="), "2");
+    assert_eq!(feld(&ausgabe, "STIL_EXTERN_GESCHEITERT="), "10");
+    assert_eq!(feld(&ausgabe, "STIL_EXTERN_GELADEN="), "0");
+    // Ohne Autor-Blatt versteckt nur der Standard etwas (head, script …)
+    // — der Punkt hier ist der Text, nicht die Zahl.
+    serial_println!(
+        "[BROWSER] Grenze: {} versucht, {} uebersprungen, Seite lebt.",
+        zahl(&ausgabe, "STIL_EXTERN_VERSUCHT="),
+        zahl(&ausgabe, "STIL_EXTERN_UEBERSPRUNGEN=")
+    );
+}
+
+/// **Der Vergleich, um den es geht: mit und ohne externes Blatt.**
+///
+/// Dieselbe Seite, einmal so, wie sie ist, und einmal mit
+/// weggenommenem Stylesheet. Der Unterschied IST der Realitaets-Bericht
+/// im Kleinen — und er wird hier als Zahl festgehalten, damit niemand
+/// den Fix versehentlich zurueckbaut.
+#[test_case]
+fn test_ohne_stylesheet_erscheint_der_versteckte_text_wieder() {
+    if !programme_vorhanden() {
+        return;
+    }
+    // Dieselbe Seite ohne den `<link>` — der Zustand VOR diesem Schritt.
+    let ordner = programme::seiten_verzeichnis();
+    let pfad = alloc::format!("{}/stiltest-ohne-link.html", ordner);
+    let pfad = pfad.as_str();
+    let inhalt = b"<html><head><title>Ohne Blatt</title></head><body>\
+<p class=\"nur-screenreader\">SCREENREADER HINWEIS DER VERSCHWINDEN MUSS</p>\
+<p id=\"ende\">ENDE DES PRUEFSTANDS</p></body></html>";
+    fs::mit_fs(|dateisystem| dateisystem.schreiben(pfad, inhalt)).expect("Seite ohne Blatt");
+
+    let ohne = pruefen(pfad);
+    let text_ohne = feld(&ohne, "TEXT=");
+    assert!(
+        text_ohne.contains("SCREENREADER"),
+        "ohne Stylesheet MUSS der Screenreader-Text sichtbar sein — sonst \
+         prueft der Vergleich nichts\nTEXT={}",
+        text_ohne
+    );
+    assert_eq!(feld(&ohne, "STIL_EXTERN_VERSUCHT="), "0");
+
+    let mit = pruefen(&programme::seite_pfad_von("stiltest.html"));
+    let text_mit = feld(&mit, "TEXT=");
+    assert!(!text_mit.contains("SCREENREADER"));
+
+    serial_println!(
+        "[BROWSER] ohne Blatt: {} Befehle, Screenreader-Text SICHTBAR",
+        zahl(&ohne, "BEFEHLE=")
+    );
+    serial_println!(
+        "[BROWSER] mit Blatt:  {} Befehle, {} Teilbaeume versteckt",
+        zahl(&mit, "BEFEHLE="),
+        zahl(&mit, "STIL_VERSTECKT=")
+    );
+}
+
+// ===========================================================================
 // (5) LESEZEICHEN UND STARTSEITE
 // ===========================================================================
 
