@@ -20,7 +20,7 @@ edition = "2021"
 # Browser tun das), und ein Workspace-Mitglied, von dem niemand abhaengt,
 # wuerde bei jedem Kernel-Bau mitgebaut. Dass es fuer Bare-Metal UND fuer
 # den Host uebersetzt, prueft tools/speedhtml_allein_bauen.ps1.
-exclude = ["boot", "userland", "speedhtml", "speedcss", "speedlayout"]
+exclude = ["boot", "userland", "speedhtml", "speedcss", "speedlayout", "speedpaint"]
 
 [dependencies]
 # DER HTTP-PARSER (Serie 7, Teil 4) — herausgeloest aus src/netz/http.rs,

@@ -40,7 +40,7 @@ use std::process::Command;
 const PROGRAMME: &[&str] = &[
     "hallo", "kopiere", "netzhole", "zaehle", "filter", "elternprobe",
     "angreifer", "messung", "zertifikate", "tlsspike", "holes", "news",
-    "fenstertest", "uidemo", "bilder", "htmldump", "cssdump",
+    "fenstertest", "uidemo", "bilder", "htmldump", "cssdump", "browser",
 ];
 
 /// Die Testbilder, die mitreisen (erzeugt von tools/testbilder_erzeugen.py).
@@ -321,29 +321,57 @@ fn testbilder_einbetten(wurzel: &Path, out_dir: &Path) {
 // DIE TESTSEITE (Serie 8, Teil 4)
 // ===========================================================================
 
-/// Bettet `assets/testseiten/cern-theproject.html` ein — 2,2 KiB.
+/// Bettet die zwei Pruefseiten aus docs/browser-v1.md ein.
 ///
-/// WARUM NUR DIESE EINE von den dreien: Die anderen beiden (Wikipedia,
-/// example.com) werden ausschliesslich von den HOST-Tests der Kiste
-/// `speedhtml` gelesen und muessen deshalb nicht ins Image. Diese hier
-/// soll IN SpeedOS liegen, damit `starte htmldump /platte/seiten/cern.html`
-/// ohne Netz funktioniert — und weil sie die Pruefseite A aus
-/// docs/browser-v1.md ist.
+///   `cern-theproject.html`         2,2 KiB — Pruefseite A
+///   `wikipedia-betriebssystem.html` 293 KiB — Pruefseite B
 ///
-/// 300 KiB Wikipedia mitzuschleppen waere fuer denselben Zweck unnoetig;
-/// wer sie in SpeedOS braucht, holt sie mit `holes`.
+/// WARUM DIE KLEINE: damit `starte htmldump /platte/seiten/cern.html`
+/// ohne Netz funktioniert (Serie 8, Teil 4).
+///
+/// WARUM SEIT SERIE 8, TEIL 7 AUCH DIE GROSSE — der Kommentar hier hat
+/// frueher genau das Gegenteil behauptet („300 KiB mitzuschleppen waere
+/// unnoetig; wer sie braucht, holt sie mit `holes`"), und das galt,
+/// solange nur ein Parser zu pruefen war: Dessen Tests laufen auf dem
+/// HOST. Die MESSUNG des Scroll-Frames laeuft in QEMU, und sie braucht
+/// eine echte, grosse Seite. Sie beim Messen aus dem Netz zu holen hiesse,
+/// die Zahl, an der das Umstiegskriterium haengt, von einem fremden
+/// Server abhaengig zu machen — dieselbe Methodik wie bei den Netz-Tests:
+/// Das harte Gate liegt auf dem, was wir kontrollieren.
+///
+/// example.com bleibt draussen: 559 Byte, die nichts zeigen, was die
+/// CERN-Seite nicht auch zeigt.
 fn testseite_einbetten(wurzel: &Path, out_dir: &Path) {
-    println!("cargo:rerun-if-changed=assets/testseiten/cern-theproject.html");
-    let quelle = wurzel.join("assets").join("testseiten").join("cern-theproject.html");
-    let ziel = out_dir.join("testseite.html");
+    seite_kopieren(wurzel, out_dir, "cern-theproject.html", "testseite.html");
+    seite_kopieren(
+        wurzel,
+        out_dir,
+        "wikipedia-betriebssystem.html",
+        "grosse_testseite.html",
+    );
+}
+
+/// Eine Testseite nach OUT_DIR kopieren — oder eine LEERE anlegen.
+///
+/// FEHLT DIE DATEI, BAUT SPEEDOS TROTZDEM (dieselbe Entscheidung wie beim
+/// CA-Buendel): Ein leerer `include_bytes!` ist ein Programm ohne
+/// Testseite, ein Abbruch waere ein Repository, das man nicht bauen kann,
+/// bis man ein Skript gefunden hat.
+fn seite_kopieren(wurzel: &Path, out_dir: &Path, datei: &str, als: &str) {
+    println!("cargo:rerun-if-changed=assets/testseiten/{}", datei);
+    let quelle = wurzel.join("assets").join("testseiten").join(datei);
+    let ziel = out_dir.join(als);
     match std::fs::read(&quelle) {
         Ok(inhalt) => {
-            eprintln!("[build] Testseite eingebettet ({} Byte).", inhalt.len());
+            eprintln!("[build] Testseite {} eingebettet ({} Byte).", datei, inhalt.len());
             std::fs::write(&ziel, inhalt).expect("Testseite nach OUT_DIR kopieren");
         }
         Err(_) => {
             eprintln!(
-                "[build] KEINE Testseite unter assets/testseiten/ — `htmldump`                  braucht dann eine eigene Datei oder eine URL. Holen mit:                  tools/testseiten_holen.ps1"
+                "[build] KEINE Testseite {} unter assets/testseiten/ — `htmldump` und \
+                 `browser` brauchen dann eine eigene Datei oder eine URL. Holen mit: \
+                 tools/testseiten_holen.ps1",
+                datei
             );
             std::fs::write(&ziel, []).expect("leere Testseite anlegen");
         }

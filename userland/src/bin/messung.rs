@@ -293,13 +293,19 @@ fn fenster_kosten(breite: usize, gewuenschte_hoehe: usize) -> i32 {
     use libspeed::fenster::Fenster;
 
     // ======================================================================
-    // EIN BEFUND, DER BEIM MESSEN AUFFIEL — und der stehen bleibt:
+    // EIN BEFUND, DER BEIM MESSEN AUFFIEL — und der INZWISCHEN ERLEDIGT
+    // IST, aber als Mechanik stehen bleibt:
     //
-    // Der Pixelpuffer eines Programms liegt auf dem USER-HEAP, und der ist
-    // auf 12 MiB gedeckelt (prozess::HEAP_MAX_BYTES; er wohnt in der
-    // 16-MiB-Luecke zwischen Programm-Image und Stack). Ein Fenster in
-    // voller 4K-Groesse waere 3840 x 2100 x 4 Byte = 32,2 MiB — es PASST
-    // NICHT.
+    // Der Pixelpuffer eines Programms liegt auf dem USER-HEAP. Der war in
+    // Serie 8, Teil 1 auf 12 MiB gedeckelt, und ein Fenster in voller
+    // 4K-Groesse (3840 x 2100 x 4 Byte = 32,2 MiB) passte deshalb NICHT.
+    // Seit Serie 8, Teil 7 sind es 64 MiB, und es passt
+    // (docs/browser-rendern.md 5) — `HOEHE_GEKUERZT` sollte jetzt also
+    // immer 0 sein.
+    //
+    // DIE KUERZUNG BLEIBT TROTZDEM DRIN: Sie kostet nichts, und sie ist
+    // die Stelle, an der ein kuenftiger noch groesserer Schirm sich
+    // MELDET, statt das Programm mit „Speicher alle" sterben zu lassen.
     //
     // Statt das zu umgehen, wird es GEMESSEN und GEMELDET: Die Hoehe wird
     // auf das gekuerzt, was hineinpasst, und `HOEHE_GEKUERZT=1` sagt es.

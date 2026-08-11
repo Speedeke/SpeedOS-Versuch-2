@@ -53,6 +53,14 @@ speedcss = { path = "../speedcss" }
 # Widget-Toolkit. Die drei Zahlen liefert `cssdump` selbst (RasterMetrik).
 speedlayout = { path = "../speedlayout" }
 
+# MALEN, SCROLLEN, INVALIDIEREN (Serie 8, Teil 7). Die Kiste, die aus den
+# Anzeige-Befehlen von `speedlayout` Zeichen-Aufrufe auf einer
+# `speedui::Leinwand` macht — und die entscheidet, was nach einem
+# Ereignis ueberhaupt neu gemalt werden muss. Sie kennt weder Syscall
+# noch Framebuffer; was sie braucht (Leinwand, Bildquelle), verlangt sie
+# als Trait, und `browser` liefert es.
+speedpaint = { path = "../speedpaint" }
+
 # Der Heap-Allocator des User-Space (Serie 7, Teil 3) — dieselbe Kiste, die
 # auch der Kernel benutzt (src/allocator.rs). Sie ist no_std und kann
 # `extend`, und genau das braucht ein Heap, der auf Anforderung waechst.
@@ -202,6 +210,14 @@ path = "src/bin/htmldump.rs"
 [[bin]]
 name = "cssdump"
 path = "src/bin/cssdump.rs"
+
+# DER MEILENSTEIN VON SERIE 8 (Teil 7): eine echte Webseite, gerendert in
+# einem unprivilegierten Prozess mit eigenem Adressraum. Holen, parsen,
+# kaskadieren, setzen, malen, scrollen — und `--messen=N` fuer das
+# Umstiegskriterium aus docs/fenster-syscalls.md.
+[[bin]]
+name = "browser"
+path = "src/bin/browser.rs"
 
 # panic = "abort" ist Pflicht: Abwickeln (unwinding) bräuchte eine
 # Personality-Funktion und Landing Pads — beides gibt es ohne std nicht.

@@ -261,7 +261,10 @@ Der Test rechnet das Kriterium aus und schreibt das Ergebnis ins Protokoll:
   kostet, den Malvorgang eingerechnet.
 * **Anteil** = `VOLLBILD_US / Scroll-Frame`.
 
-### Stand heute
+### Stand bei der Festlegung (Serie 8, Teil 1)
+
+Gemessen mit `fenstertest`, also einem Programm, das eine **einfarbige
+Fläche** malt:
 
 | Auflösung | Scroll-Frame | Anteil Kopie | Kriterium |
 |---|---:|---:|---|
@@ -270,13 +273,38 @@ Der Test rechnet das Kriterium aus und schreibt das Ergebnis ins Protokoll:
 | 4K hochgerechnet auf volle Höhe¹ | ~2 100 µs | ~73 % | **nicht erfüllt** |
 
 ¹ Hochrechnung, keine Messung: 3840 × 2088 px bei linearem Verhalten. Warum
-sie nötig ist: §6.
+sie nötig war: §6.
 
-**Der Anteil ist schon jetzt über 50 %** — die Kopie *ist* der grössere
+**Der Anteil ist schon hier über 50 %** — die Kopie *ist* der grössere
 Posten. Es fehlt allein die absolute Schranke, und zwar um den Faktor vier.
-Wenn ein HTML-Renderer dazukommt, wird der Malvorgang teurer und der Anteil
-*sinkt*; das Kriterium wird also nicht versehentlich reissen, sondern erst,
-wenn die Fläche wirklich zu gross wird.
+
+### DIE ENTSCHEIDUNG (Serie 8, Teil 7): der Pixelpuffer bleibt
+
+Mit dem ersten echten Renderer wurde aus der Schätzung eine Messung — an
+einem langen Wikipedia-Artikel, aus Ring 3, mit `browser --messen=200`.
+**Vollständig samt Methodik und Gegenrechnung in
+[`browser-rendern.md`](browser-rendern.md) §4**; die Kurzfassung:
+
+| Auflösung | Scroll-Frame | Anteil Kopie | Kriterium |
+|---|---:|---:|---|
+| 720p-Klasse (1360 × 696) | 500 µs | 90 % | **nicht erfüllt** |
+| 4K (3840 × 2088, echt gemessen) | 7 050–7 725 µs | 74 % | **nicht erfüllt** |
+
+Das Kriterium ist **nicht erfüllt**, geteilter Speicher wird also nicht neu
+bewertet. Zwei Dinge gehören dazu, damit das keine bequeme Lesart ist:
+
+1. **Die 4K-Zahl ist knapp** — 88–97 % der Schwelle, nicht „reichlich Luft".
+2. **Ohne das Streifen-Zeichnen wäre das Kriterium ERFÜLLT** (9 725–10 150 µs
+   bei 52–56 % Kopie-Anteil). Die naheliegende Optimierung ist also nicht
+   nachträglich angewandt worden, um ein unbequemes Ergebnis zu drücken —
+   sie war Teil desselben Schritts, und die Gegenrechnung steht in der
+   Testausgabe jedes Laufs.
+
+Die oben geäusserte Erwartung — „wenn ein HTML-Renderer dazukommt, wird der
+Malvorgang teurer und der Anteil *sinkt*" — hat sich **nicht** bestätigt:
+Der Anteil blieb bei 74 %, weil das Streifen-Zeichnen den Malvorgang
+kleiner gehalten hat, als das Vollbild-Malen ihn gemacht hätte. Bei 720p
+stieg er sogar auf 90 %.
 
 ---
 

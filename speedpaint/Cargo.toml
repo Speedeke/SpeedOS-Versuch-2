@@ -1,0 +1,63 @@
+# speedpaint — Aus Anzeige-Befehlen werden Pixel.
+#
+# ===========================================================================
+# DIE SECHSTE KISTE, UND SIE IST DIE ERSTE, DIE ZEICHNET
+#
+# `speedlayout` hoert bei einer LISTE VON BEFEHLEN auf, und das war die
+# wichtigste Entscheidung von Teil 6. Hier faengt die andere Haelfte an:
+# Befehle in eine Flaeche malen, den Ausschnitt waehlen (Scrollen) und
+# entscheiden, was ueberhaupt neu gemalt werden muss (Invalidierung).
+#
+# Was sie NICHT tut: einen Framebuffer anfassen, einen Syscall machen,
+# ein Bild dekodieren, eine Seite holen. Sie bekommt eine `Leinwand` und
+# eine `Bildquelle` und malt.
+#
+# ===========================================================================
+# ZWEI ABHAENGIGKEITEN — UND WARUM HIER `speedui` DABEI IST
+#
+#   speedlayout   die Anzeige-Befehle (und mit ihr speedhtml + speedcss)
+#   speedui       das `Leinwand`-Trait
+#
+# `speedlayout` hat `speedui` AUSDRUECKLICH nicht genommen, mit guter
+# Begruendung: Es braucht Textmetrik, kein Toolkit. Hier liegt der Fall
+# GENAU ANDERSHERUM, und deshalb ist es keine Aufweichung jener Regel,
+# sondern ihre Anwendung:
+#
+#   * Ein Maler braucht eine ZEICHENFLAECHE. `Leinwand` IST diese
+#     Abstraktion — sie existiert seit Teil 2, hat ZWEI Wirte (den
+#     Kernel-Zeichner und `uidemo`) und ist genau dafuer geschnitten.
+#     Ein eigenes `Malflaeche`-Trait daneben waere ein zweiter Name fuer
+#     dieselbe Sache; jeder Wirt muesste beide bedienen.
+#   * Und der Grund, der bei `speedlayout` fuer ein eigenes Trait sprach,
+#     spricht hier DAFUER: die Tests. `speedui::attrappe::MalProtokoll`
+#     ZEICHNET NICHT, sondern SCHREIBT MIT. „Landet der Text an der
+#     richtigen Stelle?" ist damit eine Frage an eine Liste statt an ein
+#     Bildschirmfoto — dieselbe Eigenschaft, die die Layout-Tests
+#     ueberhaupt erst moeglich gemacht hat, eine Stufe weiter.
+#
+# Die Richtung stimmt: speedpaint haengt an speedui, nicht umgekehrt.
+# `speedui/Cargo.toml` hat weiterhin einen LEEREN `[dependencies]`-Block,
+# und tools/speedui_allein_bauen.ps1 prueft das bei jedem Lauf.
+
+[package]
+name = "speedpaint"
+version = "0.1.0"
+edition = "2021"
+description = "Anzeige-Befehle malen, scrollen, invalidieren — no_std"
+
+[dependencies]
+speedlayout = { path = "../speedlayout" }
+speedui = { path = "../speedui" }
+# AUSDRUECKLICH und nicht nur ueber speedlayout mitgeschleift: Die Farbe
+# IN einem Anzeige-Befehl ist `speedcss::Farbe`, der Maler nennt den Typ
+# also beim Namen. Eine Abhaengigkeit, die man benutzt, schreibt man hin.
+speedcss = { path = "../speedcss" }
+
+# Wie bei speedhtml/speedlayout: Unoptimiert ist der Maler rund
+# hundertmal langsamer, und ein Test, der Minuten braucht, wird nicht
+# mehr ausgefuehrt.
+[profile.test]
+opt-level = 2
+
+[profile.dev]
+opt-level = 2

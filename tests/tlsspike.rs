@@ -40,7 +40,14 @@ fn main(boot_info: &'static mut BootInfo) -> ! {
         .expect("kein Physik-Mapping");
     memory::init(VirtAddr::new(offset), &boot_info.memory_regions);
     allocator::init_heap().expect("Heap-Initialisierung fehlgeschlagen");
-    allocator::heap_erweitern(512).expect("Heap-Erweiterung fehlgeschlagen");
+    // 2048 Seiten = 8 MiB. Waren bis Serie 8, Teil 7 nur 512 (2 MiB):
+    // `programme::installieren()` liest beim Boot JEDE Programmdatei GANZ
+    // in den Heap, um sie zu vergleichen, und mit `browser` (1,27 MiB) ist
+    // das groesste Programm wieder gewachsen. Dieser Testkern starb genau
+    // daran — es ist derselbe Fall wie bei `cssdump` in Teil 5, und der
+    // Kommentar in main.rs bittet zu Recht darum, die Zahl bei jedem
+    // grossen Programm zu pruefen.
+    allocator::heap_erweitern(2048).expect("Heap-Erweiterung fehlgeschlagen");
 
     speed_os::ata::init();
     speed_os::pci::init();
@@ -217,8 +224,20 @@ fn test_heap_syscall_grenzen() {
         heap_ende < stack_oben - 64 * 1024,
         "zwischen Heap-Ende und Stack muss ungemappter Abstand bleiben"
     );
-    // Und die Obergrenze ist kleiner als die Lücke (16 MiB).
-    assert!(core::hint::black_box(prozess::HEAP_MAX_BYTES) < 16 * 1024 * 1024);
+    // Und die Obergrenze ist kleiner als die Lücke zwischen Image-Ende
+    // und Stack.
+    //
+    // FRÜHER STAND HIER `< 16 MiB` — die Lückengrösse als Zahl. Als
+    // Serie 8, Teil 7 die Lücke vergrösserte (der Browser sprengte die
+    // 12 MiB), prüfte diese Zeile plötzlich etwas anderes als gemeint:
+    // nicht mehr „der Heap passt in die Lücke", sondern „die Lücke ist
+    // die von damals". Jetzt steht die ABSICHT da, und sie gilt bei
+    // jeder Layout-Änderung weiter.
+    let luecke = core::hint::black_box(prozess::ELF_STACK_OBEN - speed_os::elf::IMAGE_ENDE);
+    assert!(
+        core::hint::black_box(prozess::HEAP_MAX_BYTES) < luecke,
+        "der Heap muss in die Lücke zwischen Image und Stack passen"
+    );
     serial_println!(
         "  User-Heap: {:#x}..{:#x} ({} MiB), danach {} MiB Abstand zum Stack.",
         prozess::HEAP_START,

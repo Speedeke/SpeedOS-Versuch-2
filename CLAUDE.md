@@ -625,6 +625,117 @@
   will nur Masse), sondern der `Zeichner` — weil er keine Abhaengigkeit ist,
   sondern eine AUFRUF-KONVENTION.
 
+## DER RENDERER: MALEN, SCROLLEN, INVALIDIEREN (Serie 8, Teil 7, speedpaint/)
+- **MEILENSTEIN: `starte browser /platte/seiten/cern.html &` zeigt die
+  erste Webseite der Welt an** — geparst, kaskadiert, gesetzt und gemalt in
+  einem Ring-3-Prozess mit eigenem Adressraum. Vollstaendig in
+  docs/browser-rendern.md. Der Browser selbst VERDRAHTET nur (netz ->
+  speedhtml -> speedcss -> speedlayout -> speedpaint -> libspeed); wer dort
+  Parser- oder Layout-Logik findet, hat einen Fehler gefunden.
+- **DIE SECHSTE KISTE HAENGT AN `speedui` — dieselbe Regel wie bei
+  speedlayout, nicht ihre Ausnahme.** `speedlayout` durfte das Toolkit
+  NICHT nehmen (es braucht drei Zahlen Textmetrik). Ein MALER braucht eine
+  ZEICHENFLAECHE, und `Leinwand` IST diese Abstraktion — ein eigenes
+  `Malflaeche`-Trait waere ein zweiter Name fuer dieselbe Sache, und jeder
+  Wirt muesste beide bedienen. Der zweite Grund ist derselbe wie dort: die
+  TESTS. `speedui::attrappe::MalProtokoll` zeichnet nicht, sondern schreibt
+  mit — 34 Host-Tests in 0,01 s. **Die Richtung ist entscheidend:
+  speedpaint -> speedui, NIE umgekehrt**; `speedui` hat weiter einen leeren
+  `[dependencies]`-Block (zwei Skripte pruefen das:
+  `tools/speedpaint_allein_bauen.ps1` und `speedui_allein_bauen.ps1`).
+- **`Leinwand::bild` ist die ELFTE Operation, mit Voreinstellung** — genau
+  das Muster von `text_stil` aus Teil 3: KEIN Widget braucht sie, nur der
+  Renderer. Die Voreinstellung malt einen RAHMEN und nicht nichts; ein
+  Wirt, der keine Bilder kann, soll den PLATZ des Bildes zeigen.
+- **SCROLLEN LAYOUTET NICHT NEU, und das steht im TYP:** `malen` bekommt
+  die Anzeigeliste als `&`-Referenz, es gibt keinen Pfad von einem
+  Scroll-Ereignis zu `speedlayout::setzen`.
+  `test_scrollen_laesst_das_layout_in_ruhe` faehrt 50 Schritte und
+  vergleicht die Liste byteweise. GEKLEMMT WIRD AN EINER STELLE
+  (`Sicht::klemmen`), durch die JEDER Weg laeuft (Rad, Tasten, Balken,
+  Groessenaenderung) — deshalb kann keiner ueber Anfang oder Ende hinaus.
+- **DER STREIFEN SPART DAS MALEN, NICHT DIE KOPIE.** Beim Scrollen werden
+  die eigenen Pixel verschoben (`Fenster::senkrecht_verschieben`, ein
+  `copy_within`) und nur der neue Rand gemalt — uebertragen werden MUSS
+  trotzdem die ganze Flaeche, weil der Kernel eine eigene Kopie des
+  Fensterpuffers haelt und von der Verschiebung nichts weiss. Einen
+  „Fenster scrollen"-Syscall gibt es nicht (Sonderfall im ABI fuer genau
+  einen Anwendungsfall). Genau das macht die Messung interessant.
+- **DIE INVALIDIERUNGS-REGELN SIND EINE REINE FUNKTION** (`Anlass ->
+  Massnahme`), keine if-Kette in der Ereignisschleife — so ist jede Regel
+  ein Testfall, UND der Browser benutzt die Regeln, die geprueft werden.
+  Breite geaendert -> NeuLayouten. **NUR die HOEHE geaendert -> NICHT
+  layouten** (die Hoehe geht in kein Layout ein), aber voll MALEN (der
+  Fensterpuffer ist nach `Groesse` leer) — die Regel, die man uebersieht.
+  Scrollen -> nur der Streifen, nie Layout. Bild geladen -> nur sein
+  Rechteck, **nie Layout**, weil `speedlayout` ein Bild NIE nach seiner
+  Groesse fragt (Kasten aus width/height oder festem 32x32-Platzhalter).
+  Preis in grenzen.md: Ein `<img>` ohne Massangabe wird gequetscht.
+- **DIE ENTSCHEIDUNG ZUM UMSTIEGSKRITERIUM (Teil 1 festgelegt, hier
+  geprueft): PIXELPUFFER PER SYSCALL BLEIBT.** Gemessen an einem langen
+  Wikipedia-Artikel aus Ring 3: 720p **500–925 us** (86–90 % Kopie), 4K
+  **7 050–7 725 us** (74 %) — die 8-ms-Schranke ist in beiden nicht
+  gerissen. ZWEI DINGE, damit das keine bequeme Lesart ist: Die 4K-Zahl
+  liegt bei **88–97 % der Schwelle**, und **OHNE das Streifen-Zeichnen
+  WAERE das Kriterium ERFUELLT** (9 725–10 150 us bei 52–56 %). Der Test
+  rechnet diese Gegenrechnung bei jedem Lauf mit aus. Textstuecke zu
+  cachen (die zweite vorgesehene Optimierung) ist NICHT noetig und deshalb
+  NICHT gebaut — es verschoebe das Verhaeltnis in die falsche Richtung.
+  Das Kriterium wird NICHT verschoben; reisst es spaeter, entsteht ERST
+  DANN das Entwurfsdokument fuer geteilten Speicher.
+- **MESSFALLE, teuer gelernt: MITTELN STATT BESTWERT.** Die erste Fassung
+  lieferte bei 4K **7300 us und 9150 us in zwei Laeufen** — einmal unter,
+  einmal ueber der Schwelle. Ein Kriterium, das je nach Lauf anders
+  ausfaellt, entscheidet nichts. Jetzt gilt der BESTE VON FUENF
+  DURCHGAENGEN (dieselbe Methodik wie `messung` Modus 1, aus demselben
+  Grund: Scheduler und Compositor arbeiten nebenher).
+- **DER USER-HEAP IST VON 12 AUF 64 MiB GEWACHSEN** (`HEAP_MAX_BYTES`,
+  Luecke 16 -> 96 MiB, Abstand zum Stack 32 MiB). Teil 1 hatte es
+  vorhergesagt; gerissen ist die Grenze aber NICHT am Fenster, sondern am
+  DOKUMENT (`browser` starb am Wikipedia-Artikel bei 12 249 304 Bytes,
+  noch in 720p — ein grosses Dokument liegt mehrfach im Speicher). **Es
+  bleibt eine HARTE Grenze: angehoben, nicht abgeschafft** (`KeinPlatz`
+  weiterhin, Seiten nur auf Anforderung). NEBENEFFEKT: Die offene Grenze
+  aus Teil 1 ist damit GESCHLOSSEN — ein 4K-Vollbild-Fenster (32,1 MiB)
+  passt jetzt. **Die Zahl steht an ZWEI Stellen** (Kernel und
+  `libspeed::heap`), weil eine ABI ein Vertrag ist und kein Header.
+- **DER VORZEICHEN-FEHLER, DEN DIE TESTS NICHT FANDEN:** Das Mausrad
+  scrollte in die falsche Richtung, und BEIDE Klemmungs-Tests waren
+  trotzdem gruen — sie fassen das Rad nur dort an, wo ohnehin nichts
+  passieren darf (am Anfang nach oben, am Ende nach unten), und das tut in
+  JEDER Konvention nichts. `test_rad_richtung` prueft jetzt aus der MITTE.
+  Die Konvention richtet sich nach `maus.rs` („positiv = nach oben") und
+  nicht nach dem, was in `sicht.rs` fuer sich genommen huebscher aussah:
+  **Zwei Vorzeichen-Konventionen fuer dasselbe Geraet im selben System
+  sind ein Bedienfehler**, egal welche einzeln die schoenere ist.
+- **DIE SCHRIFT DES BROWSERS IST DAS 5x7-RASTER von `libspeed`** (kein
+  Schrift-Syscall, docs/grenzen.md): nur ASCII, alles GROSS, keine
+  Umlaute, ganzzahlige Vergroesserungen, fett nur angedeutet (zweimal mit
+  1 px Versatz), kein Kursiv. WICHTIG: Die BREITE aendert sich dadurch
+  nicht, und `RasterMetrik::text_breite` zaehlt `chars()` — Messung und
+  Zeichnung bleiben beieinander, die Zeilen brechen richtig um. Erst
+  echter Seitentext zeigte, dass dem Raster der APOSTROPH fehlte (aus
+  „WORLD'S" wurde „WORLD<Kasten>S"); jetzt hat es ihn und 16 weitere
+  Satzzeichen.
+- **`libspeed::leinwand` haelt die ZWEI NAEHTE eines Renderers
+  nebeneinander** (`RasterMetrik` fuers Messen, `FensterLeinwand` fuers
+  Malen), und zwar mit Absicht: Laufen sie auseinander, bricht das Layout
+  an Stellen um, an denen der Text gar nicht endet — von aussen nicht zu
+  sehen, sondern nur „das sieht komisch aus". **`uidemo` behaelt seine
+  EIGENE Leinwand**: Sein Zweck ist der Beweis, dass ein fremder Wirt die
+  Traits aus einer Beschreibung bedienen kann; teilte es sich den Code,
+  gaebe es wieder nur einen Wirt.
+- **SECHS TESTKERNE BRAUCHTEN MEHR HEAP (2 -> 8 MiB)** —
+  `programme::installieren()` liest beim Boot JEDE Programmdatei ganz in
+  den Heap, und `browser` ist mit 1,27 MiB das neue groesste Programm.
+  Derselbe Fall wie `cssdump` in Teil 5; der Kommentar in main.rs bittet
+  zu Recht darum, die Zahl bei jedem grossen Programm zu pruefen.
+- **ZAHLEN:** 34 Host-Tests in 0,01 s, 3 weitere in QEMU
+  (`tests/browser_rendern.rs`). Pruefseite B: **8463 Anzeige-Befehle**,
+  26 742 px hoch bei 720p / 21 047 px bei 4K, Layout 6–9 ms bzw. 37–41 ms,
+  Heap-Spitze 14,1 MiB bzw. 42,6 MiB. ELF `browser` 1 274 872 B. Fuenf
+  Laeufe, 0 Frames geleckt.
+
 ## LAYOUT: KAESTEN, ZEILEN, ANZEIGE-BEFEHLE (Serie 8, Teil 6, speedlayout/)
 - **DAS ERGEBNIS IST EINE LISTE VON BEFEHLEN, KEIN BILD.** Das ist die
   wichtigste Entscheidung des Teils: „Rechteck bei (10,20), 100x30, blau"

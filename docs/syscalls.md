@@ -228,8 +228,9 @@ inklusive geordnetem TCP-Abbau).
     (`libspeed::heap`): Es gibt genau einen zusammenhängenden Heap, der nach
     oben wächst — dasselbe Modell wie `brk` unter Unix.
   * Layout: ab `prozess::HEAP_START` (= `elf::IMAGE_ENDE` + 4 KiB), höchstens
-    `HEAP_MAX_BYTES` (12 MiB). Darüber `KeinPlatz` (14). Danach bleiben
-    3 MiB ungemappt als Abstand zum Stack.
+    `HEAP_MAX_BYTES` (**64 MiB** seit Serie 8, Teil 7 — vorher 12 MiB, siehe
+    `docs/browser-rendern.md` §5). Darüber `KeinPlatz` (14). Danach bleiben
+    32 MiB ungemappt als Abstand zum Stack.
   * **Es gibt kein Gegenstück zum Freigeben, und das ist Absicht:** Ein
     Prozess gibt Seiten nie einzeln zurück; sein Adressraum fällt beim Ende
     als Ganzes (Serie 6, Teil 3). Der Allocator verwaltet innerhalb dessen,

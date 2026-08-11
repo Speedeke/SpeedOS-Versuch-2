@@ -296,6 +296,29 @@ pub trait Leinwand {
     fn text_stil(&mut self, x: i32, y: i32, text: &str, groesse: i32, stil: Stil, farbe: Farbe) {
         self.text(x, y, text, groesse, stil.fett, farbe);
     }
+
+    /// Ein RGBA-Bild in ein Rechteck malen (Serie 8, Teil 7).
+    ///
+    /// `rgba` sind `quell_breite * quell_hoehe` Pixel zu je vier Byte
+    /// (R, G, B, A) — das Format, das `libspeed::bild` liefert. Passt die
+    /// Quellgroesse nicht zum Ziel, SKALIERT der Wirt (Punktabtastung
+    /// genuegt; ein Browser ohne Interpolation sieht kantig aus, aber
+    /// richtig).
+    ///
+    /// WARUM ALS ELFTE OPERATION MIT VOREINSTELLUNG — dieselbe
+    /// Ueberlegung wie bei `text_stil` eine Ebene hoeher: KEIN Widget
+    /// braucht sie, nur der Renderer. Eine Pflicht-Methode waere ein
+    /// Umbau beider Wirte fuer eine Faehigkeit, die die Widgets nie
+    /// aufrufen.
+    ///
+    /// DIE VOREINSTELLUNG ZEICHNET EINEN RAHMEN und nicht nichts: Ein
+    /// Wirt, der keine Bilder kann, soll den PLATZ des Bildes zeigen.
+    /// Unsichtbar zu scheitern ist die schlechtere Haelfte jeder
+    /// Fehlerbehandlung — dieselbe Haltung wie das Magenta bei einem
+    /// unbekannten Icon-Zeichen.
+    fn bild(&mut self, ziel: Rechteck, _quell_breite: i32, _quell_hoehe: i32, _rgba: &[u8]) {
+        self.rahmen(ziel, Farbe::neu(150, 150, 150));
+    }
 }
 
 // ---------------------------------------------------------------------------

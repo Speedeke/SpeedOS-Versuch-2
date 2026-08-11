@@ -182,13 +182,17 @@ Keine Threads. Kein SMP — SpeedOS läuft auf **einem** Kern.
   das **Kontextmenü** (es ist ein Fenster-Manager-Overlay) und der
   mehrzeilige **Texteditor** von SpeedText.
   Bericht: `docs/speedui-trennung.md` §9.
-* **Ein Fenster über den ganzen 4K-Schirm passt nicht in den User-Heap.**
-  Der Pixelpuffer eines Programms liegt auf dessen eigenem Heap, und der ist
-  auf 12 MiB gedeckelt (`prozess::HEAP_MAX_BYTES`, in der 16-MiB-Lücke
-  zwischen Programm-Image und Stack). 3840 × 2088 × 4 Byte sind **32,1 MiB**
-  — fast das Dreifache. Ein Browser bei 4K braucht deshalb entweder ein
-  grösseres Prozess-Layout (eine ABI-Änderung) oder er hält seinen Inhalt in
-  Streifen. Gemessen und ausgerechnet in `docs/fenster-syscalls.md` §6.
+* ~~**Ein Fenster über den ganzen 4K-Schirm passt nicht in den
+  User-Heap.**~~ **GESCHLOSSEN in Serie 8, Teil 7.** Der Pixelpuffer eines
+  Programms liegt auf dessen eigenem Heap, und der war auf 12 MiB
+  gedeckelt — 3840 × 2088 × 4 Byte sind 32,1 MiB, fast das Dreifache. Die
+  damals genannten zwei Wege („grösseres Prozess-Layout oder Streifen")
+  sind inzwischen **beide** gegangen: `prozess::HEAP_MAX_BYTES` steht auf
+  **64 MiB** (Lücke 96 MiB), und der Browser malt in Streifen. Gerissen
+  ist die alte Grenze am Ende nicht am Fenster, sondern am DOKUMENT — der
+  Wikipedia-Artikel sprengte sie schon in 720p. Zahlen und Begründung:
+  `docs/browser-rendern.md` §5. Die Grenze ist **angehoben, nicht
+  abgeschafft**: Darüber gibt es weiterhin `KeinPlatz` (14).
 * Ein Prozess-Fenster bekommt **keine Schrift vom Kernel** (die
   vorgerasterten Fonts sind Kernel-Daten, es gibt keinen Syscall dafür),
   **kein eigenes Icon**, **keine Zwischenablage** und **keine
@@ -365,6 +369,47 @@ Kaskade und Vererbung durch (`speedcss`). Was **nicht** dabei ist:
 * **Grenzen:** Verschachtelungstiefe 64 (das Layout ist rekursiv, der
   User-Stack 64 KiB), 100 000 Kästen, 100 000 Zeilen. Darüber wird der
   Teilbaum abgeschnitten und gezählt.
+
+### Der Renderer: es wird gemalt, aber mit der Schrift eines Prozesses
+
+*(Serie 8, Teil 7 — `speedpaint` + `userland/browser`,
+`docs/browser-rendern.md`)*
+
+* **Die Schrift des Browsers ist das eingebaute 5×7-Raster von
+  `libspeed`** — denn ein Prozess bekommt die vorgerasterten
+  Kernel-Fonts nicht (kein Schrift-Syscall, siehe oben). Daraus folgen
+  drei sichtbare Einschränkungen:
+  * **Nur ASCII, und alles GROSS.** Die Rastertabelle kennt keine
+    Kleinbuchstaben (`text` schlägt jedes Zeichen auf Großschreibung) und
+    **keine Umlaute**: Aus „HAUPTMENÜ" wird „HAUPTMEN▪". Das gilt nur für
+    die Darstellung — `RasterMetrik::text_breite` zählt `chars()`, die
+    Zeilen brechen also an der richtigen Stelle um.
+  * **Nur ganzzahlige Vergrößerungen** (1–4×). Eine Überschrift, die
+    19 px will, bekommt 21.
+  * **Fett wird angedeutet** (zweimal mit einem Pixel Versatz),
+    **Kursiv gar nicht** — es würde das Raster unleserlich machen.
+    Die Breite ändert sich in beiden Fällen nicht, Messung und Zeichnung
+    bleiben also beieinander.
+* **Bilder werden nur von der PLATTE geladen, nicht aus dem Netz.** Ein
+  `<img src="https://…">` bekommt den Platzhalter. Nebenher zu laden
+  braucht eine Ereignisschleife, die das kann — das gehört nicht in
+  einen Renderer.
+* **Ein geladenes Bild löst NIE ein Neu-Layout aus**, weil das Layout ein
+  Bild nie nach seiner Größe fragt. Folge: Ein `<img>` **ohne**
+  `width`/`height` wird in den Platzhalter von 32×32 gequetscht. Echte
+  Browser layouten nach dem Laden neu — das kostet den berüchtigten
+  Seitensprung und eine Layout-Runde je Bild.
+* **Keine Links, keine Auswahl, kein Suchen.** Der Browser zeigt an und
+  scrollt. `Befehl::Text` trägt zwar seine `KnotenId` (Klickziele wären
+  also auflösbar), aber es gibt keine Navigation — ein Klick auf einen
+  blauen, unterstrichenen Text tut nichts.
+* **Beim Umlegen auf eine neue Fensterbreite wird der Scroll-Versatz
+  nicht inhaltlich mitgeführt.** Er wird nur in den neuen erlaubten
+  Bereich geklemmt; nach einer Breitenänderung steht man deshalb an
+  einer anderen Stelle des Textes als vorher.
+* **Alpha wird gegen WEISS gemischt**, nicht gegen den echten
+  Untergrund — `Fenster` gibt den gelesenen Pixel nicht heraus. Auf
+  einer hellen Seite fällt das nicht auf, auf einer dunklen schon.
 
 ---
 

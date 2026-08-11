@@ -236,6 +236,47 @@ impl Fenster {
         ((rot as u32) << 16) | ((gruen as u32) << 8) | blau as u32
     }
 
+    /// Verschiebt den EIGENEN Puffer senkrecht um `dy` Pixel.
+    ///
+    /// =====================================================================
+    /// DER SCHNELLPFAD DES SCROLLENS (Serie 8, Teil 7)
+    ///
+    /// Beim Scrollen um `dy` bleibt fast der ganze Inhalt derselbe — er
+    /// steht nur woanders. Ihn zu VERSCHIEBEN statt neu zu malen, spart
+    /// das Zeichnen aller sichtbaren Befehle; danach muss nur der neu
+    /// freigewordene Streifen gemalt werden (`speedpaint::Sicht` rechnet
+    /// aus, welcher).
+    ///
+    /// `dy > 0` heisst: der Inhalt wandert nach OBEN (man scrollt nach
+    /// unten weiter). Der freigewordene Streifen liegt dann UNTEN und
+    /// wird NICHT geleert — der Maler fuellt ihn ohnehin als Erstes mit
+    /// dem Seitenhintergrund, und ihn hier zusaetzlich zu leeren waere
+    /// derselbe Speicher zweimal angefasst.
+    ///
+    /// WAS DAS **NICHT** SPART: die Uebertragung. Der Kernel hat eine
+    /// eigene Kopie des Fensterpuffers und weiss von dieser Verschiebung
+    /// nichts — es muss anschliessend trotzdem die ganze Flaeche
+    /// uebertragen werden. Gemessen und eingeordnet in
+    /// docs/browser-rendern.md; es ist genau die Zahl, an der das
+    /// Umstiegskriterium aus docs/fenster-syscalls.md haengt.
+    pub fn senkrecht_verschieben(&mut self, dy: i32) {
+        let weite = dy.unsigned_abs() as usize;
+        if dy == 0 || weite >= self.hoehe {
+            return;
+        }
+        let zeilen = self.hoehe - weite;
+        let versatz = weite * self.breite;
+        if dy > 0 {
+            // Inhalt nach oben: Ziel liegt VOR der Quelle, also vorwaerts
+            // kopieren. `copy_within` beherrscht die Ueberlappung selbst
+            // (es ist ein memmove) — von Hand waere hier die klassische
+            // Stelle fuer einen Ueberlappungsfehler.
+            self.pixel.copy_within(versatz.., 0);
+        } else {
+            self.pixel.copy_within(..zeilen * self.breite, versatz);
+        }
+    }
+
     /// Uebertraegt den GANZEN Puffer ins Fenster. Liefert die Zahl der
     /// uebernommenen Pixel (kleiner als erwartet heisst: das Fenster ist
     /// gerade kleiner geworden — dann kommt gleich ein `Groesse`-Ereignis).
@@ -430,6 +471,31 @@ fn raster(zeichen: char) -> [u8; 5] {
         '=' => [0x14, 0x14, 0x14, 0x14, 0x14],
         '#' => [0x14, 0x7F, 0x14, 0x7F, 0x14],
         '*' => [0x14, 0x08, 0x3E, 0x08, 0x14],
+        // SATZZEICHEN AUS ECHTEM TEXT (Serie 8, Teil 7). Sie fehlten, und
+        // der erste gerenderte Seitentext hat es sofort gezeigt: Aus
+        // „WORLD'S" wurde „WORLD<Kasten>S" — der Apostroph ist in
+        // englischer Prosa haeufiger als jedes `#` oder `*`, die hier von
+        // Anfang an standen. Ein fehlendes Zeichen SICHTBAR zu machen war
+        // richtig; es dann auch zu ergaenzen, ist der zweite Schritt.
+        '\'' => [0x00, 0x00, 0x07, 0x00, 0x00],
+        '"' => [0x00, 0x07, 0x00, 0x07, 0x00],
+        ';' => [0x00, 0x56, 0x36, 0x00, 0x00],
+        '<' => [0x08, 0x14, 0x22, 0x41, 0x00],
+        '>' => [0x00, 0x41, 0x22, 0x14, 0x08],
+        '[' => [0x00, 0x7F, 0x41, 0x41, 0x00],
+        ']' => [0x00, 0x41, 0x41, 0x7F, 0x00],
+        '{' => [0x00, 0x08, 0x36, 0x41, 0x00],
+        '}' => [0x00, 0x41, 0x36, 0x08, 0x00],
+        '%' => [0x23, 0x13, 0x08, 0x64, 0x62],
+        '&' => [0x36, 0x49, 0x55, 0x22, 0x50],
+        '_' => [0x40, 0x40, 0x40, 0x40, 0x40],
+        '|' => [0x00, 0x00, 0x7F, 0x00, 0x00],
+        '@' => [0x3E, 0x41, 0x5D, 0x55, 0x1E],
+        '$' => [0x24, 0x2A, 0x7F, 0x2A, 0x12],
+        '~' => [0x08, 0x04, 0x08, 0x10, 0x08],
+        '^' => [0x04, 0x02, 0x01, 0x02, 0x04],
+        '`' => [0x00, 0x01, 0x02, 0x00, 0x00],
+        '\\' => [0x02, 0x04, 0x08, 0x10, 0x20],
         _ => [0x7F, 0x7F, 0x7F, 0x7F, 0x7F],
     }
 }

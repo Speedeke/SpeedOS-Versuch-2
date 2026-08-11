@@ -395,6 +395,7 @@ dependencies = [
  "speedhtml",
  "speedhttp",
  "speedlayout",
+ "speedpaint",
  "speedui",
  "spin",
  "zune-core",
@@ -861,6 +862,15 @@ version = "0.1.0"
 dependencies = [
  "speedcss",
  "speedhtml",
+]
+
+[[package]]
+name = "speedpaint"
+version = "0.1.0"
+dependencies = [
+ "speedcss",
+ "speedlayout",
+ "speedui",
 ]
 
 [[package]]

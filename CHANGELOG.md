@@ -5,6 +5,92 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### SERIE 8, TEIL 7: SpeedOS zeigt eine Webseite an
+
+**`starte browser /platte/seiten/cern.html &` — und da steht sie.** Die
+erste Webseite der Welt, geparst, kaskadiert, gesetzt und gemalt in einem
+unprivilegierten Prozess mit eigenem Adressraum, der das Betriebssystem nur
+durch die Syscall-Tabelle kennt. Vollständig in
+[`docs/browser-rendern.md`](docs/browser-rendern.md).
+
+**Die sechste Kiste: `speedpaint`** — Maler, Sicht, Invalidierung. Sie
+hängt an `speedlayout` **und `speedui`**, und das ist dieselbe Regel wie
+die, die `speedlayout` das Toolkit verboten hat, nicht ihre Ausnahme: Ein
+Maler braucht eine Zeichenfläche, und `Leinwand` *ist* diese Abstraktion.
+Der Ertrag ist derselbe wie beim Layout: **34 Host-Tests in 0,01 s**, weil
+`speedui::attrappe::MalProtokoll` mitschreibt statt zu malen — „landet der
+Text an der richtigen Stelle?" ist eine Frage an eine Liste. Die Richtung
+stimmt (`speedpaint` → `speedui`, nie umgekehrt); `speedui` hat weiterhin
+einen leeren `[dependencies]`-Block.
+
+**Scrollen layoutet nicht neu, und das steht im Typ.** `malen` bekommt die
+Anzeigeliste als `&`-Referenz; es gibt keinen Pfad von einem Scroll-Ereignis
+zu `speedlayout::setzen`. `test_scrollen_laesst_das_layout_in_ruhe` fährt 50
+Schritte und vergleicht die Liste Byte für Byte. Gescrollt wird mit Rad,
+Pfeilen, Bild auf/ab, Pos1/Ende und Balken — geklemmt an **einer** Stelle,
+durch die jeder dieser Wege läuft.
+
+**Der Streifen spart das Malen, nicht die Kopie.** Beim Scrollen werden die
+eigenen Pixel verschoben (`copy_within`) und nur der neue Rand gemalt;
+übertragen werden muss trotzdem die ganze Fläche, weil der Kernel eine
+eigene Kopie hält und von der Verschiebung nichts weiss. Genau das macht
+die Messung interessant.
+
+**Die Invalidierungs-Regeln sind eine reine Funktion**, keine `if`-Kette in
+der Ereignisschleife — jede Regel ist ein Testfall, und der Browser benutzt
+die Regeln, die geprüft werden. Die, die man übersieht: **Eine geänderte
+Fenster-HÖHE löst kein Neu-Layout aus** (die Höhe geht in kein Layout ein),
+wohl aber ein volles Neu-Malen (der Fensterpuffer ist nach `Groesse` leer).
+
+**DIE ENTSCHEIDUNG ZUM UMSTIEGSKRITERIUM** (festgelegt in Teil 1, geprüft
+an einem langen Wikipedia-Artikel aus Ring 3):
+
+| Auflösung | Scroll-Frame | Anteil Kopie | Kriterium |
+|---|---:|---:|---|
+| 720p (1360×696) | 500–925 µs | 86–90 % | **nicht erfüllt** |
+| 4K (3840×2088) | 7 050–7 725 µs | 74 % | **nicht erfüllt** |
+
+**Der Pixelpuffer-Ansatz ist bestätigt**, geteilter Speicher wird nicht neu
+bewertet. Zwei Dinge, damit das keine bequeme Lesart ist: Die 4K-Zahl liegt
+bei **88–97 % der Schwelle**, und **ohne das Streifen-Zeichnen wäre das
+Kriterium erfüllt** (9 725–10 150 µs bei 52–56 %). Der Test rechnet diese
+Gegenrechnung bei jedem Lauf mit aus. Die zweite vorgesehene Optimierung
+(Textstücke cachen) ist **nicht nötig und deshalb nicht gebaut** — sie
+verschöbe das Verhältnis sogar in die falsche Richtung.
+
+**Messfalle, teuer gelernt:** Die erste Fassung mittelte über alle
+Durchgänge und lieferte bei 4K **7300 µs und 9150 µs in zwei Läufen** —
+einmal unter, einmal über der 8-ms-Schwelle. Ein Kriterium, das je nach Lauf
+anders ausfällt, entscheidet nichts. Jetzt gilt der **beste von fünf
+Durchgängen** (dieselbe Methodik wie `messung` Modus 1, aus demselben Grund:
+Scheduler und Compositor arbeiten nebenher).
+
+**Der User-Heap wächst von 12 auf 64 MiB** (`prozess::HEAP_MAX_BYTES`,
+Lücke 16 → 96 MiB). Teil 1 hatte das vorhergesagt; gerissen ist die Grenze
+dann aber nicht am Fenster, sondern am **Dokument** — `browser` starb am
+Wikipedia-Artikel bei 12 249 304 Bytes, noch in 720p. Es bleibt eine
+**harte** Grenze (`KeinPlatz` weiterhin), der Abstand zum Stack ist mit
+32 MiB grösser als vorher, und Seiten kommen weiter nur auf Anforderung.
+**Nebeneffekt: Die offene Grenze aus Teil 1 ist geschlossen** — ein
+4K-Vollbild-Fenster (32,1 MiB) passt jetzt.
+
+**Der Vorzeichen-Fehler, den die Tests nicht fanden:** Das Mausrad scrollte
+in die falsche Richtung, und beide Klemmungs-Tests waren trotzdem grün — sie
+fassen das Rad nur dort an, wo ohnehin nichts passieren darf (am Anfang nach
+oben, am Ende nach unten). Das tut in *jeder* Konvention nichts.
+`test_rad_richtung` prüft jetzt aus der **Mitte**, und die Konvention
+richtet sich nach `maus.rs` statt nach dem, was in `sicht.rs` für sich
+genommen hübscher aussah: Zwei Vorzeichen-Konventionen für dasselbe Gerät
+im selben System sind ein Bedienfehler.
+
+Kleinkram, den erst echter Seitentext zeigte: Das 5×7-Raster hatte **keinen
+Apostroph** (aus „WORLD'S" wurde „WORLD▪S") — jetzt hat es ihn und 16
+weitere Satzzeichen. Und **sechs Testkerne brauchten mehr Heap** (2 → 8 MiB):
+`programme::installieren()` liest beim Boot jede Programmdatei ganz in den
+Heap, und `browser` ist mit 1,27 MiB das neue grösste Programm. Genau darum
+bat der Kommentar in `main.rs`.
+
+
 ### Terminals sehen jetzt alle gleich aus — und heissen alle gleich
 
 Drei Kleinigkeiten, die zusammen unaufgeräumt wirkten:

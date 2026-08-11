@@ -893,12 +893,13 @@ pub fn absturz_prozess() -> Option<Prozess> {
 //                                      .bss    RW-  /
 //   +16 MiB         elf::IMAGE_ENDE    ---- Obergrenze des Images ----
 //
-//                   ... 16 MiB ungemappte Lücke: ein durchgehender Fehler-
-//                   greifer, der Programm und Stack sauber trennt ...
+//                   ... 96 MiB ungemappte Lücke: ein durchgehender Fehler-
+//                   greifer, der Programm und Stack sauber trennt (davon
+//                   sind bis zu 64 MiB Heap, siehe unten) ...
 //
-//   +32 MiB - 68 KiB  ELF_STACK_GUARD   GUARD-PAGE (nicht gemappt)
-//   +32 MiB - 64 KiB  ELF_STACK_UNTEN   16 Seiten User-Stack, NX
-//   +32 MiB           ELF_STACK_OBEN    Stack-Spitze; hier liegen argv-Daten
+//   +112 MiB - 68 KiB  ELF_STACK_GUARD   GUARD-PAGE (nicht gemappt)
+//   +112 MiB - 64 KiB  ELF_STACK_UNTEN   16 Seiten User-Stack, NX
+//   +112 MiB           ELF_STACK_OBEN    Stack-Spitze; hier liegen argv-Daten
 //
 // Warum die Lücke so gross ist: Sie kostet nichts (ungemappte Adressen
 // verbrauchen keinen Speicher) und macht jeden Zeiger-Ausrutscher zwischen
@@ -906,9 +907,14 @@ pub fn absturz_prozess() -> Option<Prozess> {
 // Datenzerstörung.
 // ===========================================================================
 
-/// Obere Kante des User-Stacks eines ELF-Prozesses (32 MiB über dem Image-
-/// Anfang — 16 MiB Image, 16 MiB ungemappte Lücke).
-pub const ELF_STACK_OBEN: u64 = crate::elf::IMAGE_ENDE + 16 * 1024 * 1024;
+/// Obere Kante des User-Stacks eines ELF-Prozesses (112 MiB über dem
+/// Image-Anfang — 16 MiB Image, 96 MiB ungemappte Lücke).
+///
+/// WAR BIS SERIE 8, TEIL 7 BEI 32 MiB (16 MiB Lücke). Vergrössert, weil
+/// der Browser mehr Heap braucht; die Begründung steht bei
+/// `HEAP_MAX_BYTES`. Adressraum kostet nichts — der private P4-Slot ist
+/// 512 GiB gross, und ungemappte Seiten verbrauchen keine Frames.
+pub const ELF_STACK_OBEN: u64 = crate::elf::IMAGE_ENDE + 96 * 1024 * 1024;
 /// Seiten des User-Stacks (64 KiB). Reichlich für Programme ohne Rekursion;
 /// darunter liegt eine Guard-Page.
 pub const ELF_STACK_SEITEN: usize = 16;
@@ -929,8 +935,8 @@ pub const ELF_STACK_SEITEN: usize = 16;
 //   IMAGE_ENDE          ---- Obergrenze des Programms ----
 //   + 4 KiB             HEAP_START      \
 //                       ... Heap ...     |  waechst NACH OBEN, auf Anforderung
-//   + 4 KiB + 12 MiB    HEAP_ENDE       /
-//                       ... 4 MiB ungemappt: der Abstand zum Stack ...
+//   + 4 KiB + 64 MiB    HEAP_ENDE       /
+//                       ... 32 MiB ungemappt: der Abstand zum Stack ...
 //   ELF_STACK_GUARD     Guard-Page
 //   ELF_STACK_OBEN      Stack-Spitze
 //
@@ -942,11 +948,36 @@ pub const ELF_STACK_SEITEN: usize = 16;
 pub const HEAP_START: u64 = crate::elf::IMAGE_ENDE + 4096;
 /// Höchstgrösse des User-Heaps.
 ///
-/// 12 MiB von den 16 MiB der Lücke; die restlichen 4 MiB bleiben als
-/// Abstand zum Stack ungemappt. Das reicht für rustls (gemessen: ein
-/// Handshake bewegt sich im dreistelligen KiB-Bereich) und lässt einem
-/// Programm, das Amok läuft, eine harte Grenze.
-pub const HEAP_MAX_BYTES: u64 = 12 * 1024 * 1024;
+/// 64 MiB von den 96 MiB der Lücke; die restlichen 32 MiB bleiben als
+/// Abstand zum Stack ungemappt.
+///
+/// =======================================================================
+/// WARUM 64 UND NICHT MEHR 12 MiB (Serie 8, Teil 7)
+///
+/// Die 12 MiB waren für rustls bemessen (ein Handshake bewegt sich im
+/// dreistelligen KiB-Bereich). Serie 8, Teil 1 hat beim Messen notiert,
+/// dass das für einen Browser nicht reichen wird — ein 4K-Vollbild-
+/// Fenster allein sind 32,1 MiB — und die Entscheidung ausdrücklich
+/// offengelassen: „ein grösseres Prozess-Layout (ABI-Änderung) oder
+/// Streifen".
+///
+/// Beim ersten echten Renderer ist die Grenze dann auch wirklich
+/// gerissen, und zwar nicht am Fenster, sondern am DOKUMENT: `browser`
+/// auf dem Wikipedia-Artikel (293 KiB) starb bei 12 249 304 belegten
+/// Bytes. Ein grosses Dokument liegt nun einmal mehrfach im Speicher —
+/// Quelltext, DOM, berechnete Stile je Knoten, Kastenbaum,
+/// Anzeigeliste — und dazu kommt der Fensterpuffer.
+///
+/// ES BLEIBT EINE HARTE GRENZE, und das ist der Punkt: Sie wurde
+/// ANGEHOBEN, nicht abgeschafft. Ein Programm, das Amok läuft, bekommt
+/// weiterhin `KeinPlatz` (14) statt den Rechner anzuhalten, und der
+/// Abstand zum Stack ist mit 32 MiB sogar grösser als vorher. Was die
+/// Zahl kostet, ist nichts, solange niemand sie ausschöpft: Seiten
+/// werden erst auf Anforderung gemappt (`SYS_SPEICHER`), ein `hallo`
+/// braucht weiterhin keine einzige.
+///
+/// Die gemessene Spitze des Browsers steht in docs/browser-rendern.md.
+pub const HEAP_MAX_BYTES: u64 = 64 * 1024 * 1024;
 /// Erste Adresse hinter dem Heap.
 pub const HEAP_ENDE: u64 = HEAP_START + HEAP_MAX_BYTES;
 

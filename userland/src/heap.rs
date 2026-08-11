@@ -46,7 +46,9 @@ use spin::Mutex;
 /// docs/syscalls.md §9) — hier noch einmal abgeschrieben, wie jede andere
 /// ABI-Zahl in libspeed auch. Eine ABI ist ein VERTRAG, kein geteilter
 /// Header; wer sie aendert, aendert sie an beiden Stellen bewusst.
-pub const HEAP_MAX_BYTES: usize = 12 * 1024 * 1024;
+/// (Serie 8, Teil 7: von 12 auf 64 MiB angehoben, weil `browser` an der
+/// alten Grenze starb — Begruendung im Kernel, an derselben Konstante.)
+pub const HEAP_MAX_BYTES: usize = 64 * 1024 * 1024;
 
 /// Wie viel beim ERSTEN Mal geholt wird. 64 KiB decken alles ab, was unsere
 /// bisherigen Programme brauchen wuerden; rustls waechst dann von selbst.

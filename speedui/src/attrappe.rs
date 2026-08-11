@@ -194,6 +194,14 @@ pub enum Strich {
     /// UNVERAENDERT durchlaufen. Wer `text_stil` prueft, prueft etwas
     /// anderes und darf dafuer hinsehen, wo es steht.
     TextStil(i32, i32, String, i32, Stil, Farbe),
+    /// Ein Bild (Serie 8, Teil 7): Ziel-Rechteck, Quellmasse und die
+    /// LAENGE der Pixel — nicht die Pixel selbst.
+    ///
+    /// Die Bytes mitzuschreiben waere bei einem 1-Mi-Pixel-Bild ein
+    /// 4-MiB-Protokolleintrag, und kein Test will sie vergleichen. Die
+    /// Frage lautet „an welche Stelle, in welcher Groesse?" — und die
+    /// beantworten diese vier Zahlen.
+    Bild(Rechteck, i32, i32, usize),
 }
 
 /// Eine Leinwand, die NICHTS malt und ALLES aufschreibt.
@@ -223,6 +231,19 @@ impl MalProtokoll {
         self.striche
             .iter()
             .any(|s| matches!(s, Strich::Text(_, _, t, _, _, _) if t == gesucht))
+    }
+
+    /// Wurde dieser Text ueber `text_stil` gezeichnet?
+    ///
+    /// EIGENE METHODE NEBEN `hat_text`, aus demselben Grund, aus dem es
+    /// `Strich::TextStil` neben `Strich::Text` gibt: Die Serie-3-Tests
+    /// fragen nach `Text` und sollen unveraendert bleiben. Der Renderer
+    /// zeichnet ausschliesslich ueber `text_stil` (er braucht Kursiv) —
+    /// er fragt hier.
+    pub fn hat_text_stil(&self, gesucht: &str) -> bool {
+        self.striche
+            .iter()
+            .any(|s| matches!(s, Strich::TextStil(_, _, t, _, _, _) if t == gesucht))
     }
 
     pub fn leeren(&mut self) {
@@ -266,6 +287,15 @@ impl Leinwand for MalProtokoll {
     fn text_stil(&mut self, x: i32, y: i32, text: &str, groesse: i32, stil: Stil, farbe: Farbe) {
         self.striche
             .push(Strich::TextStil(x, y, String::from(text), groesse, stil, farbe));
+    }
+    /// Auch hier gilt: mitschreiben statt der Voreinstellung folgen. Die
+    /// wuerde einen `Rahmen` protokollieren, und ein Test koennte
+    /// „Platzhalter gemalt" nicht mehr von „Bild gemalt" unterscheiden —
+    /// also genau die Unterscheidung verlieren, um die es beim Maler
+    /// geht.
+    fn bild(&mut self, ziel: Rechteck, quell_breite: i32, quell_hoehe: i32, rgba: &[u8]) {
+        self.striche
+            .push(Strich::Bild(ziel, quell_breite, quell_hoehe, rgba.len()));
     }
 }
 

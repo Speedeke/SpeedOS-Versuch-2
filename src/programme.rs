@@ -132,6 +132,11 @@ pub static PROGRAMME: &[Programm] = &[
         elf: include_bytes!(concat!(env!("OUT_DIR"), "/cssdump")),
     },
     Programm {
+        name: "browser",
+        beschreibung: "browser <datei|url> — Webseiten anzeigen (mit & starten!)",
+        elf: include_bytes!(concat!(env!("OUT_DIR"), "/browser")),
+    },
+    Programm {
         name: "elternprobe",
         beschreibung: "elternprobe [ms] — startet ein Kind und wartet auf es (Ring 3)",
         elf: include_bytes!(concat!(env!("OUT_DIR"), "/elternprobe")),
@@ -444,11 +449,11 @@ mod tests {
     /// userland-Crate nicht — und zwar BEVOR jemand versucht, sie zu starten.
     #[test_case]
     fn test_eingebettete_programme_sind_gueltig() {
-        // Siebzehn seit Serie 8, Teil 5 (`cssdump` kam dazu). Die Zahl ist
+        // Achtzehn seit Serie 8, Teil 7 (`browser` kam dazu). Die Zahl ist
         // Absicht: Wer ein Programm ergaenzt, muss es an DREI Stellen tun
         // (userland/Cargo.toml, build.rs, PROGRAMME) — dieser Test faengt
         // die vergessene dritte.
-        assert_eq!(PROGRAMME.len(), 17, "es sollen siebzehn Programme mitkommen");
+        assert_eq!(PROGRAMME.len(), 18, "es sollen achtzehn Programme mitkommen");
         for programm in PROGRAMME {
             // Mit SPEEDOS_OHNE_USERLAND=1 gebaut? Dann gibt es nichts zu
             // pruefen — aber das ist der Notfall-Pfad, nicht der Normalfall.
@@ -713,34 +718,58 @@ pub fn testbilder_installieren() -> usize {
 /// Herkunft und Datum: assets/testseiten/HERKUNFT.txt.
 pub static TESTSEITE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/testseite.html"));
 
+/// Pruefseite B (Serie 8, Teil 7): ein langer Wikipedia-Artikel, ~293 KiB.
+///
+/// SIE IST DIE MESSEINGABE. Der Scroll-Frame, an dem das
+/// Umstiegskriterium aus docs/fenster-syscalls.md haengt, wird an ihr
+/// gemessen — an einer echten Seite mit Tabellen, Listen, Ueberschriften
+/// und ein paar tausend Anzeige-Befehlen, nicht an einem Absatz
+/// Blindtext. Eine Messung an einer kleinen Seite waere eine Messung des
+/// Hintergrund-Fuellens.
+pub static GROSSE_TESTSEITE: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/grosse_testseite.html"));
+
 const SEITEN_PLATTE: &str = "/platte/seiten";
 const SEITEN_RAM: &str = "/seiten";
 
-/// Wohin die Testseite installiert wird.
+/// Wohin die Testseiten installiert werden.
 pub fn seiten_verzeichnis() -> &'static str {
     fs::persistenter_pfad(SEITEN_PLATTE, SEITEN_RAM)
 }
 
-/// Der Pfad der Testseite — nachgesehen wie `pfad`, aus demselben Grund.
+/// Der Pfad der kleinen Testseite — nachgesehen wie `pfad`, aus
+/// demselben Grund.
 pub fn testseite_pfad() -> String {
-    let bevorzugt = fs::pfad_anhaengen(seiten_verzeichnis(), "cern.html");
+    seite_pfad("cern.html")
+}
+
+/// Der Pfad der grossen Testseite.
+pub fn grosse_testseite_pfad() -> String {
+    seite_pfad("wikipedia.html")
+}
+
+/// NACHSEHEN, wo eine Testseite wirklich liegt.
+///
+/// Dieselbe Trennung wie bei `pfad()` und `verzeichnis()` (Serie 8,
+/// Teil 1): `seiten_verzeichnis()` sagt, WOHIN installiert wird, diese
+/// Funktion sieht nach, wo die Datei IST. Nach einem Mount mitten in der
+/// Sitzung sind das zwei verschiedene Orte.
+fn seite_pfad(name: &str) -> String {
+    let bevorzugt = fs::pfad_anhaengen(seiten_verzeichnis(), name);
     if datei_vorhanden(&bevorzugt) {
         return bevorzugt;
     }
     let anderes = if seiten_verzeichnis() == SEITEN_PLATTE { SEITEN_RAM } else { SEITEN_PLATTE };
-    let anderer = fs::pfad_anhaengen(anderes, "cern.html");
+    let anderer = fs::pfad_anhaengen(anderes, name);
     if datei_vorhanden(&anderer) {
         return anderer;
     }
     bevorzugt
 }
 
-/// Schreibt die Testseite aufs Dateisystem. Liefert `true`, wenn
-/// geschrieben wurde.
+/// Schreibt die Testseiten aufs Dateisystem. Liefert `true`, wenn
+/// mindestens eine geschrieben wurde.
 pub fn testseite_installieren() -> bool {
-    if TESTSEITE.is_empty() {
-        return false;
-    }
     let ordner = String::from(seiten_verzeichnis());
     if fs::mit_fs(|dateisystem| dateisystem.node_typ(&ordner)).is_err() {
         if let Err(fehler) = fs::mit_fs(|dateisystem| dateisystem.mkdir(&ordner)) {
@@ -748,16 +777,28 @@ pub fn testseite_installieren() -> bool {
             return false;
         }
     }
-    let ziel = fs::pfad_anhaengen(&ordner, "cern.html");
-    if ist_aktuell(&ziel, TESTSEITE) {
+    let mut geschrieben = seite_installieren(&ordner, "cern.html", TESTSEITE);
+    geschrieben |= seite_installieren(&ordner, "wikipedia.html", GROSSE_TESTSEITE);
+    if geschrieben {
+        if let Err(fehler) = fs::sync() {
+            crate::serial_println!("[seiten] sync fehlgeschlagen: {:?}", fehler);
+        }
+    }
+    geschrieben
+}
+
+/// Eine einzelne Seite schreiben — nur, wenn sie sich geaendert hat.
+fn seite_installieren(ordner: &str, name: &str, inhalt: &[u8]) -> bool {
+    if inhalt.is_empty() {
         return false;
     }
-    match fs::mit_fs(|dateisystem| dateisystem.schreiben(&ziel, TESTSEITE)) {
+    let ziel = fs::pfad_anhaengen(ordner, name);
+    if ist_aktuell(&ziel, inhalt) {
+        return false;
+    }
+    match fs::mit_fs(|dateisystem| dateisystem.schreiben(&ziel, inhalt)) {
         Ok(()) => {
-            crate::serial_println!("[seiten] {} geschrieben ({} Byte).", ziel, TESTSEITE.len());
-            if let Err(fehler) = fs::sync() {
-                crate::serial_println!("[seiten] sync fehlgeschlagen: {:?}", fehler);
-            }
+            crate::serial_println!("[seiten] {} geschrieben ({} Byte).", ziel, inhalt.len());
             true
         }
         Err(fehler) => {

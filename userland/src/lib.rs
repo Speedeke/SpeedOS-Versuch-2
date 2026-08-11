@@ -124,6 +124,9 @@ pub const STAT_BYTES: usize = 32;
 pub mod bild;
 pub mod fenster;
 pub mod heap;
+/// Der Fensterpuffer als Zeichenflaeche plus die passende Textmetrik
+/// (Serie 8, Teil 7) — die zwei Naehte, die ein Renderer braucht.
+pub mod leinwand;
 /// Die wiederverwendbare Abruf-Schicht (Serie 7, Teil 5): „hol mir diese
 /// URL" — http wie https, mit Weiterleitungen, Frist und Groessenlimit.
 pub mod netz;

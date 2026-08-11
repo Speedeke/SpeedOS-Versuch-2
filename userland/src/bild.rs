@@ -40,7 +40,10 @@
 // DIE SPEICHER-RECHNUNG (die eigentliche Grenze, und sie ist keine
 // Format-Grenze)
 //
-// Ein Prozess hat 12 MiB Heap (`heap::HEAP_MAX_BYTES`, Serie 7, Teil 3).
+// Ein Prozess hat 64 MiB Heap (`heap::HEAP_MAX_BYTES`; bis Serie 8,
+// Teil 7 waren es 12 MiB, und die Rechnung unten stammt von damals — die
+// Grenzen wurden BEWUSST nicht mit angehoben: Ein Bilddekoder soll so
+// wenig annehmen wie moeglich, und `Grenzen` ist ohnehin ein Argument).
 // Zur Spitze liegen gleichzeitig im Speicher:
 //
 //     Dateibytes  +  dekodiertes RGBA (breite * hoehe * 4)  +  Fensterpuffer
