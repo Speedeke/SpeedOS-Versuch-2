@@ -13,13 +13,14 @@ edition = "2021"
 # Disk-Image und startet QEMU) — es gehört nicht zu unserem Kernel-
 # Workspace, sonst würde cargo es fürs Bare-Metal-Target mitbauen.
 [workspace]
-# `speedhtml` und `speedcss` stehen bewusst DRAUSSEN, anders als
+# `speedhtml`, `speedcss` und `speedlayout` stehen bewusst DRAUSSEN,
+# anders als
 # `speedhttp` und `speedui`:
 # Der KERNEL benutzt es nicht (nur `userland/htmldump` und der kommende
 # Browser tun das), und ein Workspace-Mitglied, von dem niemand abhaengt,
 # wuerde bei jedem Kernel-Bau mitgebaut. Dass es fuer Bare-Metal UND fuer
 # den Host uebersetzt, prueft tools/speedhtml_allein_bauen.ps1.
-exclude = ["boot", "userland", "speedhtml", "speedcss"]
+exclude = ["boot", "userland", "speedhtml", "speedcss", "speedlayout"]
 
 [dependencies]
 # DER HTTP-PARSER (Serie 7, Teil 4) — herausgeloest aus src/netz/http.rs,

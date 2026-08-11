@@ -332,6 +332,40 @@ Kaskade und Vererbung durch (`speedcss`). Was **nicht** dabei ist:
 * **Grenzen:** 100 000 Regeln, 256 Selektoren und 256 Deklarationen je
   Regel. Darüber wird abgeschnitten und im `Befund` vermerkt.
 
+### Layout: Blockfluss und Zeilen, mehr nicht
+
+*(Serie 8, Teil 6 — `speedlayout`, sichtbar mit `cssdump --layout`)*
+
+* **Keine Floats.** `float` wird ignoriert; ein umflossenes Bild steht in
+  einer eigenen Zeile.
+* **Kein `position: absolute/fixed`.** Beide laufen im normalen Fluss
+  mit — ein fixierter Kopfbereich steht dann oben im Dokument statt am
+  Bildschirmrand.
+* **Margin-Kollaps nur zwischen GESCHWISTERN.** Die volle CSS-Regel
+  kollabiert auch zwischen Elternteil und erstem/letztem Kind und durch
+  leere Kästen hindurch. Sichtbare Folge: Ein `<div>` um einen `<p>`
+  bekommt dessen Rand **innen** statt außen.
+* **Kein Blocksatz.** `text-align: justify` wird wie `left` gesetzt.
+* **`colspan`/`rowspan` werden nicht verteilt.** Eine Zelle mit
+  `colspan=3` bekommt die Breite einer Spalte, nicht dreier.
+* **Tabellen-Spaltenbreiten in EINEM Durchgang** (Wunschbreite messen,
+  proportional herunterskalieren). Keine Mindestbreite aus dem längsten
+  Wort, kein Ausgleich zwischen Spalten, die Platz übrig haben.
+* **Hintergrund und Rahmen auf INLINE-Elementen gehen verloren.** Ein
+  `<span style="background:yellow">` färbt nichts — der Inline-Strom wird
+  beim Zeilenbau flachgeklopft, und ein Hintergrund müsste je Zeilenstück
+  gemalt werden.
+* **`<pre>` bricht nicht um.** Zu lange Zeilen laufen nach rechts hinaus.
+* **Zu breiter Inhalt läuft ÜBER**, er wird nicht abgeschnitten
+  (`overflow: hidden` gibt es nicht). Das ist Absicht: Stilles
+  Abschneiden versteckt Text, und niemand sieht, warum er fehlt.
+* **Jedes Wort ist ein eigener Anzeige-Befehl.** Korrekt, aber mehr
+  Befehle als nötig — benachbarte Wörter gleichen Stils ließen sich zu
+  einem Befehl zusammenfassen. Eine Optimierung für später, keine Lücke.
+* **Grenzen:** Verschachtelungstiefe 64 (das Layout ist rekursiv, der
+  User-Stack 64 KiB), 100 000 Kästen, 100 000 Zeilen. Darüber wird der
+  Teilbaum abgeschnitten und gezählt.
+
 ---
 
 ## 7. Was ausdrücklich KEINE Lücke ist
@@ -365,6 +399,6 @@ fehlen **mit Absicht**, und sie sollen fehlen:
 | Toolkit-Trennung, Traits, ehrlicher Bericht | `docs/speedui-trennung.md` |
 | Bild-Dekoder: Evaluation, Zahlen, Angriffe | `docs/bild-entscheidung.md` |
 | Schriftgrößen, Textmetrik, Fett/Kursiv | `docs/schrift-groessen.md` |
-| Browser-V1: Zuschnitt, CSS-Teilmenge, Zielmarke, Reißleine | `docs/browser-v1.md` |
+| Browser-V1: Zuschnitt, CSS-Teilmenge, Layout, Zielmarke, Reißleine | `docs/browser-v1.md` |
 | unsafe-Flächen | `docs/unsafe-audit-serie6.md`, `docs/unsafe-audit-serie7.md` |
 | Echte Hardware | `docs/hardware-log.md`, `docs/usb-boot.md` |

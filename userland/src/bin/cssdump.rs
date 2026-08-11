@@ -25,6 +25,8 @@
 //     --regeln     die geparsten Regeln statt der Knoten-Stile
 //     --befund     nur, was beim Parsen uebersprungen wurde
 //     --alle       ALLE Elemente mit ihren wichtigsten Werten
+//     --layout     die ANZEIGE-BEFEHLE (Serie 8, Teil 6)
+//     --breite=N   Seitenbreite fuer --layout (Standard 600)
 //
 // Die PFADANGABE ist bewusst simpel gehalten (kein zweiter Selektor-
 // Dialekt): Tag-Namen, durch `/` getrennt, mit `[n]` fuer das n-te
@@ -42,6 +44,7 @@ use libspeed::{println, Argumente};
 use speedcss::kaskade::{self, Herkunft, Quelle, Zustand};
 use speedcss::{parser, stil, Stylesheet};
 use speedhtml::{Dokument, KnotenId};
+use speedlayout::{Befehl, Metrik};
 
 libspeed::hauptprogramm!(haupt);
 libspeed::zufall_als_getrandom!();
@@ -60,12 +63,65 @@ enum Modus {
     Regeln,
     Befund,
     Alle,
+    Layout,
+}
+
+// ---------------------------------------------------------------------------
+// DIE METRIK DES BROWSERS
+// ---------------------------------------------------------------------------
+
+/// Die Naht zwischen `speedlayout` und dem, was ein Ring-3-Programm an
+/// Schrift hat.
+///
+/// **Das ist die ganze Verdrahtung** — `speedlayout::Metrik` hat vier
+/// Methoden, und drei davon haben eine Voreinstellung. Genau dafuer ist
+/// das Trait so schmal geschnitten: Ein Programm, das layouten will,
+/// muss kein Toolkit einbinden.
+///
+/// Die Zahlen sind die des 5x7-Rasters aus `libspeed::fenster` (6 Pixel
+/// je Zeichen, 7 hoch) — dasselbe, das `uidemo` benutzt. Ein Prozess
+/// bekommt die vorgerasterten Kernel-Schriften nicht (es gibt keinen
+/// Schrift-Syscall, docs/grenzen.md), er bringt seine eigene mit.
+struct RasterMetrik;
+
+/// Breite und Hoehe des eingebauten 5x7-Rasters bei Skalierung 1.
+const RASTER_BREITE: i32 = 6;
+const RASTER_HOEHE: i32 = 7;
+
+impl Metrik for RasterMetrik {
+    fn text_breite(&self, text: &str, groesse: i32, _fett: bool, _kursiv: bool) -> i32 {
+        // ZEICHEN zaehlen, nicht Bytes — sonst bricht jede deutsche
+        // Zeile zu frueh um.
+        let skala = self.skala(groesse);
+        text.chars().count() as i32 * RASTER_BREITE * skala
+    }
+    fn zeilen_hoehe(&self, groesse: i32) -> i32 {
+        (RASTER_HOEHE + 3) * self.skala(groesse)
+    }
+    fn grundlinie(&self, groesse: i32) -> i32 {
+        RASTER_HOEHE * self.skala(groesse)
+    }
+    fn groesse_waehlen(&self, wunsch: i32) -> i32 {
+        // Das Raster kann nur GANZE Vielfache — eine Zwischengroesse
+        // gibt es nicht, und das Layout soll mit der rechnen, die
+        // WIRKLICH gezeichnet wird.
+        (RASTER_HOEHE * self.skala(wunsch)).max(RASTER_HOEHE)
+    }
+}
+
+impl RasterMetrik {
+    /// Welche ganzzahlige Vergroesserung kommt dieser Wunschgroesse am
+    /// naechsten? (1..4 — darueber wird das Raster klobig.)
+    fn skala(&self, groesse: i32) -> i32 {
+        ((groesse + RASTER_HOEHE / 2) / RASTER_HOEHE).clamp(1, 4)
+    }
 }
 
 fn haupt(argumente: &Argumente) -> i32 {
     let mut quelle = None;
     let mut pfad = None;
     let mut modus = Modus::Knoten;
+    let mut seitenbreite = 600i32;
 
     for i in 1..argumente.anzahl() {
         let Some(wort) = argumente.get(i) else {
@@ -75,6 +131,16 @@ fn haupt(argumente: &Argumente) -> i32 {
             "--regeln" => modus = Modus::Regeln,
             "--befund" => modus = Modus::Befund,
             "--alle" => modus = Modus::Alle,
+            "--layout" => modus = Modus::Layout,
+            _ if wort.starts_with("--breite=") => {
+                match wort["--breite=".len()..].parse::<i32>() {
+                    Ok(n) if (1..=100_000).contains(&n) => seitenbreite = n,
+                    _ => {
+                        println!("--breite= braucht eine Zahl zwischen 1 und 100000.");
+                        return FEHLER_BEDIENUNG;
+                    }
+                }
+            }
             _ if wort.starts_with("--") => {
                 println!("Unbekannter Schalter: {}", wort);
                 return FEHLER_BEDIENUNG;
@@ -146,6 +212,11 @@ fn haupt(argumente: &Argumente) -> i32 {
 
     let baum = kaskade::berechnen(&dokument, &blaetter, Zustand::default());
 
+    if modus == Modus::Layout {
+        layout_zeigen(&dokument, &baum, seitenbreite, &herkunft);
+        return OK;
+    }
+
     if modus == Modus::Alle {
         alle_zeigen(&dokument, &baum);
         return OK;
@@ -167,6 +238,84 @@ fn haupt(argumente: &Argumente) -> i32 {
     OK
 }
 
+/// Das Layout durchrechnen und die Anzeige-Befehle ausgeben.
+///
+/// ===================================================================
+/// WOZU DAS GUT IST
+///
+/// `htmldump` beantwortet „Parser oder Layout?", die Knoten-Ansicht von
+/// `cssdump` „welche Regel hat das gesetzt?" — und das hier beantwortet
+/// die dritte Frage: **„Was kommt am Ende wirklich heraus?"**
+///
+/// Weil das Layout eine Liste von BEFEHLEN liefert und kein Bild, ist
+/// diese Ausgabe der vollstaendige Zustand vor dem Zeichnen. Wer eine
+/// Merkwuerdigkeit sieht, findet sie hier als Zahl statt als Pixel.
+fn layout_zeigen(dokument: &Dokument, baum: &speedcss::StilBaum, breite: i32, herkunft: &str) {
+    let metrik = RasterMetrik;
+    let ergebnis = speedlayout::setzen(dokument, baum, breite, &metrik);
+    let liste = speedlayout::anzeigeliste(&ergebnis);
+
+    println!("{} — Breite {} px", herkunft, breite);
+    println!(
+        "  {} Kaesten, {} Zeilen, Gesamthoehe {} px",
+        ergebnis.befund.kaesten, ergebnis.befund.zeilen, ergebnis.hoehe
+    );
+    if ergebnis.befund.ueberlaeufe > 0 {
+        println!("  {} Ueberlauf/Ueberlaeufe (Inhalt breiter als sein Kasten)", ergebnis.befund.ueberlaeufe);
+    }
+    if !ergebnis.befund.sauber() {
+        println!("  ABGESCHNITTEN: {} Teilbaum/Teilbaeume zu tief", ergebnis.befund.zu_tief);
+    }
+    println!("  {} Anzeige-Befehle", liste.len());
+    println!("{}", "-".repeat(64));
+
+    for b in &liste.befehle {
+        match b {
+            Befehl::Text { x, y, text, groesse, fett, kursiv, .. } => {
+                println!(
+                    "TEXT   {:>5},{:<5} {:>3}px{}{}  {:?}",
+                    x,
+                    y,
+                    groesse,
+                    if *fett { " fett" } else { "" },
+                    if *kursiv { " kursiv" } else { "" },
+                    kuerzen(text, 48)
+                );
+            }
+            Befehl::Rechteck { rechteck, farbe } => {
+                println!(
+                    "FLAECHE{:>5},{:<5} {}x{}  #{:02x}{:02x}{:02x}",
+                    rechteck.x, rechteck.y, rechteck.breite, rechteck.hoehe,
+                    farbe.r, farbe.g, farbe.b
+                );
+            }
+            Befehl::Bild { rechteck, quelle, .. } => {
+                println!(
+                    "BILD   {:>5},{:<5} {}x{}  {:?}",
+                    rechteck.x, rechteck.y, rechteck.breite, rechteck.hoehe,
+                    kuerzen(quelle, 40)
+                );
+            }
+            Befehl::Linie { x0, y0, x1, y1, dicke, .. } => {
+                println!("LINIE  {:>5},{:<5} bis {},{}  {}px", x0, y0, x1, y1, dicke);
+            }
+        }
+    }
+}
+
+/// Text fuer die Anzeige kuerzen — auf ZEICHENGRENZEN.
+fn kuerzen(text: &str, max: usize) -> String {
+    let mut aus = String::new();
+    for (i, c) in text.chars().enumerate() {
+        if i >= max {
+            aus.push('~');
+            break;
+        }
+        aus.push(if c == '\n' { ' ' } else { c });
+    }
+    aus
+}
+
 fn hilfe(programm: &str) {
     println!("Benutzung: {} <datei|url> [pfad] [Schalter]", programm);
     println!();
@@ -177,6 +326,8 @@ fn hilfe(programm: &str) {
     println!("  --regeln   die geparsten Autor-Regeln zeigen");
     println!("  --befund   was beim Parsen uebersprungen wurde");
     println!("  --alle     alle Elemente mit ihren wichtigsten Werten");
+    println!("  --layout   die Anzeige-Befehle (Position, Groesse, Farbe)");
+    println!("  --breite=N Seitenbreite fuer --layout (Standard 600)");
 }
 
 // ---------------------------------------------------------------------------

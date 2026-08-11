@@ -48,6 +48,11 @@ speedhtml = { path = "../speedhtml" }
 # fuer diese EINE Abhaengigkeit steht in speedcss/Cargo.toml.
 speedcss = { path = "../speedcss" }
 
+# LAYOUT (Serie 8, Teil 6). Haengt an speedhtml und speedcss — und
+# ausdruecklich NICHT an speedui: Das Layout braucht Textmetrik, kein
+# Widget-Toolkit. Die drei Zahlen liefert `cssdump` selbst (RasterMetrik).
+speedlayout = { path = "../speedlayout" }
+
 # Der Heap-Allocator des User-Space (Serie 7, Teil 3) — dieselbe Kiste, die
 # auch der Kernel benutzt (src/allocator.rs). Sie ist no_std und kann
 # `extend`, und genau das braucht ein Heap, der auf Anforderung waechst.

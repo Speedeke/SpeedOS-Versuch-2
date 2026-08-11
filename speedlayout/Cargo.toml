@@ -1,0 +1,42 @@
+# speedlayout — Aus Stilen Kaesten machen, aus Kaesten Anzeige-Befehle.
+#
+# ===========================================================================
+# DIE FUENFTE KISTE, UND SIE ZEICHNET NICHT
+#
+# Das ist die wichtigste Eigenschaft dieser Kiste: **Sie erzeugt eine LISTE
+# VON BEFEHLEN, keine Pixel.** „Rechteck fuellen bei (10,20), 100x30, blau"
+# ist ein Datenwert; ihn zu pruefen kostet ein `assert_eq!`, ihn zu zeichnen
+# braucht einen Framebuffer.
+#
+# Deshalb laufen die Layout-Tests auf dem HOST, in Millisekunden, ohne
+# Grafik — und deshalb sind es viele. Ein Layout, das nur ueber
+# Bildschirmfotos pruefbar ist, wird nicht geprueft.
+#
+# ===========================================================================
+# ZWEI ABHAENGIGKEITEN, BEIDE WIRTSFREI
+#
+#   speedhtml   der Dokumentbaum
+#   speedcss    die berechneten Stile
+#
+# **NICHT dabei: `speedui`.** Das Layout braucht Textmetrik, aber kein
+# Toolkit — und ein `Metrik`-Trait mit drei Methoden ist billiger als eine
+# Abhaengigkeit auf Knoepfe und Listen. Der zweite Grund ist der
+# wichtigere: Die Tests brauchen eine Attrappe mit FESTER Zeichenbreite,
+# damit Umbruchstellen exakt vorhersagbar sind. Mit einer echten Schrift
+# waeren alle Zahlen in den Tests geraten.
+
+[package]
+name = "speedlayout"
+version = "0.1.0"
+edition = "2021"
+description = "Block- und Inline-Layout, Anzeige-Befehle — no_std, ohne Grafik"
+
+[dependencies]
+speedhtml = { path = "../speedhtml" }
+speedcss = { path = "../speedcss" }
+
+[profile.test]
+opt-level = 2
+
+[profile.dev]
+opt-level = 2

@@ -14,6 +14,7 @@
 # siehe Cargo.toml):
 /speedhtml/target
 /speedcss/target
+/speedlayout/target
 
 # Persistente Daten-Platten-Images (Nutzerdaten der VM — kein Build-Artefakt,
 # aber auch nichts fuers Repository; werden vom Runner bei Bedarf neu angelegt):

@@ -390,7 +390,12 @@ speedui/              Toolkit + Textmetrik + Umbruch (steht)
 speedhttp/            HTTP (steht)
 libspeed::netz        Abruf mit TLS (steht)
 libspeed::bild        PNG/JPEG -> RGBA (steht)
-userland/browser      Das Programm: Layout, Zeichnen, Bedienung.
+speedlayout/          Box-Modell, Blockfluss, Zeilenbau, Anzeige-Befehle.
+                      Hängt an speedhtml + speedcss, NICHT an speedui:
+                      Es braucht Textmetrik, kein Toolkit — und die Tests
+                      brauchen eine Attrappe mit fester Zeichenbreite.
+                      Erzeugt KEINE Pixel, sondern eine Befehlsliste.
+userland/browser      Das Programm: Zeichnen, Bedienung, Netz.
                       DAS EINZIGE, das alles zusammen kennt.
 userland/htmldump     Werkzeug: Baum ausgeben (dieser Teil)
 ```
@@ -412,8 +417,8 @@ dieses Schritts und nicht ein späteres Extra.
 
 1. **Tokenizer + DOM + `htmldump`** (Serie 8, Teil 4 — steht)
 2. **CSS-Teilmenge + Kaskade + `cssdump`** (Serie 8, Teil 5 — steht)
-3. Block- und Inline-Layout, Text mit Umbruch
-4. Bilder, Links, Tabellen
+3. **Block- und Inline-Layout, Text mit Umbruch** (Serie 8, Teil 6 — steht)
+4. **Bilder, Listen, Tabellen, Anzeige-Befehle** (Serie 8, Teil 6 — steht)
 5. Fenster, Bedienung, Verlauf — jetzt ist es ein Browser
 6. Abnahme gegen §4
 

@@ -625,6 +625,104 @@
   will nur Masse), sondern der `Zeichner` — weil er keine Abhaengigkeit ist,
   sondern eine AUFRUF-KONVENTION.
 
+## LAYOUT: KAESTEN, ZEILEN, ANZEIGE-BEFEHLE (Serie 8, Teil 6, speedlayout/)
+- **DAS ERGEBNIS IST EINE LISTE VON BEFEHLEN, KEIN BILD.** Das ist die
+  wichtigste Entscheidung des Teils: „Rechteck bei (10,20), 100x30, blau"
+  ist ein DATENWERT — ihn zu pruefen kostet ein `assert_eq!`, ihn zu
+  zeichnen braucht einen Framebuffer. Die 55 Layout-Tests laufen deshalb
+  auf dem HOST in 0,02 s; ein Layout, das man nur fotografieren kann, wird
+  nicht geprueft. Zweiter Gewinn: Der Renderer wird trivial (Liste
+  durchlaufen, je Befehl eine Zeichenfunktion), und beim Scrollen aendert
+  sich die Liste NICHT — nur der Ausschnitt (`im_bereich`).
+- **DIE FUENFTE KISTE HAENGT AN speedhtml + speedcss, AUSDRUECKLICH NICHT
+  AN speedui.** Das Layout braucht Textmetrik, kein Widget-Toolkit — ein
+  `Metrik`-Trait mit vier Methoden (drei mit Voreinstellung) ist billiger
+  als Knoepfe, Listen und Datei-Dialoge. Der ZWEITE Grund ist der
+  wichtigere: Die Tests brauchen eine Attrappe mit FESTER Zeichenbreite
+  (`attrappe::FesteMetrik`, 10 px je Zeichen bei 16 px Schrift), damit
+  Umbruchstellen exakt VORHERSAGBAR sind. Mit einer echten Schrift waeren
+  alle Zahlen in den Tests aus dem Ergebnis abgeschrieben — und ein Test,
+  dessen Erwartung aus dem Ergebnis stammt, prueft nichts.
+- **GESPEICHERT WIRD DIE INHALTS-BOX**, alles andere ergibt sich durch
+  Aufaddieren (`padding_box`, `rahmen_box`, `margin_box`). Wuerde man die
+  Rahmen-Box speichern, muesste an zwanzig Stellen zurueckgerechnet werden.
+- **DER KASTENBAUM IST NICHT DER DOM-BAUM.** Drei Unterschiede, und alle
+  drei sind sein Daseinsgrund: `display: none` faellt mitsamt Teilbaum weg,
+  Textknoten werden leerraum-normalisiert, und ein Block-Container mit
+  GEMISCHTEN Kindern bekommt um jede Folge von Inline-Kindern einen
+  ANONYMEN BLOCK. Ohne den gaebe es fuer `<div>Text<p>x</p></div>` keinen
+  Ort, an dem die Zeilen des Textes leben.
+- **MARGIN-KOLLAPS: NUR ZWISCHEN GESCHWISTERN, und das ist die bewusst
+  einfache Variante.** Man will die Regel weglassen — danach sieht jede
+  Seite falsch aus, weil das Standard-Stylesheet fast jedem Block einen
+  Rand gibt und sich ohne Kollaps alle addieren. Die VOLLE Regel
+  (Elternteil/erstes Kind, durch leere Kaesten hindurch, Ausnahmen fuer
+  Padding und Rahmen) ist eine der verwickeltsten Ecken von CSS bei
+  kleinem sichtbaren Gewinn. EHRLICHE FOLGE, in grenzen.md: Ein `<div>` um
+  einen `<p>` bekommt dessen Rand INNEN statt aussen.
+- **INLINE-LAYOUT IST DAS HERZSTUECK, und es hat drei Schritte:**
+  EINSAMMELN (den Inline-Teilbaum zu einem FLACHEN Strom aus Woertern,
+  Leerzeichen, Bildern machen — danach ist das Problem eindimensional und
+  ueberhaupt loesbar), FUELLEN (an Wortgrenzen umbrechen), AUSRICHTEN (je
+  Zeile die Grundlinie bestimmen). Ein `<b>` ist dabei KEIN Kasten mit
+  Geometrie: Es faerbt ein Stueck des Stroms, und bei einem Umbruch steht
+  sein Anfang auf Zeile eins und sein Ende auf Zeile zwei.
+- **ZWEI LEERRAUM-REGELN, die man einzeln vergisst:** Ein Leerzeichen am
+  ZEILENANFANG faellt weg (sonst ruecken alle Folgezeilen ein), und eines
+  am ZEILENENDE zaehlt nicht zur Breite (sonst bricht eine Zeile um, die
+  genau passen wuerde). `test_zeilenumbruch_genau_passend` nagelt beides
+  fest: `aaa bbb` = 70 px passt in 70 px und bricht bei 69 px um.
+- **DIE FALTUNG GEHOERT INS LAYOUT, NICHT IN DEN PARSER.** speedhtml
+  liefert den Text, wie er dasteht — in `<pre>` zaehlt jedes Zeichen, und
+  ein Parser, der schon normalisiert, hat die Information unwiederbringlich
+  weggeworfen. Die Regel haengt am STIL, also gehoert sie hierher.
+- **DER DURCHSCHUSS WIRD HALB OBEN, HALB UNTEN VERTEILT** (so die
+  Spezifikation) — deshalb sitzt Text mit grosser `line-height` mittig in
+  seiner Zeile statt oben zu kleben. Genau das liess
+  `test_koordinaten_sind_absolut` zunaechst falsch aussehen (53 statt 50);
+  der Code hatte recht, der Test nicht.
+- **TABELLEN: INHALTSBASIERT IN EINEM DURCHGANG, und die Alternative ist
+  begruendet verworfen.** „Gleich breite Spalten" waere zwei Zeilen Code
+  und unbrauchbar, sobald eine Tabelle eine schmale und eine breite Spalte
+  hat — also bei jeder Infobox. Gewaehlt: je Zelle die Breite messen, die
+  ihr Text OHNE Umbruch braeuchte, je Spalte das Maximum, und wenn die
+  Summe nicht passt, PROPORTIONAL herunterskalieren (mit Mindestbreite,
+  sonst faellt eine schmale Spalte auf 0). O(Zellen), keine Iteration bis
+  zur Konvergenz. Was fehlt: Mindestbreite aus dem laengsten WORT,
+  `colspan`-Verteilung, Ausgleich zwischen Spalten mit Platz uebrig.
+- **ZU BREITER INHALT LAEUFT UEBER, er wird NICHT abgeschnitten.** Stilles
+  Abschneiden versteckt Text, und niemand sieht warum. Der Ueberlauf wird
+  GEZAEHLT (`Befund::ueberlaeufe`), damit er messbar ist.
+- **DREI FEHLER, DIE DIE TESTS FANDEN:** (1) `margin: 0 auto` klebte links,
+  weil der Elternteil `inhalt.x` setzte, BEVOR die Breite und damit der
+  auto-Rand feststand — jetzt bekommt `block_setzen` die Position als
+  Argument und rechnet sie selbst aus. (2) Alle Tabellenspalten waren
+  gleich breit, weil `wunschbreite` auf einer ZELLE (einem Block) nichts
+  einsammelte — `einsammeln` ist fuer den Inline-Strom gebaut, es braucht
+  den Lauf ueber den Teilbaum. (3) `Inhalt::Kasten(Kasten)` machte JEDE
+  Variante des Strom-Enums 336 Byte gross, auch ein Leerzeichen; ein
+  Absatz mit tausend Woertern belegte 336 KiB statt 24. Jetzt in einer Box.
+- **REKURSIV MIT HARTER TIEFENGRENZE (64), anders als Parser und Kaskade.**
+  Block-Layout ist ein Nachbestell-Durchlauf mit Rueckgabewert (die Hoehe
+  des Kindes bestimmt die Position des naechsten); iterativ kostete das
+  mehr Verstaendlichkeit, als es einbringt. Der User-Stack ist 64 KiB, eine
+  Ebene braucht unter 400 Byte — 64 laesst Luft und liegt weit ueber dem,
+  was echte Seiten brauchen (Wikipedia: 25).
+- **`cssdump --layout` IST DER DRITTE DEBUG-BLICK:** `htmldump` beantwortet
+  „Parser oder Layout?", `cssdump <knoten>` „welche Regel hat das
+  gesetzt?", und `--layout` „was kommt am Ende wirklich heraus?". Weil das
+  Ergebnis Befehle sind und keine Pixel, ist diese Ausgabe der
+  VOLLSTAENDIGE Zustand vor dem Zeichnen.
+- **JEDES WORT IST EIN EIGENER ANZEIGE-BEFEHL** (es hat seine eigene
+  Position). Korrekt, aber mehr Befehle als noetig — benachbarte Woerter
+  gleichen Stils liessen sich zusammenfassen. In grenzen.md als
+  Optimierung vermerkt, nicht als Luecke.
+- **ZAHLEN:** 55 Host-Tests in 0,02 s, 5 weitere in QEMU. ELF `cssdump`
+  1 116 520 B. Die erste Webseite der Welt: 212 Anzeige-Befehle, 877 px
+  hoch bei 600 px Breite, 19 ms in Ring 3 — und bei 200 px Breite 2265 px
+  hoch gegen 679 px bei 1200 px Breite, was beweist, dass der Umbruch
+  wirklich an der Breite haengt.
+
 ## CSS: TEILMENGE, KASKADE, STANDARD-STYLESHEET (Serie 8, Teil 5, speedcss/)
 - **DIE VIERTE KISTE — UND DIE ERSTE MIT EINER ABHAENGIGKEIT.** `speedcss`
   haengt an `speedhtml`, und das ist eine begruendete Entscheidung, keine

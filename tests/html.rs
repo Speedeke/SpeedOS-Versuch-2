@@ -1,4 +1,4 @@
-// tests/html.rs — HTML- UND CSS-FUNDAMENT IN RING 3 (Serie 8, Teil 4+5)
+// tests/html.rs — DAS BROWSER-FUNDAMENT IN RING 3 (Serie 8, Teil 4-6)
 //
 // ===========================================================================
 // WAS HIER GEPRUEFT WIRD — UND WAS AUSDRUECKLICH WOANDERS
@@ -11,8 +11,8 @@
 //
 // Hier wird das geprueft, was der Host NICHT zeigen kann:
 //
-//   1. `speedhtml` UND `speedcss` uebersetzen und laufen BARE-METAL,
-//      no_std, in Ring 3.
+//   1. `speedhtml`, `speedcss` UND `speedlayout` uebersetzen und laufen
+//      BARE-METAL, no_std, in Ring 3.
 //   2. `htmldump` und `cssdump` finden ihre Datei, verarbeiten sie und
 //      schreiben das Ergebnis durch eine PIPE — der ganze Weg also.
 //   3. Ein Ring-3-Prozess mit 12 MiB Heap kommt mit einem echten Dokument
@@ -622,6 +622,205 @@ fn test_kein_leck_cssdump() {
     let verloren = vorher.saturating_sub(nachher);
     serial_println!(
         "  10 cssdump-Prozesse: {} Frames verloren (Schranke {}).",
+        verloren,
+        schranke
+    );
+    assert!(verloren <= schranke, "Frame-Leck: {verloren} > {schranke}");
+}
+
+// ===========================================================================
+// 5. LAYOUT IN RING 3 (Serie 8, Teil 6)
+// ===========================================================================
+
+/// DER MEILENSTEIN VON TEIL 6: Ein Ring-3-Prozess setzt eine Seite und
+/// liefert Anzeige-Befehle mit absoluten Koordinaten.
+///
+/// Die Layout-LOGIK ist auf dem Host geprueft (55 Tests mit einer
+/// Attrappen-Metrik, exakt nachgerechnet). Hier zaehlt nur, dass die
+/// Kiste bare-metal uebersetzt, in 12 MiB Heap passt und ein echtes
+/// Dokument durchrechnet, ohne zu panicken.
+#[test_case]
+fn test_layout_in_ring3() {
+    if !programme_vorhanden() || programme::TESTSEITE.is_empty() {
+        return;
+    }
+    let pfad = programme::testseite_pfad();
+    let lauf = cssdump(&[&pfad, "--layout", "--breite=600"]);
+
+    assert_ne!(lauf.code(), CODE_PANIK, "das Layout ist gepanickt:\n{}", lauf.ausgabe);
+    assert_eq!(lauf.code(), 0, "Ausgabe:\n{}", lauf.ausgabe);
+
+    // Es sind Befehle herausgekommen, und zwar Text.
+    assert!(
+        lauf.ausgabe.contains("TEXT"),
+        "keine Textbefehle:\n{}",
+        lauf.ausgabe
+    );
+    // WORTWEISE suchen, nicht als Satz: Jedes Wort ist ein EIGENER
+    // Textbefehl, weil jedes seine eigene Position hat (der Zeilenbau
+    // setzt sie einzeln). „World Wide Web" als zusammenhaengende Zeichen-
+    // folge gibt es in der Liste deshalb nicht.
+    for wort in ["World", "Wide", "Web"] {
+        assert!(
+            lauf.ausgabe.contains(wort),
+            "'{wort}' fehlt im Layout:
+{}",
+            lauf.ausgabe.lines().take(20).collect::<Vec<_>>().join("
+")
+        );
+    }
+    assert!(lauf.ausgabe.contains("Anzeige-Befehle"));
+    assert!(lauf.ausgabe.contains("Gesamthoehe"));
+
+    // Die Seite hat eine sinnvolle Hoehe (die erste Webseite der Welt ist
+    // bei 600 px Breite mehrere Bildschirme lang).
+    let hoehe: i32 = lauf
+        .ausgabe
+        .lines()
+        .find(|z| z.contains("Gesamthoehe"))
+        .and_then(|z| {
+            z.split_whitespace()
+                .skip_while(|w| *w != "Gesamthoehe")
+                .nth(1)
+                .and_then(|w| w.parse().ok())
+        })
+        .unwrap_or(0);
+    assert!(hoehe > 200, "Gesamthoehe {hoehe} px — das kann nicht stimmen");
+
+    serial_println!(
+        "  Layout in Ring 3: {} Zeilen Befehle, Seite {} px hoch ({} ms).",
+        lauf.zeilen(),
+        hoehe,
+        lauf.dauer_ms
+    );
+}
+
+/// Die Koordinaten steigen — der Text steht untereinander und nicht alles
+/// auf y=0.
+#[test_case]
+fn test_layout_koordinaten_steigen() {
+    if !programme_vorhanden() || programme::TESTSEITE.is_empty() {
+        return;
+    }
+    let pfad = programme::testseite_pfad();
+    let lauf = cssdump(&[&pfad, "--layout", "--breite=400"]);
+    assert_eq!(lauf.code(), 0);
+
+    // Aus den TEXT-Zeilen die y-Werte holen: "TEXT   xxxxx,yyyyy ..."
+    let mut ys: Vec<i32> = Vec::new();
+    for zeile in lauf.ausgabe.lines() {
+        if let Some(rest) = zeile.strip_prefix("TEXT") {
+            if let Some((_, y_teil)) = rest.split_whitespace().next().and_then(|k| k.split_once(','))
+            {
+                if let Ok(y) = y_teil.trim().parse::<i32>() {
+                    ys.push(y);
+                }
+            }
+        }
+    }
+    assert!(ys.len() > 20, "zu wenige Textbefehle: {}", ys.len());
+    let hoechstes = ys.iter().copied().max().unwrap_or(0);
+    assert!(
+        hoechstes > 300,
+        "alles klebt oben — der Blockfluss stapelt nicht: max y = {hoechstes}"
+    );
+    serial_println!("  {} Textbefehle, tiefster bei y={}.", ys.len(), hoechstes);
+}
+
+/// Schmale und breite Fenster ergeben verschieden hohe Seiten — der
+/// Zeilenumbruch wirkt wirklich.
+#[test_case]
+fn test_layout_bricht_nach_breite_um() {
+    if !programme_vorhanden() || programme::TESTSEITE.is_empty() {
+        return;
+    }
+    let pfad = programme::testseite_pfad();
+    let hoehe_von = |breite: &str| -> i32 {
+        let lauf = cssdump(&[&pfad, "--layout", breite]);
+        assert_eq!(lauf.code(), 0, "{}", lauf.ausgabe);
+        lauf.ausgabe
+            .lines()
+            .find(|z| z.contains("Gesamthoehe"))
+            .and_then(|z| {
+                z.split_whitespace()
+                    .skip_while(|w| *w != "Gesamthoehe")
+                    .nth(1)
+                    .and_then(|w| w.parse().ok())
+            })
+            .unwrap_or(0)
+    };
+    let schmal = hoehe_von("--breite=200");
+    let breit = hoehe_von("--breite=1200");
+    assert!(
+        schmal > breit,
+        "schmal ({schmal}) muesste hoeher sein als breit ({breit})"
+    );
+    serial_println!("  200px -> {} px hoch, 1200px -> {} px hoch.", schmal, breit);
+}
+
+/// Kaputte und entartete Eingaben toeten das Layout nicht.
+#[test_case]
+fn test_layout_haelt_muell_aus() {
+    if !programme_vorhanden() {
+        return;
+    }
+    let faelle: &[(&str, &str)] = &[
+        ("l_leer.html", ""),
+        ("l_tief.html", "<div><div><div><div><div><div>tief</div></div></div></div></div></div>"),
+        (
+            "l_tabelle.html",
+            "<table><tr><td>a<td>b<tr><td>c<td>d</table>",
+        ),
+        (
+            "l_liste.html",
+            "<ul><li>a<li>b<ul><li>c</ul></ul><ol><li>1<li>2</ol>",
+        ),
+        (
+            "l_absurd.html",
+            "<style>p{width:99999999px;margin:99999px;font-size:9999px}</style><p>x</p>",
+        ),
+        ("l_lang.html", "<p>WortOhneLeerzeichenDasSehrLangIstUndNichtPasst</p>"),
+        ("l_bilder.html", "<p><img src=a><img src=b width=999999></p>"),
+        ("l_pre.html", "<pre>  eins\n    zwei\n</pre>"),
+    ];
+    for (name, inhalt) in faelle {
+        let pfad = testdatei(name, inhalt);
+        for breite in ["--breite=1", "--breite=300", "--breite=100000"] {
+            let lauf = cssdump(&[&pfad, "--layout", breite]);
+            assert_ne!(
+                lauf.code(),
+                CODE_PANIK,
+                "{} bei {} hat das Layout zum PANICKEN gebracht:\n{}",
+                name,
+                breite,
+                lauf.ausgabe
+            );
+            assert!(lauf.ende.is_some(), "{name} bei {breite} haengt");
+            assert_eq!(lauf.code(), 0, "{}: Exit {}", name, lauf.code());
+        }
+    }
+    serial_println!("  {} Faelle x 3 Breiten, 0 Paniken.", faelle.len());
+}
+
+/// Zehn Layout-Durchlaeufe lecken nichts.
+#[test_case]
+fn test_kein_leck_layout() {
+    if !programme_vorhanden() || programme::TESTSEITE.is_empty() {
+        return;
+    }
+    let pfad = programme::testseite_pfad();
+    scheduler::aufraeumen();
+    let vorher = memory::frame_statistik().0;
+    for _ in 0..10 {
+        let lauf = cssdump(&[&pfad, "--layout"]);
+        assert_eq!(lauf.code(), 0);
+    }
+    scheduler::aufraeumen();
+    let nachher = memory::frame_statistik().0;
+    let schranke = (10 * 340) / 512 + 2;
+    let verloren = vorher.saturating_sub(nachher);
+    serial_println!(
+        "  10 Layout-Prozesse: {} Frames verloren (Schranke {}).",
         verloren,
         schranke
     );
