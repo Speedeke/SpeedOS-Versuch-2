@@ -459,20 +459,28 @@ impl Browser {
         if folge.verschieben_lohnt() {
             let bereich = self.seiten_bereich();
             let dy = folge.verschiebung;
-            // NUR DEN SEITENBEREICH verschieben — der Chrome bleibt, wo
-            // er ist. `senkrecht_verschieben` bewegt den GANZEN Puffer,
-            // also wird danach der Chrome ohnehin neu gezeichnet.
-            self.fenster.senkrecht_verschieben(dy);
+            // NUR DAS SEITENBAND verschieben. Der Chrome steht still und
+            // wird deshalb auch nicht neu gezeichnet — das spart bei 4K
+            // gemessen 2 200 us JE FRAME (die Begruendung steht bei
+            // `Fenster::senkrecht_verschieben_bereich`).
+            self.fenster.senkrecht_verschieben_bereich(
+                bereich.y.max(0) as usize,
+                bereich.hoehe.max(0) as usize,
+                dy,
+            );
             let streifen = folge.streifen.unwrap_or(bereich);
-            let sicher = streifen.schneiden(&bereich);
-            if let Some(sicher) = sicher {
+            if let Some(sicher) = streifen.schneiden(&bereich) {
                 self.seite_zeichnen(sicher);
             }
-            // Der obere Rand des Seitenbereichs wurde beim Verschieben
-            // mit Chrome-Pixeln gefuellt (oder umgekehrt) — beides wird
-            // durch das Neuzeichnen des Chrome geheilt.
-            self.chrome_zeichnen();
-            let _ = self.fenster.zeigen();
+            // NUR DAS SEITENBAND uebertragen: Der Chrome hat sich nicht
+            // geaendert, also muss der Kernel ihn auch nicht erneut
+            // bekommen.
+            let _ = self.fenster.zeigen_bereich(
+                0,
+                bereich.y.max(0) as usize,
+                bereich.breite.max(0) as usize,
+                bereich.hoehe.max(0) as usize,
+            );
             return;
         }
         let massnahme = speedpaint::invalidierung::entscheiden(anlass);
@@ -488,6 +496,8 @@ fn haupt(argumente: &Argumente) -> i32 {
     let mut start: Option<String> = None;
     let mut messen: Option<u32> = None;
     let mut pruefen = false;
+    let mut zyklus = false;
+    let mut phasen = false;
     let mut fenstergroesse = (START_BREITE, START_HOEHE);
     for i in 1..argumente.anzahl() {
         let Some(wort) = argumente.get(i) else { continue };
@@ -501,6 +511,12 @@ fn haupt(argumente: &Argumente) -> i32 {
             }
             if wort == "--pruefen" {
                 pruefen = true;
+            }
+            if wort == "--zyklus" {
+                zyklus = true;
+            }
+            if wort == "--phasen" {
+                phasen = true;
             }
             if let Some(masse) = wort.strip_prefix("--fenster=") {
                 if let Some(gelesen) = masse_lesen(masse) {
@@ -545,6 +561,18 @@ fn haupt(argumente: &Argumente) -> i32 {
     let ziel = ort::Ort::parsen(&ziel_text).unwrap_or(Ort::Intern(Intern::Info));
     browser.navigieren(ziel, true, None);
 
+    if phasen {
+        phasenmodus(&mut browser, &ziel_text);
+        let _ = browser.fenster.schliessen();
+        return OK;
+    }
+
+    if zyklus {
+        zyklusmodus(&mut browser);
+        let _ = browser.fenster.schliessen();
+        return OK;
+    }
+
     if pruefen {
         pruefmodus(&browser);
         let _ = browser.fenster.schliessen();
@@ -560,6 +588,243 @@ fn haupt(argumente: &Argumente) -> i32 {
     ereignisschleife(&mut browser);
     let _ = browser.fenster.schliessen();
     OK
+}
+
+// ===========================================================================
+// DER PHASEN-MODUS — wohin die Ladezeit geht
+// ===========================================================================
+
+/// `--phasen`: eine Seite laden und die Zeit auf die Stufen aufteilen.
+///
+/// ===================================================================
+/// WARUM DIE STUFEN EINZELN GEMESSEN WERDEN
+///
+/// „Die Seite braucht 300 ms" ist keine Auskunft, sondern der Anfang
+/// einer Suche. Erst die Aufteilung sagt, WO die Zeit bleibt — und ob
+/// sich Optimieren ueberhaupt lohnt. Bei einem Browser sind die
+/// Kandidaten sehr verschieden teuer:
+///
+///   NETZ    DNS + TCP + TLS-Handshake + Uebertragung (bei uns aus
+///           Serie 7 bekannt: Handshake 11-36 ms)
+///   HTML    Tokenizer + Baum
+///   CSS     Parsen + Kaskade (jede Regel gegen jeden Knoten)
+///   LAYOUT  Kaesten, Zeilenumbruch, Anzeige-Befehle
+///   MALEN   Befehle -> Pixel
+///   KOPIE   `fenster_zeichnen` (die Naht zum Kernel)
+///
+/// GEMESSEN WIRD MEHRFACH UND DER BESTWERT GENOMMEN — dieselbe Methodik
+/// wie in `messung` Modus 1 und im Scroll-Frame: Der Scheduler nimmt
+/// alle 20 ms die CPU weg, und diese Fremdzeit gehoert in keine Stufe.
+/// Die Uhr kann nur Millisekunden; die kleinen Stufen werden deshalb
+/// WIEDERHOLT und geteilt.
+fn phasenmodus(b: &mut Browser, quelle: &str) {
+    const RUNDEN: u32 = 5;
+
+    println!("QUELLE={}", quelle);
+    println!("RUNDEN={}", RUNDEN);
+
+    let ort = match ort::Ort::parsen(quelle) {
+        Ok(o) => o,
+        Err(_) => {
+            println!("FEHLER=adresse");
+            return;
+        }
+    };
+
+    // --- (1) NETZ: holen. Beim ERSTEN Mal wirklich, danach aus dem
+    // Cache — deshalb zaehlt hier nur der erste Durchgang.
+    let t0 = libspeed::zeit_jetzt();
+    let geladen = laden::seite_laden(&ort, &mut b.klient, &mut b.cache);
+    let netz_ms = libspeed::zeit_jetzt().saturating_sub(t0);
+    let bytes = geladen.bytes.len();
+    let html = String::from_utf8_lossy(&geladen.bytes);
+
+    // --- (2) HTML parsen ---
+    let mut html_ms = u64::MAX;
+    let mut dokument = speedhtml::parsen("");
+    for _ in 0..RUNDEN {
+        let t = libspeed::zeit_jetzt();
+        dokument = speedhtml::parsen(&html);
+        html_ms = html_ms.min(libspeed::zeit_jetzt().saturating_sub(t));
+    }
+    let knoten = dokument.anzahl();
+
+    // --- (3) CSS. AUFGETEILT, weil es zwei verschiedene Probleme sind:
+    // Stylesheets PARSEN (Textarbeit, haengt an der CSS-Menge) und
+    // KASKADIEREN (jede Regel gegen jeden Knoten, haengt am Produkt).
+    // Wer nur die Summe kennt, optimiert die falsche Haelfte.
+    let mut css_standard_ms = u64::MAX;
+    let mut css_autor_ms = u64::MAX;
+    let mut css_kaskade_ms = u64::MAX;
+    let mut stile = tab::kaskadieren(&dokument);
+    let mut regeln_standard = 0usize;
+    let mut regeln_autor = 0usize;
+    for _ in 0..RUNDEN {
+        let t = libspeed::zeit_jetzt();
+        let standard = speedcss::standard_stylesheet();
+        css_standard_ms = css_standard_ms.min(libspeed::zeit_jetzt().saturating_sub(t));
+
+        let t = libspeed::zeit_jetzt();
+        let autor = speedcss::autor_stylesheet(&dokument);
+        css_autor_ms = css_autor_ms.min(libspeed::zeit_jetzt().saturating_sub(t));
+
+        regeln_standard = standard.regeln.len();
+        regeln_autor = autor.regeln.len();
+        let blaetter: Vec<(&speedcss::Stylesheet, speedcss::Herkunft)> = alloc::vec![
+            (&standard, speedcss::Herkunft::Standard),
+            (&autor, speedcss::Herkunft::Autor),
+        ];
+        let t = libspeed::zeit_jetzt();
+        stile = speedcss::kaskade::berechnen(&dokument, &blaetter, speedcss::Zustand::default());
+        css_kaskade_ms = css_kaskade_ms.min(libspeed::zeit_jetzt().saturating_sub(t));
+    }
+    let css_ms = wert(css_standard_ms) + wert(css_autor_ms) + wert(css_kaskade_ms);
+
+    // --- (4) LAYOUT ---
+    let bereich = b.seiten_bereich();
+    let breite = b.layout_breite();
+    let leere_bilder = tab::BildSammlung::default();
+    let metrik = tab::SeitenMetrik {
+        bilder: &leere_bilder,
+    };
+    let mut layout_ms = u64::MAX;
+    let mut befehle = 0usize;
+    let mut hoehe = 0i32;
+    for _ in 0..RUNDEN {
+        let t = libspeed::zeit_jetzt();
+        let ergebnis = speedlayout::setzen(&dokument, &stile, breite, &metrik);
+        let liste = speedlayout::anzeigeliste(&ergebnis);
+        layout_ms = layout_ms.min(libspeed::zeit_jetzt().saturating_sub(t));
+        befehle = liste.len();
+        hoehe = ergebnis.hoehe;
+    }
+
+    // --- (5) MALEN und (6) KOPIE, am fertigen Tab ---
+    {
+        let tab = &mut b.tabs[b.aktiv];
+        tab.inhalt_setzen(&geladen.bytes, ort.clone(), geladen.fehler, geladen.unsicher);
+        tab.setzen(breite, bereich);
+    }
+    let mut malen_ms = u64::MAX;
+    let mut kopie_ms = u64::MAX;
+    for _ in 0..RUNDEN {
+        let t = libspeed::zeit_jetzt();
+        b.seite_zeichnen(bereich);
+        malen_ms = malen_ms.min(libspeed::zeit_jetzt().saturating_sub(t));
+        let t = libspeed::zeit_jetzt();
+        let _ = b.fenster.zeigen();
+        kopie_ms = kopie_ms.min(libspeed::zeit_jetzt().saturating_sub(t));
+    }
+
+    let (belegt, _, spitze) = libspeed::heap::heap_stand();
+    println!("BYTES={}", bytes);
+    println!("KNOTEN={}", knoten);
+    println!("BEFEHLE={}", befehle);
+    println!("DOKUMENT_HOEHE={}", hoehe);
+    println!("SEITE_BREITE={}", bereich.breite);
+    println!("SEITE_HOEHE={}", bereich.hoehe);
+    println!("NETZ_MS={}", netz_ms);
+    println!("HTML_MS={}", wert(html_ms));
+    println!("CSS_MS={}", css_ms);
+    println!("CSS_STANDARD_MS={}", wert(css_standard_ms));
+    println!("CSS_AUTOR_MS={}", wert(css_autor_ms));
+    println!("CSS_KASKADE_MS={}", wert(css_kaskade_ms));
+    println!("REGELN_STANDARD={}", regeln_standard);
+    println!("REGELN_AUTOR={}", regeln_autor);
+    println!("LAYOUT_MS={}", wert(layout_ms));
+    println!("MALEN_MS={}", wert(malen_ms));
+    println!("KOPIE_MS={}", wert(kopie_ms));
+    println!("HEAP_BELEGT={}", belegt);
+    println!("HEAP_SPITZE={}", spitze);
+}
+
+fn wert(x: u64) -> u64 {
+    if x == u64::MAX {
+        0
+    } else {
+        x
+    }
+}
+
+// ===========================================================================
+// DER ZYKLUS-MODUS — fuer den Speicher-Pass
+// ===========================================================================
+
+/// `--zyklus`: einmal alles tun, was ein Benutzer in einer Sitzung tut,
+/// und dann sauber enden.
+///
+/// ===================================================================
+/// WOZU EIN EIGENER MODUS UND NICHT EINFACH `--pruefen` MEHRMALS
+///
+/// Der Speicher-Pass fragt nicht „leckt EIN Ladevorgang?", sondern
+/// „leckt eine SITZUNG?". Das ist etwas anderes: Tabs entstehen und
+/// vergehen, der Verlauf waechst, der Cache fuellt sich, Bilder werden
+/// geladen, Fenster-Handles kommen und gehen. Ein Modus, der nur eine
+/// Seite laedt, wuerde genau die Dinge nicht anfassen, an denen ein
+/// Browser leckt.
+///
+/// Was hier passiert (in dieser Reihenfolge, weil sie sich gegenseitig
+/// stoert): fuenf Seiten laden, drei Tabs oeffnen, in ihnen laden,
+/// zwischen ihnen wechseln, zwei wieder schliessen, zurueck- und
+/// vorgehen. Danach endet der Prozess — und der Kernel muss ALLES
+/// zurueckbekommen.
+fn zyklusmodus(b: &mut Browser) {
+    let seiten = [
+        "speedos:info",
+        "speedos:lesezeichen",
+        "/platte/seiten/cern.html",
+        "/seiten/cern.html",
+        "/gibt-es-nicht-4711.html",
+    ];
+
+    // (1) Fuenf Seiten im ersten Tab — inklusive einer, die es nicht gibt
+    // (die Fehlerseite ist auch ein Dokument und alloziert auch).
+    for adresse in seiten {
+        if let Ok(ziel) = ort::Ort::parsen(adresse) {
+            b.navigieren(ziel, true, None);
+        }
+    }
+
+    // (2) Drei Tabs auf, in jedem laden.
+    for adresse in ["speedos:info", "speedos:verlauf", "speedos:lesezeichen"] {
+        if let Ok(ziel) = ort::Ort::parsen(adresse) {
+            b.tab_neu(ziel);
+        }
+    }
+
+    // (3) Zwischen ihnen wechseln (das laeuft ueber `nach_tab_wechsel`,
+    // das bei geaenderter Breite neu setzt).
+    for i in 0..b.tabs.len() {
+        b.tab_waehlen(i);
+    }
+
+    // (4) Zurueck und vor — der Verlauf wird wirklich benutzt.
+    for _ in 0..3 {
+        if let Some(ziel) = b.tabs[b.aktiv].zurueck() {
+            b.navigieren(ziel, false, None);
+        }
+    }
+    for _ in 0..2 {
+        if let Some(ziel) = b.tabs[b.aktiv].vor() {
+            b.navigieren(ziel, false, None);
+        }
+    }
+
+    // (5) Zwei Tabs wieder zu.
+    for _ in 0..2 {
+        if b.tabs.len() > 1 {
+            let letzter = b.tabs.len() - 1;
+            b.tab_schliessen(letzter);
+        }
+    }
+
+    let (belegt, gesamt, spitze) = libspeed::heap::heap_stand();
+    println!("ZYKLUS=fertig");
+    println!("TABS={}", b.tabs.len());
+    println!("VERLAUF={}", b.tabs[b.aktiv].verlauf.len());
+    println!("HEAP_BELEGT={}", belegt);
+    println!("HEAP_GESAMT={}", gesamt);
+    println!("HEAP_SPITZE={}", spitze);
 }
 
 // ===========================================================================
@@ -710,14 +975,24 @@ fn messmodus(b: &mut Browser, quelle: &str, runden: u32) {
 
             let t0 = libspeed::zeit_jetzt();
             if folge.verschieben_lohnt() {
-                b.fenster.senkrecht_verschieben(folge.verschiebung);
+                b.fenster.senkrecht_verschieben_bereich(
+                    bereich.y.max(0) as usize,
+                    bereich.hoehe.max(0) as usize,
+                    folge.verschiebung,
+                );
             }
             if let Some(sicher) = streifen.schneiden(&bereich) {
                 b.seite_zeichnen(sicher);
             }
-            b.chrome_zeichnen();
             let t1 = libspeed::zeit_jetzt();
-            let _ = b.fenster.zeigen();
+            // NUR das Seitenband uebertragen — der Chrome hat sich nicht
+            // geaendert. Genau so laeuft es auch im Betrieb.
+            let _ = b.fenster.zeigen_bereich(
+                0,
+                bereich.y.max(0) as usize,
+                bereich.breite.max(0) as usize,
+                bereich.hoehe.max(0) as usize,
+            );
             let t2 = libspeed::zeit_jetzt();
             malen_ms += t1.saturating_sub(t0);
             kopie_ms += t2.saturating_sub(t1);

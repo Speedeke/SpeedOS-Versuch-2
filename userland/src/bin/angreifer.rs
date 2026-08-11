@@ -63,6 +63,8 @@ fn haupt(argumente: &Argumente) -> i32 {
             println!("  7  zufall-Syscall mit boesen Zeigern/Laengen");
             println!("  8  Speicher-Syscall mit absurden Groessen");
             println!("  9  riesige und kaputte PEM-Buendel");
+            println!(" 10  Fenster-Syscalls mit boesen Rechtecken/Puffern");
+            println!(" 11  Fenster und Ereignisse fluten");
             println!(" 20  Kernel-Speicher LESEN      (-> Absturz erwartet)");
             println!(" 21  Kernel-Speicher SCHREIBEN  (-> Absturz erwartet)");
             println!(" 22  Stack-Ueberlauf            (-> Absturz erwartet)");
@@ -85,6 +87,8 @@ fn haupt(argumente: &Argumente) -> i32 {
         7 => zufall_angriffe(),
         8 => speicher_angriffe(),
         9 => pem_angriffe(),
+        10 => fenster_angriffe(),
+        11 => ereignis_flut(),
         20 => kernel_lesen(),
         21 => kernel_schreiben(),
         22 => stack_ueberlauf(),
@@ -680,6 +684,293 @@ fn riesigen_block_bauen() -> usize {
 // Sie kehren nie zurueck; der `println!` danach ist nur der Beweis, dass sie
 // es nicht tun (erscheint er, ist etwas faul).
 // ===========================================================================
+
+// ===========================================================================
+// ANGRIFF 10 + 11: DIE FENSTER-ABI (Serie 8)
+// ===========================================================================
+//
+// DIE NEUE ANGRIFFSFLAECHE DER SERIE. Vorher konnte ein Prozess dem Kernel
+// Zeiger auf Dateien und Sockets unterschieben; seit Serie 8, Teil 1 kann
+// er ihm PIXEL unterschieben — und zwar Megabytes davon, mit einem
+// Rechteck daneben, das sagt, wie sie zu deuten sind.
+//
+// Genau darin liegt das Neue: Bei `schreibe(handle, puffer)` steht die
+// Laenge IM Puffer. Bei `fenster_zeichnen(handle, ptr, laenge, rechteck)`
+// gibt es ZWEI Angaben, die zusammenpassen muessen — und ein Kernel, der
+// dem Rechteck glaubt und die Laenge nicht nachrechnet, kopiert ueber das
+// Ende des Puffers hinaus.
+
+const SYS_FENSTER_OEFFNEN: u64 = 48;
+const SYS_FENSTER_ZEICHNEN: u64 = 49;
+const SYS_FENSTER_EREIGNIS: u64 = 50;
+const SYS_FENSTER_TITEL: u64 = 51;
+const SYS_FENSTER_SCHLIESSEN: u64 = 52;
+
+/// Packt ein Rechteck wie die ABI (je 16 Bit x, y, Breite, Hoehe).
+fn rechteck(x: u16, y: u16, breite: u16, hoehe: u16) -> u64 {
+    ((x as u64) << 48) | ((y as u64) << 32) | ((breite as u64) << 16) | hoehe as u64
+}
+
+/// ANGRIFF 10: Die Fenster-Syscalls mit allem beschiessen, was nicht passt.
+fn fenster_angriffe() -> i32 {
+    println!("angreifer: Fenster-Syscalls mit boesen Argumenten ...");
+    let mut fehler_gesamt = 0;
+
+    // --- (a) Fenster OEFFNEN mit unmoeglichen Massen ---
+    for (name, breite, hoehe) in [
+        ("0x0", 0u64, 0u64),
+        ("1x1 (unter dem Minimum)", 1, 1),
+        ("riesig", 100_000, 100_000),
+        ("u64::MAX", u64::MAX, u64::MAX),
+        ("negativ als u64", (-1i64) as u64, 100),
+    ] {
+        let titel = "boese";
+        let ergebnis = unsafe {
+            syscall4(
+                SYS_FENSTER_OEFFNEN,
+                titel.as_ptr() as u64,
+                titel.len() as u64,
+                breite,
+                hoehe,
+            )
+        };
+        if let Some(code) = muss_scheitern_und_schliessen(name, ergebnis) {
+            fehler_gesamt = code;
+        }
+    }
+
+    // --- (b) Titel aus dem Kernel-Speicher ---
+    let ergebnis = unsafe { syscall4(SYS_FENSTER_OEFFNEN, KERNEL_HEAP, 16, 200, 100) };
+    if let Some(code) = muss_scheitern_und_schliessen("Titel aus dem Kernel-Heap", ergebnis) {
+        fehler_gesamt = code;
+    }
+
+    // --- Ab hier braucht es ein ECHTES Fenster ---
+    let titel = "angreifer";
+    let handle = match unsafe {
+        syscall4(
+            SYS_FENSTER_OEFFNEN,
+            titel.as_ptr() as u64,
+            titel.len() as u64,
+            200,
+            100,
+        )
+    } {
+        Ok(h) => h,
+        Err(fehler) => {
+            // Ohne Desktop gibt es kein Fenster — dann ist hier nichts zu
+            // pruefen, und das ist KEIN Fehlschlag.
+            println!(
+                "angreifer: kein Fenster moeglich ({}) — Rest uebersprungen.",
+                fehler.text()
+            );
+            return fehler_gesamt;
+        }
+    };
+
+    let puffer = [0u8; 4096];
+
+    // --- (c) DER KERN: Rechteck und Laenge passen NICHT zusammen ---
+    //
+    // Das ist der Angriff, den es bei keinem anderen Syscall gibt. Ein
+    // Kernel, der dem Rechteck glaubt, liest 4 MiB aus einem 4-KiB-Puffer.
+    for (name, laenge, r) in [
+        ("1000x1000 aus 4 KiB", 4096u64, rechteck(0, 0, 1000, 1000)),
+        ("Laenge zu gross", 4096, rechteck(0, 0, 4, 4)),
+        ("Laenge zu klein", 4, rechteck(0, 0, 32, 32)),
+        ("Breite 0", 0, rechteck(0, 0, 0, 10)),
+        ("65535x65535", u64::MAX, rechteck(0, 0, 65535, 65535)),
+    ] {
+        if let Some(code) = muss_scheitern(name, unsafe {
+            syscall4(SYS_FENSTER_ZEICHNEN, handle, puffer.as_ptr() as u64, laenge, r)
+        }) {
+            fehler_gesamt = code;
+        }
+    }
+
+    // --- (d) Pixel aus dem KERNEL-Speicher zeichnen lassen ---
+    //
+    // Der interessanteste Fall: Der Kernel DARF diese Adresse lesen. Wenn
+    // er es fuer uns taete, stuende Kernel-Speicher als Pixel auf dem
+    // Bildschirm — auslesbar mit einem Bildschirmfoto.
+    for (name, adresse) in [
+        ("Kernel-Heap als Pixel", KERNEL_HEAP),
+        ("obere Haelfte als Pixel", OBERE_HAELFTE),
+        ("Nullzeiger als Pixel", 0u64),
+    ] {
+        if let Some(code) = muss_scheitern(name, unsafe {
+            syscall4(
+                SYS_FENSTER_ZEICHNEN,
+                handle,
+                adresse,
+                16 * 16 * 4,
+                rechteck(0, 0, 16, 16),
+            )
+        }) {
+            fehler_gesamt = code;
+        }
+    }
+
+    // --- (e) Zeiger mit Ueberlauf ---
+    if let Some(code) = muss_scheitern("Pixel-Zeiger nahe u64::MAX", unsafe {
+        syscall4(
+            SYS_FENSTER_ZEICHNEN,
+            handle,
+            u64::MAX - 16,
+            16 * 16 * 4,
+            rechteck(0, 0, 16, 16),
+        )
+    }) {
+        fehler_gesamt = code;
+    }
+
+    // --- (f) Erfundene Fenster-Handles ---
+    for erfunden in [0u64, 1, 2, 99, u64::MAX] {
+        if let Some(code) = muss_scheitern("erfundener Fenster-Handle", unsafe {
+            syscall4(
+                SYS_FENSTER_ZEICHNEN,
+                erfunden,
+                puffer.as_ptr() as u64,
+                16 * 16 * 4,
+                rechteck(0, 0, 16, 16),
+            )
+        }) {
+            fehler_gesamt = code;
+        }
+    }
+
+    // --- (g) Titel: zu lang, aus dem Kernel, mit Ueberlauf ---
+    for (name, ptr, laenge) in [
+        ("Titel 1 MiB", puffer.as_ptr() as u64, 1024 * 1024u64),
+        ("Titel aus dem Kernel", KERNEL_HEAP, 16),
+        ("Titel-Laenge u64::MAX", puffer.as_ptr() as u64, u64::MAX),
+    ] {
+        if let Some(code) = muss_scheitern(name, unsafe {
+            syscall4(SYS_FENSTER_TITEL, handle, ptr, laenge, 0)
+        }) {
+            fehler_gesamt = code;
+        }
+    }
+
+    // --- (h) Ereignis-Puffer in den Kernel schreiben lassen ---
+    //
+    // `fenster_ereignis` macht ein copy-OUT von 16 Byte. Zeigt das Ziel in
+    // den Kernel, wuerde der Kernel sich selbst ueberschreiben.
+    for (name, adresse) in [
+        ("Ereignis in den Kernel-Heap", KERNEL_HEAP),
+        ("Ereignis an die Null", 0u64),
+        ("Ereignis nahe u64::MAX", u64::MAX - 8),
+    ] {
+        if let Some(code) = muss_scheitern(name, unsafe {
+            syscall4(SYS_FENSTER_EREIGNIS, handle, adresse, 1, 0)
+        }) {
+            fehler_gesamt = code;
+        }
+    }
+
+    // --- (i) DOPPELT SCHLIESSEN, dann darauf zeichnen ---
+    let _ = unsafe { syscall4(SYS_FENSTER_SCHLIESSEN, handle, 0, 0, 0) };
+    if let Some(code) = muss_scheitern("zweites Schliessen desselben Fensters", unsafe {
+        syscall4(SYS_FENSTER_SCHLIESSEN, handle, 0, 0, 0)
+    }) {
+        fehler_gesamt = code;
+    }
+    if let Some(code) = muss_scheitern("Zeichnen auf ein geschlossenes Fenster", unsafe {
+        syscall4(
+            SYS_FENSTER_ZEICHNEN,
+            handle,
+            puffer.as_ptr() as u64,
+            16 * 16 * 4,
+            rechteck(0, 0, 16, 16),
+        )
+    }) {
+        fehler_gesamt = code;
+    }
+
+    if fehler_gesamt == 0 {
+        println!("angreifer: alle Fenster-Angriffe korrekt abgelehnt.");
+    }
+    fehler_gesamt
+}
+
+/// Wie `muss_scheitern`, schliesst aber ein versehentlich entstandenes
+/// Fenster wieder — sonst haelt ein durchgekommener Angriff die
+/// Handle-Tabelle besetzt und der naechste Fall misst etwas anderes.
+fn muss_scheitern_und_schliessen(was: &str, ergebnis: Result<u64, Fehler>) -> Option<i32> {
+    if let Ok(handle) = ergebnis {
+        let _ = unsafe { syscall4(SYS_FENSTER_SCHLIESSEN, handle, 0, 0, 0) };
+    }
+    muss_scheitern(was, ergebnis)
+}
+
+/// ANGRIFF 11: So viele Fenster wie moeglich, und nie Ereignisse abholen.
+///
+/// ===================================================================
+/// WAS HIER WIRKLICH GEPRUEFT WIRD
+///
+/// Ereignisse kann ein Prozess nicht selbst erzeugen — sie kommen von
+/// Maus und Tastatur. Was er kann: sie NICHT ABHOLEN und dabei moeglichst
+/// viele Fenster offen halten.
+///
+/// Die Zusage (Serie 8, Teil 1): Die Queue ist auf 64 GEDECKELT und
+/// Verworfenes wird GEZAEHLT; die Handle-Tabelle ist auf 32 gedeckelt.
+/// Ein Prozess kann also weder durch Nichtstun noch durch Vielheit den
+/// Kernel-Speicher fuellen. Erwartung hier: Irgendwann kommt ein FEHLER,
+/// kein Absturz — und danach laeuft alles weiter.
+fn ereignis_flut() -> i32 {
+    println!("angreifer: Fenster und Ereignisse fluten ...");
+    let titel = "flut";
+    let mut offen = [0u64; 64];
+    let mut anzahl = 0usize;
+
+    for _ in 0..64 {
+        match unsafe {
+            syscall4(
+                SYS_FENSTER_OEFFNEN,
+                titel.as_ptr() as u64,
+                titel.len() as u64,
+                64,
+                64,
+            )
+        } {
+            Ok(handle) => {
+                if anzahl < offen.len() {
+                    offen[anzahl] = handle;
+                    anzahl += 1;
+                }
+            }
+            // GENAU DAS IST DIE ZUSAGE: eine Grenze, kein Absturz.
+            Err(_) => break,
+        }
+    }
+    println!("angreifer: {} Fenster gleichzeitig bekommen.", anzahl);
+    if anzahl == 0 {
+        println!("angreifer: kein Desktop — nichts zu fluten.");
+        return 0;
+    }
+
+    // Ereignisse mit Frist 0 abfragen, ohne je zu warten: Der Kernel darf
+    // dabei nicht haengen und nichts lecken.
+    let mut ereignis = [0u8; 16];
+    for runde in 0..2000 {
+        let handle = offen[runde % anzahl];
+        let _ = unsafe {
+            syscall4(
+                SYS_FENSTER_EREIGNIS,
+                handle,
+                ereignis.as_mut_ptr() as u64,
+                1,
+                0,
+            )
+        };
+    }
+
+    for &handle in &offen[..anzahl] {
+        let _ = unsafe { syscall4(SYS_FENSTER_SCHLIESSEN, handle, 0, 0, 0) };
+    }
+    println!("angreifer: Flut ueberstanden, alle Fenster geschlossen.");
+    0
+}
 
 /// ANGRIFF 20: Kernel-Speicher direkt lesen (ohne Umweg ueber einen Syscall).
 ///

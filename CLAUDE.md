@@ -625,6 +625,88 @@
   will nur Masse), sondern der `Zeichner` — weil er keine Abhaengigkeit ist,
   sondern eine AUFRUF-KONVENTION.
 
+## SERIE-8-ABSCHLUSS (August 2026) — Angriffe, Zahlen, die Weiche
+- **DER REALITAETS-BERICHT IST DAS WERTVOLLSTE DOKUMENT DER SERIE**
+  (docs/browser-realitaet.md): zehn echte Seiten, ehrlich bewertet — 5
+  lesbar, 3 teilweise, 2 unbrauchbar, mit Begruendung UND Bildschirmfoto
+  je Seite. **DIE ERKENNTNIS, die alle Plaene aendert: Nicht JavaScript
+  ist das Hauptproblem, sondern die fehlenden EXTERNEN STYLESHEETS.**
+  Von zehn Seiten scheitert genau EINE an fehlendem JS; ACHT liefern
+  ihren Inhalt im HTML und sehen nur falsch aus — und was per CSS
+  VERSTECKT sein sollte, wird sichtbar (Screenreader-Text, Overlays).
+  Externe Stylesheets sind ein TAGESPROJEKT, eine JS-Engine sind MONATE.
+- **DIE MECHANISCHE BEWERTUNG WAR ZU GUTMUETIG, und das steht so im
+  Bericht:** Der Test sagte 8/2/0 (Befehle x Hoehe), der Augenschein
+  sagt 5/3/2. Ein Browser kann viel Text zeichnen und trotzdem
+  unbenutzbar sein, wenn es der falsche Text ist. **Wer einen
+  Realitaets-Bericht schreibt, schaut hin** — eine Kennzahl allein ist
+  eine Behauptung.
+- **DER BOESWILLIGER-INHALT-PASS IST DIE AUSZAHLUNG VON SERIE 6**
+  (tests/browser_boesartig.rs). Die Zusage ist bewusst SCHWACH fuer den
+  Browser und HART fuer alles andere: Der Prozess darf sterben, Kernel
+  und Desktop bleiben unbeeindruckt. Nach JEDEM Angriff wird geprueft,
+  dass ein gewoehnlicher Prozess noch laeuft. Ergebnisse: 10 000-fach
+  verschachteltes HTML -> **Stack-Ueberlauf, von der GUARD-PAGE
+  gefangen**; 120 000 CSS-Regeln / 3-MiB-Dokument / 400 KiB Muell ->
+  Heap erschoepft (Exit 102); Milliarden-Pixel-Bilder -> laeuft durch.
+  **EHRLICHE EINORDNUNG in grenzen.md:** Die Tiefengrenzen greifen jede
+  fuer sich (DOM 100, Layout 64) — im ZUSAMMENSPIEL reicht der
+  64-KiB-Stack trotzdem nicht. Sicher, aber nicht elegant.
+- **ANGREIFER 10 + 11 = DIE FENSTER-ABI.** Rechteck ohne Puffer, Puffer
+  ohne Rechteck, KERNEL-SPEICHER ALS PIXELQUELLE (der Kernel DARF diese
+  Adresse lesen — taete er es fuer uns, stuende Kernel-Speicher als Bild
+  auf dem Schirm), Zeiger nahe u64::MAX, erfundene und doppelt
+  geschlossene Handles, Ereignis-Ziel im Kernel, 29 Fenster gleichzeitig.
+  Jeder Fall ein sauberer Fehlercode. Sie stehen in
+  tests/browser_boesartig.rs und NICHT in tests/sicherheit.rs, weil sie
+  einen Fenster-Manager brauchen — ein Angriff, der still uebersprungen
+  wird, ist kein Angriff.
+- **SPEICHER-PASS: 30 SITZUNGEN, FRAMES +0.** Eine Sitzung ist NICHT
+  „eine Seite laden": 5 Seiten, 3 Tabs auf, wechseln, zurueck/vor, 2 zu
+  (`browser --zyklus`). Heap-Spitze byte-identisch in jeder Sitzung. Die
+  P1-Buchhaltung wird AUSGERECHNET (Schranke +24), nicht weggelassen.
+- **LEISTUNG: die 11 ms sind GANZ die Kaskade, nicht das Parsen.** 300
+  KiB Wikipedia bei 720p: HTML 5 ms (17 %), CSS+Kaskade 11 ms (37 %),
+  Layout 12 ms (41 %), Malen 1 ms, Kopie 0 ms — **Summe 29 ms**. Erst
+  die Aufteilung in „Stylesheets parsen" und „kaskadieren" zeigte, wo es
+  wirklich sitzt (51 Regeln x 5 796 Knoten). **NICHT optimiert**, weil
+  29 ms fuer eine 300-KiB-Seite kein Problem sind; der Hebel waere ein
+  Regel-Index nach Tag/Klasse.
+- **DER FRESSER, DER GEFIXT WURDE — und die Lehre daraus:** Beim
+  4K-Scroll-Frame riss das Umstiegskriterium ploetzlich (9 900 us statt
+  7 050 us in Teil 7). Ursache war KEINE Architekturgrenze, sondern
+  eigene Verschwendung: `senkrecht_verschieben` bewegte den GANZEN
+  Puffer samt Bedienleiste, die deshalb bei JEDEM Frame neu gezeichnet
+  UND uebertragen werden musste. Mit `senkrecht_verschieben_bereich`
+  (nur das Seitenband, und auch nur dieses uebertragen) sind es
+  **6 550 us** — weniger als in Teil 7. **WER EIN KRITERIUM REISSEN
+  SIEHT, SUCHT ZUERST DEN EIGENEN FEHLER.**
+- **SPEICHER JE TAB: 14–18 MB** (bei 4K bis 47 MB). Bei 64 MiB
+  Prozess-Heap heisst das etwa DREI grosse Seiten gleichzeitig, nicht
+  acht — der Tab-Deckel ist 8, aber der Heap ist die fruehere Grenze.
+- **unsafe-AUDIT (docs/unsafe-audit-serie8.md): DIE GANZE SERIE-8-FLAECHE
+  IM KERNEL IST unsafe-FREI** — fuenf Fenster-Syscalls, prozessfenster.rs,
+  alle fuenf Kisten, der Browser mit sieben Modulen. Die einzigen fuenf
+  Bloecke sind die rohen `int 0x80` in libspeed::fenster. Kein Zufall,
+  sondern Folge dreier Entscheidungen: Der Kernel KOPIERT (statt zu
+  teilen), der DOM ist ein ARENA-Baum (statt Rc<RefCell>), Pixel sind
+  `Vec<u8>` (statt Umdeutung). **REGEL: Wer in den fuenf Kisten einen
+  unsafe-Block einbaut, begruendet ihn im Audit-Dokument** — sie
+  verarbeiten fremde, feindliche Daten.
+- **DIE WEICHE FUER SERIE 9 (docs/serie9-bestandsaufnahme.md), mit
+  Empfehlung und Begruendung:** JavaScript kostet 4–6 Monate (Parser,
+  Interpreter, GC MIT ZYKLEN, DOM-Bindings, Web-APIs), behebt die
+  ZWEIThaeufigste Fehlerursache und zeigt github trotzdem nicht — eine
+  ES5-Engine reicht fuer moderne Seiten nicht. Native Anwendungen sind
+  1–2 Wochen je Stueck (JSON fehlt, ist zwei Tage); YouTube scheitert an
+  VIDEO-DEKODIERUNG (Monate, kein no_std-Weg, SIMD ist abgeschaltet) —
+  der ehrliche Weg dorthin sind Podcasts, sobald es Audio-Ausgabe gibt.
+  **EMPFEHLUNG: erst die zwei Tage fuer externe Stylesheets, dann USB
+  (xHCI).** Begruendung in einem Satz: Es ist das Einzige, das darueber
+  entscheidet, ob SpeedOS ein System ist, das man BENUTZEN kann — auf
+  echter Hardware gibt es keine PS/2-Tastatur, also kann man den Browser
+  dort nicht bedienen. **Die Entscheidung gehoert dem Projektbesitzer.**
+
 ## DER BROWSER (Serie 8, Teil 8, userland/src/bin/browser/)
 - **MEILENSTEIN: Adresse eintippen, Seite erscheint, Links funktionieren,
   Zurueck funktioniert** — eigener Kernel, eigener TCP/IP-Stack, eigener

@@ -5,6 +5,103 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### SERIE-8-ABSCHLUSS: Angriffe, Zahlen, Grenzen, und die grosse Weiche
+
+**Der Realitäts-Bericht** ([`docs/browser-realitaet.md`](docs/browser-realitaet.md)):
+zehn echte Webseiten, geladen und ehrlich bewertet — **fünf lesbar, drei
+teilweise, zwei unbrauchbar**, mit Begründung und Bildschirmfoto je Seite.
+
+> **Die überraschende Erkenntnis: Nicht JavaScript ist das Hauptproblem,
+> sondern die fehlenden externen Stylesheets.** Von zehn Seiten scheitert
+> genau *eine* an fehlendem JavaScript; *acht* liefern ihren Inhalt brav
+> im HTML und sehen nur falsch aus, weil `<link rel=stylesheet>` nicht
+> geholt wird — schlimmer noch: Was per CSS *versteckt* sein sollte,
+> wird dadurch sichtbar (das Tastatur-Overlay des Rust-Buchs, der
+> Screenreader-Text von github). Externe Stylesheets sind ein
+> **Tagesprojekt**, eine JS-Engine sind **Monate**.
+
+Die automatische Bewertung des Tests sagte *8 lesbar / 2 teilweise / 0
+unbrauchbar* — **sie ist an zwei Stellen zu gutmütig**, und das ist
+selbst ein Befund: Ein Browser kann viel Text zeichnen und trotzdem
+unbenutzbar sein, wenn es der falsche Text ist (github zeigt vor allem
+Barrierefreiheits-Meldungen und Video-Alternativtexte).
+
+**Der Sicherheits-Pass, in der Tradition von 57/64.** `angreifer 10` und
+`11` beschiessen die neue Fläche: Rechteck ohne Puffer, Puffer ohne
+Rechteck, **Kernel-Speicher als Pixelquelle**, Zeiger nahe `u64::MAX`,
+erfundene und doppelt geschlossene Handles, Titel aus dem Kernel-Heap,
+Ereignis-Ziel im Kernel, und so viele Fenster wie die Handle-Tabelle
+hergibt (29). **Jeder Fall ein sauberer Fehlercode.**
+
+**Der Böswilliger-Inhalt-Pass — die Auszahlung von Serie 6.** Der
+Browser bekommt absichtlich pathologische Seiten. Die Zusage ist bewusst
+schwach für den Browser und hart für alles andere: *Der Prozess darf
+sterben; Kernel und Desktop bleiben unbeeindruckt.*
+
+| Eingabe | Ausgang |
+|---|---|
+| 10 000-fach verschachteltes HTML | Stack-Überlauf, von der **Guard-Page** gefangen |
+| 120 000 CSS-Regeln / 3-MiB-Dokument / 400 KiB Müll | Heap erschöpft → Exit 102 |
+| Milliarden-Pixel-Bilder + Dekompressionsbomben | läuft sauber durch |
+
+Nach **jedem** Angriff läuft ein gewöhnlicher Prozess weiter, Frames und
+Fenster sind vollständig zurück. Bis Serie 5 hätte eine Endlosschleife im
+Parser das ganze System angehalten.
+
+**Speicher-Pass: 30 Sitzungen** (je 5 Seiten laden, 3 Tabs öffnen,
+wechseln, zurück/vor, 2 schliessen) → **Frames +0**, Fenster 0 → 0,
+Heap-Spitze byte-identisch in jeder Sitzung. Die P1-Buchhaltung wird
+dabei ausgerechnet (Schranke +24) statt weggelassen.
+
+**Leistung, aufgeschlüsselt.** Eine 300-KiB-Wikipedia-Seite, 720p:
+
+| Stufe | | |
+|---|---:|---:|
+| HTML parsen | 5 ms | 17 % |
+| CSS + **Kaskade** | 11 ms | 37 % |
+| Layout | 12 ms | 41 % |
+| Malen | 1 ms | 3 % |
+| Kopie | 0 ms | 0 % |
+| **Summe** | **29 ms** | |
+
+Die 11 ms sind **ganz die Kaskade**, nicht das Parsen (51 Regeln × 5 796
+Knoten). Grösster Fresser also Kaskade und Layout, etwa gleich gross —
+**nicht optimiert, weil 29 ms für eine 300-KiB-Seite kein Problem sind.**
+Der Hebel wäre ein Regel-Index nach Tag/Klasse; die Zahl, die die
+Entscheidung ändern würde, steht im Bericht.
+
+**Der Fresser, der GEFIXT wurde:** Beim 4K-Scroll-Frame riss das
+Umstiegskriterium plötzlich (9 900 µs, 77 % Kopie — in Teil 7 waren es
+7 050 µs). Ursache war keine Architekturgrenze, sondern eigene
+Verschwendung: `senkrecht_verschieben` bewegte den **ganzen** Puffer
+samt Bedienleiste, die deshalb bei **jedem** Scroll-Frame neu gezeichnet
+und übertragen werden musste. Mit `senkrecht_verschieben_bereich` (nur
+das Seitenband, und auch nur dieses übertragen) sind es **6 550 µs** —
+weniger als in Teil 7. **Kriterium wieder nicht erfüllt, Pixelpuffer
+bleibt.**
+
+**unsafe-Audit** ([`docs/unsafe-audit-serie8.md`](docs/unsafe-audit-serie8.md)):
+Die gesamte Serie-8-Fläche im Kernel ist **`unsafe`-frei** — die fünf
+Fenster-Syscalls, `prozessfenster.rs`, alle fünf neuen Kisten
+(`speedhtml`, `speedcss`, `speedlayout`, `speedpaint`, `speedui`) und der
+Browser mit seinen sieben Modulen. Die einzigen fünf Blöcke der Serie
+sind die rohen `int 0x80`-Aufrufe in `libspeed::fenster`. Das ist kein
+Zufall, sondern Folge dreier Entscheidungen: Der Kernel *kopiert* (statt
+zu teilen), der DOM ist ein *Arena-Baum* (statt `Rc<RefCell>`), und
+Pixel sind `Vec<u8>` (statt `Vec<u32>` mit Umdeutung).
+
+**Die grosse Weiche für Serie 9**
+([`docs/serie9-bestandsaufnahme.md`](docs/serie9-bestandsaufnahme.md)):
+JavaScript (4–6 Monate, behebt die *zweit*häufigste Fehlerursache und
+zeigt github trotzdem nicht) gegen native Anwendungen (1–2 Wochen je
+Stück, YouTube scheitert an Video-Dekodierung) gegen das Fundament.
+**Empfehlung: erst die zwei Tage für externe Stylesheets, dann USB
+(xHCI).** Begründung in einem Satz: Es ist das Einzige auf allen drei
+Listen, das darüber entscheidet, ob SpeedOS ein System ist, das man
+benutzen kann, oder eines, das man vorführt — auf echter Hardware gibt
+es keine PS/2-Tastatur.
+
+
 ### SERIE 8, TEIL 8: Aus dem Renderer wird ein Browser
 
 **Adresse eintippen, Seite erscheint, Links funktionieren, Zurück

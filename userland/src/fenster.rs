@@ -260,20 +260,47 @@ impl Fenster {
     /// docs/browser-rendern.md; es ist genau die Zahl, an der das
     /// Umstiegskriterium aus docs/fenster-syscalls.md haengt.
     pub fn senkrecht_verschieben(&mut self, dy: i32) {
+        self.senkrecht_verschieben_bereich(0, self.hoehe, dy);
+    }
+
+    /// Verschiebt NUR ein waagerechtes Band des Puffers.
+    ///
+    /// =====================================================================
+    /// WARUM ES DAS BRAUCHT (Serie-8-Abschluss)
+    ///
+    /// Ein Browser-Fenster besteht aus zwei Teilen, die sich verschieden
+    /// verhalten: Die Bedienleiste steht STILL, und nur der Inhalt
+    /// scrollt. `senkrecht_verschieben` bewegte den GANZEN Puffer — und
+    /// zog die Leiste damit jedes Mal mit aus dem Bild. Sie musste
+    /// deshalb bei JEDEM Scroll-Frame neu gezeichnet werden.
+    ///
+    /// Gemessen hat das bei 4K **2 200 us je Frame** gekostet (Tab-Leiste,
+    /// Knoepfe, Adressfeld, Statuszeile — alles fuer nichts) und den
+    /// Scroll-Frame von 7 050 auf 9 900 us gehoben. Das ist die
+    /// 8-ms-Schwelle des Umstiegskriteriums aus docs/fenster-syscalls.md,
+    /// und sie waere damit an einer selbstgemachten Verschwendung
+    /// gerissen — nicht an der Architektur.
+    ///
+    /// Mit dem Band bleibt die Leiste unberuehrt und muss nicht neu
+    /// gemalt werden.
+    pub fn senkrecht_verschieben_bereich(&mut self, y: usize, hoehe: usize, dy: i32) {
+        let y = y.min(self.hoehe);
+        let hoehe = hoehe.min(self.hoehe - y);
         let weite = dy.unsigned_abs() as usize;
-        if dy == 0 || weite >= self.hoehe {
+        if dy == 0 || hoehe == 0 || weite >= hoehe {
             return;
         }
-        let zeilen = self.hoehe - weite;
+        let oben = y * self.breite;
+        let unten = (y + hoehe) * self.breite;
         let versatz = weite * self.breite;
         if dy > 0 {
             // Inhalt nach oben: Ziel liegt VOR der Quelle, also vorwaerts
             // kopieren. `copy_within` beherrscht die Ueberlappung selbst
             // (es ist ein memmove) — von Hand waere hier die klassische
             // Stelle fuer einen Ueberlappungsfehler.
-            self.pixel.copy_within(versatz.., 0);
+            self.pixel.copy_within(oben + versatz..unten, oben);
         } else {
-            self.pixel.copy_within(..zeilen * self.breite, versatz);
+            self.pixel.copy_within(oben..unten - versatz, oben + versatz);
         }
     }
 

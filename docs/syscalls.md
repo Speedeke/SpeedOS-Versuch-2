@@ -457,6 +457,34 @@ soll sich in der Titelleiste nicht als etwas anderes ausgeben können.
 
 ---
 
+### Die Fenster-ABI ist die am haertesten beschossene Fläche (Serie-8-Abschluss)
+
+`fenster_zeichnen` (49) ist der einzige Syscall, bei dem **zwei Angaben
+zusammenpassen müssen**: `laenge` (wie viele Bytes) und `rechteck` (wie
+sie zu deuten sind). Ein Kernel, der dem Rechteck glaubt und die Länge
+nicht nachrechnet, liest Megabytes über das Pufferende hinaus.
+
+Deshalb prüft er in dieser Reihenfolge: Handle → Rechteck plausibel →
+**`laenge == breite * hoehe * 4` auf das Byte** → gesamter Bereich
+alles-oder-nichts (in 32-KiB-Stücken, mit `checked_add`) → erst dann
+zeilenweise `copy_in_scheibe`, das noch einmal prüft.
+
+`userland/angreifer 10` und `11` schießen genau darauf: Rechteck ohne
+Puffer, Puffer ohne Rechteck, Kernel-Adressen als Pixelquelle, Zeiger
+nahe `u64::MAX`, erfundene und doppelt geschlossene Handles, Titel aus
+dem Kernel-Heap, Ereignis-Ziel im Kernel, und so viele Fenster wie die
+Handle-Tabelle hergibt (29). **Ergebnis: jeder Fall ein sauberer
+Fehlercode**, geprüft in `tests/browser_boesartig.rs`.
+
+Der Fall, der am meisten über die Zusage sagt: *Kernel-Speicher als
+Pixel zeichnen lassen*. Der Kernel **darf** diese Adresse lesen — täte
+er es für uns, stünde Kernel-Speicher als Bild auf dem Schirm und wäre
+mit einem Bildschirmfoto auslesbar.
+
+Die ganze Fläche (fünf Syscalls, `prozessfenster.rs`, die fünf
+Serie-8-Kisten, der Browser) hat **null `unsafe`-Blöcke**:
+[`unsafe-audit-serie8.md`](unsafe-audit-serie8.md).
+
 ## 7. Nur für Tests
 
 | Nr | Name | Zweck |

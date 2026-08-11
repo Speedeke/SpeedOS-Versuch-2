@@ -442,6 +442,42 @@ Kaskade und Vererbung durch (`speedcss`). Was **nicht** dabei ist:
   Fenster-ABI hat keine Modifikatortasten). Aufgelöst am Kontext:
   im Adressfeld Backspace, sonst Verlauf.
 
+### Was der Browser unter pathologischen Seiten tut
+
+*(Serie-8-Abschluss, gemessen in `tests/browser_boesartig.rs`)*
+
+Die Zusage lautet **nicht** „er verarbeitet alles", sondern: **Der
+Prozess darf sterben, Kernel und Desktop bleiben unbeeindruckt.** Das ist
+geprüft — nach jedem Angriff läuft ein gewöhnlicher Prozess weiter, und
+Frames wie Fenster sind vollständig zurück. Was dabei wirklich passiert:
+
+| Eingabe | Ausgang |
+|---|---|
+| 10 000-fach verschachteltes HTML | **Stack-Überlauf**, von der Guard-Page gefangen (Prozess tot) |
+| 120 000 CSS-Regeln | Heap erschöpft → Exit 102 |
+| 3-MiB-Dokument | Heap erschöpft → Exit 102 |
+| 400 KiB Müll statt HTML | Heap erschöpft → Exit 102 |
+| `<img width="99999" height="99999">` + Bildbomben | läuft sauber durch (geklemmt/abgelehnt) |
+| 500 pathologische Verweise | läuft sauber durch |
+
+**Die ehrliche Einordnung:** Die Tiefengrenzen der einzelnen Kisten
+greifen jede für sich (DOM 100, Layout 64) — in ihrem *Zusammenspiel*
+reicht der 64-KiB-User-Stack für ein extrem verschachteltes Dokument
+trotzdem nicht. Es endet sicher (Guard-Page), aber nicht elegant. Ein
+Browser, der stattdessen „Seite zu komplex" anzeigt, wäre besser; dafür
+müsste die Rekursionstiefe über alle Stufen hinweg *gemeinsam* begrenzt
+werden.
+
+### Speicherbedarf
+
+* **Ein Tab mit einer grossen Seite braucht 14–18 MB Heap**
+  (Wikipedia-Artikel, 300 KiB Quelltext; bei 4K bis 47 MB, weil der
+  Fensterpuffer dazukommt). Bei 64 MiB Prozess-Heap heisst das:
+  **etwa drei grosse Seiten gleichzeitig**, nicht acht. Der Browser
+  deckelt bei 8 Tabs, aber der Heap ist die frühere Grenze — ein
+  vierter grosser Tab kann `KeinPlatz` bekommen.
+* Der Sitzungs-Cache darf 8 MiB halten und zählt dazu.
+
 ---
 
 ## 7. Was ausdrücklich KEINE Lücke ist

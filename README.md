@@ -8,6 +8,23 @@ ist alles selbst gebaut (auf Basis der bewährten Architektur aus
 > Lernprojekt: Der Code ist bewusst ausführlich auf Deutsch kommentiert —
 > jede Datei erklärt, *was* sie tut und *warum* es so funktioniert.
 
+![Hacker News im SpeedOS-Browser](docs/screenshots/serie8-real-hn.png)
+*Der Meilenstein von Serie 8: **ein eigener Browser**. Adresse eintippen,
+Seite erscheint, Links funktionieren, Zurück funktioniert — auf dem eigenen
+Kernel, dem eigenen TCP/IP-Stack, dem eigenen TLS-Weg, in einem
+unprivilegierten Prozess, mit eigenem HTML-Parser, eigenem CSS, eigenem
+Layout und eigenem Renderer. Kein fremder Code in der ganzen Kette.
+Wie er gebaut ist: [`docs/browser.md`](docs/browser.md).*
+
+![Die erste Webseite der Welt](docs/screenshots/serie8-browser-cern.png)
+*`browser /platte/seiten/cern.html` — `info.cern.ch` von 1991.*
+
+> **Was er wirklich kann**, an zehn echten Seiten gemessen und ehrlich
+> bewertet (fünf lesbar, drei teilweise, zwei unbrauchbar — mit
+> Begründung je Seite): [`docs/browser-realitaet.md`](docs/browser-realitaet.md).
+> Die überraschende Erkenntnis daraus: Nicht das fehlende **JavaScript**
+> ist das Hauptproblem, sondern die fehlenden **externen Stylesheets**.
+
 ![speedui in Ring 3](docs/screenshots/serie8-speedui-ring3.png)
 *Serie 8, Teil 2: `starte uidemo &` — **dieselben Widgets, die im Kernel den
 Explorer bauen**, laufen in einem unprivilegierten Prozess. Knöpfe,
@@ -466,7 +483,14 @@ Grenzen nicht kennt, wird an einer Stelle vertraut, an der es nichts leistet —
 und eine grüne Testsuite sagt nur etwas über das Gebaute, nichts über das
 Nicht-Gebaute.
 
-Die vier, die am meisten überraschen:
+Die fünf, die am meisten überraschen:
+
+- **Der Browser holt keine externen Stylesheets.** Nur `<style>`-Blöcke im
+  Dokument wirken. Das ist — gemessen an zehn echten Seiten — die
+  **häufigste** Fehlerursache, häufiger als das fehlende JavaScript: Acht
+  von zehn Seiten liefern ihren Inhalt brav im HTML und sehen nur falsch
+  aus. Schlimmer noch: Was per CSS *versteckt* sein sollte, wird sichtbar
+  ([`docs/browser-realitaet.md`](docs/browser-realitaet.md)).
 
 - **Keine Sperrlisten-Prüfung (weder OCSP noch CRL).** Ein gestohlenes, noch
   nicht abgelaufenes Zertifikat wird akzeptiert. Das ist die schwerwiegendste
@@ -495,6 +519,11 @@ die TCP-Schicht gegen eine Fremd-Implementierung (z. B. smoltcp) tauschen
 könnte — die unteren Schichten und die Socket-API blieben dabei unsere.
 
 ## Roadmap (Kurzfassung)
+
+> **Serie 8 ist abgeschlossen.** Die Entscheidungsvorlage für Serie 9 —
+> JavaScript vs. native Anwendungen vs. Fundament (USB/SMP/Audio), mit
+> Aufwandsschätzung und Empfehlung — steht in
+> [`docs/serie9-bestandsaufnahme.md`](docs/serie9-bestandsaufnahme.md).
 
 - [x] Boot, Seriell, Exceptions, Interrupts, Tastatur (QWERTZ)
 - [x] Paging, Heap, async/await, Shell, RAM-Dateisystem
@@ -563,10 +592,18 @@ könnte — die unteren Schichten und die Socket-API blieben dabei unsere.
       Prozess malt nur den Inhalt — und `starte fenstertest &` zeigt es.
       Entwurf, Messzahlen und das **vorher festgelegte Umstiegskriterium**
       für geteilten Speicher: [docs/fenster-syscalls.md](docs/fenster-syscalls.md).
-      *Noch offen:* das Widget-Toolkit im User-Space, Schriften über eine
-      Syscall-Naht, ein 4K-Vollbild-Fenster (passt nicht in den User-Heap —
-      [docs/grenzen.md](docs/grenzen.md))
-- [ ] Ferner: HTML-Renderer und Browser V1 (Serie 8), Sound
+      *Alle drei damals offenen Punkte sind inzwischen erledigt:* das
+      Widget-Toolkit ist eine wirtsfreie Kiste (Teil 2), ein
+      4K-Vollbild-Fenster passt (User-Heap 12 → 64 MiB, Teil 7). **Offen
+      bleibt die Schrift:** ein Prozess bekommt keine vom Kernel
+      ([docs/grenzen.md](docs/grenzen.md))
+- [x] **Serie 8: HTML-Renderer und Browser** — eigener Parser, CSS,
+      Layout, Renderer, Tabs, Verlauf, Lesezeichen; an zehn echten Seiten
+      gemessen ([`docs/browser-realitaet.md`](docs/browser-realitaet.md))
+- [ ] Serie 9: die Weiche — externe Stylesheets (2 Tage), dann USB (xHCI);
+      JavaScript bewusst zurückgestellt
+      ([`docs/serie9-bestandsaufnahme.md`](docs/serie9-bestandsaufnahme.md))
+- [ ] Ferner: Sound
 
 ## Lizenz
 

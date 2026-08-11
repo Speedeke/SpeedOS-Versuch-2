@@ -375,3 +375,67 @@ fn test_browser_leckt_keine_frames() {
         log_frames
     );
 }
+
+// ===========================================================================
+// (4) WOHIN DIE LADEZEIT GEHT (Serie-8-Abschluss)
+// ===========================================================================
+
+/// Die Ladezeit einer echten, grossen Seite, aufgeteilt auf die Stufen.
+///
+/// Ein Bericht — er behauptet keine Schranke, sondern SAGT, wo die Zeit
+/// bleibt. Genau das ist die Auskunft, die man braucht, bevor man
+/// optimiert; „die Seite braucht 300 ms" ist der Anfang einer Suche und
+/// kein Befund.
+#[test_case]
+fn messung_ladephasen() {
+    if !programme_vorhanden() {
+        return;
+    }
+    let pfad = programme::grosse_testseite_pfad();
+    let (bb, bh) = bildschirm();
+    let fenster_arg = format!("--fenster={}x{}", bb, bh.saturating_sub(72));
+    let ausgabe = browser_laufen_lassen(&["browser", &pfad, "--phasen", &fenster_arg]);
+    serial_println!("--- Rohausgabe von 'browser --phasen' ---
+{}", ausgabe);
+
+    let hole = |s: &str| zahl_aus(&ausgabe, s).unwrap_or(0);
+    let netz = hole("NETZ_MS=");
+    let html = hole("HTML_MS=");
+    let css = hole("CSS_MS=");
+    let layout = hole("LAYOUT_MS=");
+    let malen = hole("MALEN_MS=");
+    let kopie = hole("KOPIE_MS=");
+    let summe = (netz + html + css + layout + malen + kopie).max(1);
+
+    serial_println!(
+        "[MESSUNG-PHASEN] {} Byte, {} Knoten, {} Anzeige-Befehle, {} px hoch",
+        hole("BYTES="),
+        hole("KNOTEN="),
+        hole("BEFEHLE="),
+        hole("DOKUMENT_HOEHE=")
+    );
+    for (name, ms) in [
+        ("Netz/Datei", netz),
+        ("HTML parsen", html),
+        ("CSS + Kaskade", css),
+        ("Layout", layout),
+        ("Malen", malen),
+        ("Kopie (fenster_zeichnen)", kopie),
+    ] {
+        serial_println!(
+            "[MESSUNG-PHASEN] {:<26} {:>5} ms  ({} %)",
+            name,
+            ms,
+            ms * 100 / summe
+        );
+    }
+    serial_println!("[MESSUNG-PHASEN] Summe {} ms", summe);
+    serial_println!(
+        "[MESSUNG-PHASEN] Heap: {} B belegt, Spitze {} B (= Bedarf EINES Tabs)",
+        hole("HEAP_BELEGT="),
+        hole("HEAP_SPITZE=")
+    );
+
+    // Die einzige harte Zusage: Es kommt ueberhaupt etwas heraus.
+    assert!(hole("BEFEHLE=") > 1000, "Pruefseite B soll gross sein");
+}
