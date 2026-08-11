@@ -101,6 +101,13 @@ fn bewerten(ergebnis: &Result<(http::Url, http::Antwort), KlientFehler>) -> (Bef
         Err(KlientFehler::BrauchtTls(_)) => (Befund::Umgebung, "Server leitet auf https"),
         Err(KlientFehler::Dns(_)) => (Befund::Umgebung, "DNS"),
         Err(KlientFehler::Http(UngueltigeUrl)) => (Befund::Umgebung, "URL"),
+        // Seit Serie 8, Teil 8 gibt es `SchemaNichtNavigierbar` (mailto:,
+        // javascript: …). Der Kernel-Klient erzeugt ihn nie — er bekommt
+        // nur ausgeschriebene URLs —, aber die Aufzaehlung soll
+        // VOLLSTAENDIG bleiben: Ein `_`-Zweig haette hier verschwiegen,
+        // dass es eine neue Variante gibt, und beim naechsten Mal waere
+        // sie stillschweigend als „TCP-Fehler" gezaehlt worden.
+        Err(KlientFehler::Http(SchemaNichtNavigierbar)) => (Befund::Umgebung, "fremdes Schema"),
         Err(KlientFehler::Http(ZuVieleWeiterleitungen)) => (Befund::Umgebung, "zu viele Weiterleitungen"),
         Err(KlientFehler::Http(ZuGross)) => (Befund::Umgebung, "Antwort zu gross"),
         Err(KlientFehler::Http(UnvollstaendigeAntwort)) => (Befund::TcpFehler, "RUMPF UNVOLLSTAENDIG"),

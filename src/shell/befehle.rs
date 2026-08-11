@@ -106,6 +106,7 @@ pub fn alle_befehle() -> Vec<Box<dyn Befehl>> {
         Box::new(Ping),
         Box::new(Nslookup),
         Box::new(Hole),
+        Box::new(BrowserBefehl),
         // Serie 6: der erste Sprung nach Ring 3 (User-Mode).
         Box::new(Ring3Test),
         Box::new(AdressraumTest),
@@ -1751,6 +1752,53 @@ fn an_ring3_uebergeben(
         zeile.push_str(ziel);
     }
     pipeline_ausfuehren(kontext, &zeile);
+}
+
+/// `browser [adresse]` — die Seite ANZEIGEN statt sie zu holen.
+///
+/// ===================================================================
+/// DER UNTERSCHIED ZU `hole`
+///
+/// `hole` besorgt Bytes und legt sie ab oder gibt sie aus — ein
+/// Werkzeug fuer die Kommandozeile. `browser` ZEIGT die Seite, mit
+/// Layout, Bildern und Links. Beide bleiben, weil beide gebraucht
+/// werden: `hole` laesst sich in eine Pipe stecken, der Browser nicht.
+///
+/// ES BRAUCHT KEIN `&`: Der Befehl startet den Prozess selbst im
+/// Hintergrund. Genau das ist der Sinn — `starte browser … &` ist der
+/// allgemeine Weg, und wer nur eine Seite ansehen will, soll sich die
+/// Regel mit dem Kaufmanns-Und nicht merken muessen.
+struct BrowserBefehl;
+
+impl Befehl for BrowserBefehl {
+    fn name(&self) -> &'static str {
+        "browser"
+    }
+    fn beschreibung(&self) -> &'static str {
+        "Zeigt eine Seite an: browser [url|datei]  (oeffnet ein Fenster)"
+    }
+    fn ausfuehren(&self, argumente: &str, _kontext: &mut ShellKontext, _registry: &[Box<dyn Befehl>]) {
+        let adresse = argumente.trim();
+        let adresse = if adresse.is_empty() { None } else { Some(adresse) };
+        if let Some(a) = adresse {
+            if a.split_whitespace().count() != 1 {
+                println!("Die Adresse darf keine Leerzeichen enthalten.");
+                return;
+            }
+        }
+        match crate::programme::browser_oeffnen(adresse) {
+            Ok(pid) => {
+                konsole::set_color(Color::DarkGray, Color::Black);
+                println!("[PID {} im Hintergrund: browser]", pid);
+                konsole::set_color(Color::LightGray, Color::Black);
+            }
+            Err(meldung) => {
+                konsole::set_color(Color::LightRed, Color::Black);
+                println!("{}", meldung);
+                konsole::set_color(Color::LightGray, Color::Black);
+            }
+        }
+    }
 }
 
 struct Hole;

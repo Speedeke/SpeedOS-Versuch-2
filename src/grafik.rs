@@ -645,6 +645,28 @@ pub static ICON_LOGO: Icon = Icon {
     ],
 };
 
+/// Browser (eine Weltkugel mit Meridianen — Serie 8, Teil 8).
+pub static ICON_BROWSER: Icon = Icon {
+    zeilen: [
+        "....DDDDDDD.....",
+        "..DDbbbbbbbDD...",
+        ".DbbbbDbDbbbbD..",
+        ".DbbbDDbDDbbbD..",
+        "DbbbbDDbDDbbbbD.",
+        "DDDDDDDDDDDDDDD.",
+        "DbbbbDDbDDbbbbD.",
+        "DbbbbDDbDDbbbbD.",
+        "DDDDDDDDDDDDDDD.",
+        "DbbbbDDbDDbbbbD.",
+        ".DbbbDDbDDbbbD..",
+        ".DbbbbDbDbbbbD..",
+        "..DDbbbbbbbDD...",
+        "....DDDDDDD.....",
+        "................",
+        "................",
+    ],
+};
+
 /// Terminal (dunkle Kachel mit Eingabe-Prompt ">_").
 pub static ICON_TERMINAL: Icon = Icon {
     zeilen: [

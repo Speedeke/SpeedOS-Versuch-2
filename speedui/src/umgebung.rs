@@ -463,3 +463,130 @@ impl<'a> Maler<'a> {
         self.leinwand.text_stil(x, y, text, groesse, stil, farbe)
     }
 }
+
+// ---------------------------------------------------------------------------
+// EINE LEINWAND AUF EINEM AUSSCHNITT (Serie 8, Teil 8)
+// ---------------------------------------------------------------------------
+
+/// Eine Leinwand, die nur einen RECHTECKIGEN AUSSCHNITT einer anderen
+/// bespielt und dabei so tut, als waere sie die ganze Flaeche.
+///
+/// ==========================================================================
+/// WOZU — die Naht zwischen Widget-Baum und eigener Zeichnung
+///
+/// `UiFenster` legt seinen Baum immer ueber die GANZE Leinwand
+/// (`zeichnen` nimmt `leinwand.masse()`). Fuer ein Fenster, das oben eine
+/// Bedienleiste aus Widgets hat und darunter etwas Selbstgezeichnetes —
+/// einen Browser zum Beispiel —, ist das eine Sackgasse: Entweder gehoert
+/// die ganze Flaeche dem Toolkit oder gar keine.
+///
+/// Diese Huelle loest das, ohne `UiFenster` anzufassen: Sie MELDET die
+/// Groesse des Ausschnitts und VERSCHIEBT jede Koordinate um seinen
+/// Ursprung. Der Widget-Baum rechnet in seinen eigenen Koordinaten ab
+/// (0,0) und landet trotzdem an der richtigen Stelle. Die Ereignisse
+/// verschiebt der Aufrufer entsprechend — das sind zwei Subtraktionen.
+///
+/// GECLIPPT WIRD IMMER: Das Clip des Aufrufers wird mit dem Ausschnitt
+/// geschnitten, und ein Widget kann deshalb nicht aus seinem Streifen
+/// heraus malen — auch dann nicht, wenn es sich verrechnet.
+pub struct TeilLeinwand<'a> {
+    innen: &'a mut dyn Leinwand,
+    /// Der Ausschnitt in den Koordinaten der INNEREN Leinwand.
+    ausschnitt: Rechteck,
+    /// Das Clip in den Koordinaten der AEUSSEREN (also unserer) Sicht.
+    clip: Option<Rechteck>,
+}
+
+impl<'a> TeilLeinwand<'a> {
+    pub fn neu(innen: &'a mut dyn Leinwand, ausschnitt: Rechteck) -> TeilLeinwand<'a> {
+        TeilLeinwand {
+            innen,
+            ausschnitt,
+            clip: None,
+        }
+    }
+
+    /// Ein Rechteck von unseren in die inneren Koordinaten.
+    #[inline]
+    fn nach_innen(&self, r: Rechteck) -> Rechteck {
+        Rechteck::neu(
+            r.x + self.ausschnitt.x,
+            r.y + self.ausschnitt.y,
+            r.breite,
+            r.hoehe,
+        )
+    }
+
+    /// Das Clip, das die innere Leinwand bekommen muss: unser Clip (falls
+    /// gesetzt) UND der Ausschnitt.
+    fn inneres_clip(&self) -> Rechteck {
+        match self.clip {
+            Some(c) => self
+                .nach_innen(c)
+                .schneiden(&self.ausschnitt)
+                .unwrap_or(Rechteck::neu(self.ausschnitt.x, self.ausschnitt.y, 0, 0)),
+            None => self.ausschnitt,
+        }
+    }
+
+    /// Setzt das innere Clip, ruft `tu` und stellt es wieder her.
+    fn mit_clip(&mut self, tu: impl FnOnce(&mut dyn Leinwand)) {
+        let vorher = self.innen.clip();
+        let neu = match vorher {
+            Some(alt) => alt.schneiden(&self.inneres_clip()),
+            None => Some(self.inneres_clip()),
+        };
+        // Kein Schnitt = nichts sichtbar, also nichts tun.
+        if let Some(c) = neu {
+            self.innen.clip_setzen(Some(c));
+            tu(self.innen);
+            self.innen.clip_setzen(vorher);
+        }
+    }
+}
+
+impl Leinwand for TeilLeinwand<'_> {
+    /// **Die Luege, um die es geht:** Wir melden die Groesse des
+    /// Ausschnitts, nicht die der Flaeche darunter.
+    fn masse(&self) -> (i32, i32) {
+        (self.ausschnitt.breite, self.ausschnitt.hoehe)
+    }
+    fn clip(&self) -> Option<Rechteck> {
+        self.clip
+    }
+    fn clip_setzen(&mut self, clip: Option<Rechteck>) {
+        self.clip = clip;
+    }
+    fn fuellen(&mut self, rechteck: Rechteck, farbe: Farbe) {
+        let r = self.nach_innen(rechteck);
+        self.mit_clip(|innen| innen.fuellen(r, farbe));
+    }
+    fn abgerundet(&mut self, rechteck: Rechteck, radius: i32, farbe: Farbe) {
+        let r = self.nach_innen(rechteck);
+        self.mit_clip(|innen| innen.abgerundet(r, radius, farbe));
+    }
+    fn rahmen(&mut self, rechteck: Rechteck, farbe: Farbe) {
+        let r = self.nach_innen(rechteck);
+        self.mit_clip(|innen| innen.rahmen(r, farbe));
+    }
+    fn linie(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, farbe: Farbe) {
+        let (dx, dy) = (self.ausschnitt.x, self.ausschnitt.y);
+        self.mit_clip(|innen| innen.linie(x0 + dx, y0 + dy, x1 + dx, y1 + dy, farbe));
+    }
+    fn text(&mut self, x: i32, y: i32, text: &str, groesse: i32, fett: bool, farbe: Farbe) {
+        let (dx, dy) = (self.ausschnitt.x, self.ausschnitt.y);
+        self.mit_clip(|innen| innen.text(x + dx, y + dy, text, groesse, fett, farbe));
+    }
+    fn text_stil(&mut self, x: i32, y: i32, text: &str, groesse: i32, stil: Stil, farbe: Farbe) {
+        let (dx, dy) = (self.ausschnitt.x, self.ausschnitt.y);
+        self.mit_clip(|innen| innen.text_stil(x + dx, y + dy, text, groesse, stil, farbe));
+    }
+    fn icon(&mut self, x: i32, y: i32, icon: &Icon, skalierung: i32) {
+        let (dx, dy) = (self.ausschnitt.x, self.ausschnitt.y);
+        self.mit_clip(|innen| innen.icon(x + dx, y + dy, icon, skalierung));
+    }
+    fn bild(&mut self, ziel: Rechteck, quell_breite: i32, quell_hoehe: i32, rgba: &[u8]) {
+        let r = self.nach_innen(ziel);
+        self.mit_clip(|innen| innen.bild(r, quell_breite, quell_hoehe, rgba));
+    }
+}

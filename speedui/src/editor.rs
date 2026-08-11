@@ -129,6 +129,23 @@ impl ZeilenEditor {
         &self.zeile
     }
 
+    /// Setzt die Zeile von aussen (Serie 8, Teil 8).
+    ///
+    /// WOZU: Die Adressleiste eines Browsers gehoert nicht dem Benutzer
+    /// allein — beim Tab-Wechsel, beim Zurueckgehen und nach einer
+    /// Weiterleitung muss dort die Adresse stehen, die WIRKLICH geladen
+    /// ist. Ohne diesen Setzer bliebe im Feld, was zuletzt getippt wurde,
+    /// und die Anzeige loege ueber den Zustand.
+    ///
+    /// Das VERLAUFS-Blaettern wird dabei zurueckgesetzt: Wer von aussen
+    /// eine neue Zeile setzt, blaettert nicht mehr — sonst spraenge die
+    /// naechste Pfeiltaste an eine unerwartete Stelle.
+    pub fn zeile_setzen(&mut self, text: &str) {
+        self.zeile.clear();
+        self.zeile.push_str(text);
+        self.verlauf_index = None;
+    }
+
     /// Verarbeitet einen Tastendruck und sagt, was anzuzeigen ist.
     /// `aktuelles_verzeichnis` braucht nur die Tab-Vervollständigung
     /// (für relative Pfade).

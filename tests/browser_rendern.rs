@@ -228,7 +228,6 @@ fn messung_scroll_frame() {
     let f_hoehe = hole("FENSTER_HOEHE=");
     let befehle = hole("BEFEHLE=");
     let dok_hoehe = hole("DOKUMENT_HOEHE=");
-    let layout_ms = hole("LAYOUT_MS=");
     let schritte = hole("SCHRITTE=");
     let malen = hole("MALEN_US=");
     let kopie = hole("KOPIE_US=");
@@ -236,14 +235,13 @@ fn messung_scroll_frame() {
 
     serial_println!(
         "[MESSUNG-BROWSER] Bildschirm {}x{}, Fenster {}x{} — Pruefseite B: \
-         {} Anzeige-Befehle, {} px hoch, Layout {} ms",
+         {} Anzeige-Befehle, {} px hoch",
         bb,
         bh,
         f_breite,
         f_hoehe,
         befehle,
-        dok_hoehe,
-        layout_ms
+        dok_hoehe
     );
     serial_println!(
         "[MESSUNG-BROWSER] {} Scroll-Schritte: malen (Streifen) {} us | \

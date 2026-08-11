@@ -90,7 +90,7 @@ pub(crate) fn zeilen_setzen(
     // --- 1. EINSAMMELN ---
     let mut stuecke = Vec::new();
     for kind in kinder.iter() {
-        einsammeln(kind, &mut stuecke);
+        einsammeln(kind, &mut stuecke, metrik);
     }
     if stuecke.is_empty() {
         kinder.clear();
@@ -239,7 +239,7 @@ pub(crate) fn zeilen_setzen(
 /// Der Preis: Ein Hintergrund oder Rahmen auf einem Inline-Element geht
 /// verloren (er muesste je Zeilenstueck gemalt werden). Das steht so in
 /// docs/browser-v1.md und ist bei Fliesstext selten sichtbar.
-fn einsammeln(kasten: &Kasten, aus: &mut Vec<Stueck>) {
+fn einsammeln(kasten: &Kasten, aus: &mut Vec<Stueck>, metrik: &dyn Metrik) {
     match &kasten.art {
         KastenArt::Text(text) | KastenArt::Marke(text) => {
             // In WOERTER zerlegen. Leerzeichen werden eigene Stuecke,
@@ -294,17 +294,32 @@ fn einsammeln(kasten: &Kasten, aus: &mut Vec<Stueck>) {
             // Die Auszeichnung selbst hat keine Geometrie — nur ihre
             // Kinder, mit IHREM (schon geerbten) Stil.
             for kind in &kasten.kinder {
-                einsammeln(kind, aus);
+                einsammeln(kind, aus, metrik);
             }
         }
-        KastenArt::Bild { breite, hoehe, .. } => {
-            // Ein Bild ohne Massangabe bekommt einen Platzhalter. NICHT
-            // 0x0: Ein Bild, dessen Groesse man erst nach dem Laden
-            // kennt, wuerde sonst unsichtbar bleiben und die Seite
-            // spaeter umspringen lassen.
+        KastenArt::Bild {
+            breite,
+            hoehe,
+            quelle,
+            ..
+        } => {
+            // DREI STUFEN, in dieser Reihenfolge (Serie 8, Teil 8):
+            //   1. `width`/`height` aus Stil oder Attribut — das Dokument
+            //      hat es gesagt, also gilt es.
+            //   2. Die EIGENGROESSE, wenn der Wirt das Bild schon geladen
+            //      hat (`Metrik::bild_masse`). Erst damit sieht eine Seite
+            //      mit Bildern ohne Massangabe richtig aus.
+            //   3. Sonst ein Platzhalter. NICHT 0x0: Ein Bild, dessen
+            //      Groesse man erst nach dem Laden kennt, bliebe sonst
+            //      unsichtbar.
+            //
+            // Fehlt genau EINE der beiden Angaben, wird die andere aus dem
+            // Seitenverhaeltnis der Eigengroesse ergaenzt — sonst wuerde
+            // `<img width="200">` das Bild auf 200x32 quetschen.
+            let eigen = metrik.bild_masse(quelle);
             let mut k = kasten.clone();
-            let b = breite.unwrap_or(PLATZHALTER_BREITE).max(0);
-            let h = hoehe.unwrap_or(PLATZHALTER_HOEHE).max(0);
+            let (b, h) = masse_waehlen(*breite, *hoehe, eigen);
+            let (b, h) = (b.max(0), h.max(0));
             k.masse.inhalt = Rechteck::neu(0, 0, b, h);
             aus.push(Stueck {
                 inhalt: Inhalt::Kasten(alloc::boxed::Box::new(k)),
@@ -330,6 +345,34 @@ fn einsammeln(kasten: &Kasten, aus: &mut Vec<Stueck>) {
 /// noch nicht geladenes Bild ohne `width`/`height` reservieren.
 const PLATZHALTER_BREITE: i32 = 32;
 const PLATZHALTER_HOEHE: i32 = 32;
+
+/// Die drei Stufen der Bildgroesse, als reine Funktion (damit sie ein
+/// Testfall ist und keine if-Kette mitten im Einsammeln).
+///
+/// Der interessante Fall ist die HALBE Angabe: `<img width="200">` an
+/// einem 800x600-Bild soll 200x150 ergeben und nicht 200x32 — sonst
+/// quetscht jede Seite, die nur die Breite vorgibt (und das sind viele).
+pub(crate) fn masse_waehlen(
+    breite: Option<i32>,
+    hoehe: Option<i32>,
+    eigen: Option<(i32, i32)>,
+) -> (i32, i32) {
+    match (breite, hoehe, eigen) {
+        (Some(b), Some(h), _) => (b, h),
+        (None, None, Some((eb, eh))) => (eb, eh),
+        (None, None, None) => (PLATZHALTER_BREITE, PLATZHALTER_HOEHE),
+        // Nur die Breite: Hoehe aus dem Seitenverhaeltnis.
+        (Some(b), None, Some((eb, eh))) if eb > 0 => {
+            (b, ((b as i64 * eh as i64) / eb as i64) as i32)
+        }
+        (Some(b), None, _) => (b, PLATZHALTER_HOEHE),
+        // Nur die Hoehe.
+        (None, Some(h), Some((eb, eh))) if eh > 0 => {
+            (((h as i64 * eb as i64) / eh as i64) as i32, h)
+        }
+        (None, Some(h), _) => (PLATZHALTER_BREITE, h),
+    }
+}
 
 /// Ein zu langes Wort so weit abschneiden, wie es passt.
 ///
@@ -566,7 +609,7 @@ pub(crate) fn wunschbreite(kasten: &Kasten, metrik: &dyn Metrik) -> i32 {
     // Gefunden von `test_tabellenspalten_richten_sich_nach_dem_inhalt`.
     for teil in kasten.alle() {
         if teil.art.ist_inline() {
-            einsammeln(teil, &mut stuecke);
+            einsammeln(teil, &mut stuecke, metrik);
         }
     }
     let mut summe = 0i32;

@@ -97,6 +97,31 @@ pub trait Metrik {
     fn groesse_waehlen(&self, wunsch: i32) -> i32 {
         wunsch
     }
+
+    /// Die EIGENGROESSE eines Bildes, falls der Wirt sie schon kennt
+    /// (Serie 8, Teil 8).
+    ///
+    /// ===================================================================
+    /// WARUM DAS HIERHER GEHOERT UND NICHT IN EIN NEUES TRAIT
+    ///
+    /// Der Kopf dieses Traits sagt seit Teil 6 „was das Layout ueber Text
+    /// UND BILDER wissen muss" — das war die Absicht, es fehlte nur die
+    /// Methode. `Metrik` ist bereits durch das ganze Layout gefaedelt;
+    /// ein zweites Trait daneben waere dieselbe Frage („wie gross ist
+    /// dieser Inhalt?") an einer zweiten Adresse.
+    ///
+    /// VOREINSTELLUNG `None` = „weiss ich nicht". Dann gilt, was bisher
+    /// galt: `width`/`height` aus Stil oder Attribut, sonst der feste
+    /// Platzhalter. Bestehende Wirte laufen unveraendert weiter.
+    ///
+    /// DIE FOLGE FUER DEN BROWSER ist der eigentliche Punkt: Sobald ein
+    /// Bild geladen ist, liefert der Wirt hier seine Masse — und ein
+    /// erneutes `setzen` ergibt ein ANDERES Layout. Genau das ist der
+    /// Reflow, den ein Bild ohne Massangabe ausloesen MUSS, wenn die
+    /// Seite hinterher richtig aussehen soll.
+    fn bild_masse(&self, _quelle: &str) -> Option<(i32, i32)> {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------

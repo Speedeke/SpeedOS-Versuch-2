@@ -625,6 +625,116 @@
   will nur Masse), sondern der `Zeichner` — weil er keine Abhaengigkeit ist,
   sondern eine AUFRUF-KONVENTION.
 
+## DER BROWSER (Serie 8, Teil 8, userland/src/bin/browser/)
+- **MEILENSTEIN: Adresse eintippen, Seite erscheint, Links funktionieren,
+  Zurueck funktioniert** — eigener Kernel, eigener TCP/IP-Stack, eigener
+  TLS-Weg, eigener Prozess, eigener Renderer. Vollstaendig in
+  docs/browser.md. Der Browser VERDRAHTET nur; wer in seinen sechs Modulen
+  (main/ort/tab/laden/chrome/seiten/merkliste) Parser-, Layout-, Netz- oder
+  URL-Logik findet, hat einen Fehler gefunden.
+- **DIE URL-AUFLOESUNG IST NEU UND EIGEN** (`speedhttp::verweis_aufloesen`,
+  25 Host-Tests). `naechstes_ziel` reichte fuer WEITERLEITUNGEN; ein `href`
+  hat `..`, Fragmente, Query-Referenzen und schema-relative Formen. DREI
+  ENTSCHEIDUNGEN: **`..` ueber die Wurzel hinaus VERPUFFT** (Spezifikation
+  UND Sicherheitsfrage — lokale Dateien benutzen denselben
+  `pfad_normalisieren`, koennen also auch nicht aus ihrem Ordner
+  ausbrechen); **`href="#oben"` LAEDT GAR NICHTS** (`gleiche_seite`, sonst
+  holt jeder Klick aufs Inhaltsverzeichnis die Seite neu); `mailto:`/
+  `javascript:` bekommen `SchemaNichtNavigierbar` und nicht
+  `UngueltigeUrl` — die URL ist in Ordnung, wir koennen sie nur nicht
+  besuchen. **DIE SERIE-5/7-FUNKTIONEN SIND UNVERAENDERT**, und
+  `test_alte_funktionen_unveraendert` nagelt fest, dass `naechste_url`
+  weiterhin NICHT normalisiert.
+- **EIN TAB IST EIN VOLLSTAENDIGER BROWSER-ZUSTAND** (Dokument, Stile,
+  Anzeigeliste, Sicht, Verlauf, Bilder) — deshalb ist ein Wechsel eine
+  Zeigeraenderung und kein Neuladen. GETEILT sind nur Klient (eine
+  TLS-Konfiguration mit 119 Wurzeln zweimal aufzubauen waere
+  Verschwendung) und Cache. Der Verlauf ist PRO TAB; beim Navigieren
+  faellt alles hinter der aktuellen Stelle weg.
+- **DIE BILDER-REGEL AUS TEIL 7 WURDE NACHGEZOGEN — der Test blieb.**
+  Teil 7 sagte „ein geladenes Bild layoutet NIE neu", mit der damals
+  richtigen Begruendung: `speedlayout` fragte ein Bild nie nach seiner
+  Groesse, KONNTE also nichts aendern. Jetzt kann es
+  (`Metrik::bild_masse`, Voreinstellung `None`), und daraus wird eine
+  echte Fallunterscheidung: MIT `width`/`height` nur das Rechteck, OHNE
+  Angabe NEU SETZEN (der Seitensprung). Geaendert hat sich nicht die
+  Regel, sondern was das Layout kann. Beide Haelften geprueft
+  (`speedlayout::test_geladenes_bild_aendert_das_layout` +
+  `speedpaint::test_regel_bild_ohne_massangabe_layoutet_neu`). Und die
+  HALBE Angabe ist der Fall, den man vergisst: `<img width="200">` an
+  einem 800x600-Bild ergibt 200x150, nicht 200x32.
+- **BILDER LADEN EINES JE DURCHGANG, nicht alle auf einmal.** Der Abruf
+  blockiert; wer alle holt, friert die Oberflaeche fuer die Summe aller
+  Abrufe ein. So ist der Browser zwischendurch bedienbar, und die Bilder
+  erscheinen nacheinander.
+- **DER EHRLICHKEITS-TEIL:** `speedos:info` sagt IM BROWSER, was er kann
+  und was nicht (wer es braucht, sitzt vor einer Seite, die komisch
+  aussieht). **EINE SEITE, DIE OHNE JAVASCRIPT LEER BLEIBT, WIRD
+  ERKANNT** — ZWEI Bedingungen, beide noetig: kein nennenswerter Text im
+  GESETZTEN Dokument UND `<script>`-Bloecke vorhanden. Die zweite allein
+  waere falsch (fast jede Seite hat Skripte), die erste allein auch (eine
+  Seite darf leer sein). Der Befund wird im Tab GEMERKT (`js_hinweis`)
+  und nicht nachtraeglich neu berechnet — sobald der Hinweis steht, IST
+  er der Seiteninhalt und hat Text. Der ORT bleibt der der echten Seite,
+  damit Neu-Laden und Lesezeichen auf sie zeigen.
+- **SICHERHEITSFEHLER BEKOMMEN EINE EIGENE SEITE, kein rotes Wort auf
+  derselben** (`AbrufFehler::ist_sicherheitsfehler`): Verbindungsfehler
+  darf man wiederholen, einen Zertifikatsfehler nicht. Auf ihr steht KEIN
+  Knopf, der weiterfuehrt — die Dauerregel aus Serie 7 gilt fuer Knoepfe
+  wie fuer Schalter.
+- **DIE EINGEBAUTEN SEITEN SIND ECHTES HTML** und laufen durch DIESELBE
+  Kette wie jede fremde Seite. Damit sind sie der Selbsttest des
+  Renderers bei jedem Fehlschlag, sie scrollen und brechen um, ohne dass
+  dafuer eine Zeile geschrieben werden muss, und es gibt keinen zweiten
+  Zeichenweg. `seiten::maskieren` ist Pflicht: In eine Fehlerseite geraet
+  die getippte URL, in die Verlaufsseite fremde Seitentitel.
+- **ZWEI TASTATUR-BEFUNDE, die man nur im laufenden Programm sieht:**
+  **(1) STRG+H *IST* BACKSPACE** (beide U+0008, aus der
+  Fernschreiber-Zeit), und unsere Fenster-ABI hat keine
+  Modifikatortasten — jeder Backspace beim Tippen einer Adresse oeffnete
+  den Verlauf. Aufgeloest am KONTEXT, wie es jeder Browser tut: Cursor im
+  Adressfeld -> Backspace, sonst -> Verlauf. Dieselbe Kollision haben 9
+  (Tab), 13 (Enter) und 27 (Esc); sie werden deshalb keine Kuerzel.
+  **(2) ENTER LEERT DAS `Textfeld`** — es ist das Eingabefeld der SHELL,
+  wo Enter eine Zeile beendet und der `ZeilenEditor` sich leert. Wer erst
+  das Ereignis schickt und dann `text()` liest, bekommt einen leeren
+  String und laedt nichts. Der Text wird VORHER gelesen.
+- **WIDGETS AUS speedui, ABER OHNE `UiFenster`:** Das legt seinen Baum
+  immer ueber die GANZE Leinwand, und dieses Fenster gehoert zur Haelfte
+  dem Renderer. Die fuenf Widgets werden einzeln gehalten und gezeichnet
+  (`Widget::zeichnen(&self, m, bereich)` kann genau das). Die Tab-Leiste
+  ist selbst gezeichnet — als Widget waere sie mehr Code, nicht weniger.
+  Fuer den allgemeinen Fall gibt es **`speedui::TeilLeinwand`**: Sie
+  MELDET die Groesse eines Ausschnitts und verschiebt jede Koordinate,
+  damit ein ganzer Widget-Baum in einen Streifen passt, ohne davon zu
+  wissen.
+- **DIE SYSTEM-INTEGRATION LAEUFT UEBER EINE FUNKTION**
+  (`programme::browser_oeffnen`): Startmenue (der erste Eintrag, der
+  einen RING-3-PROZESS startet statt eines Kernel-Fensters),
+  Explorer-Doppelklick auf HTML und der Shell-Befehl `browser` (ohne `&`
+  — er startet selbst im Hintergrund). Das ist die „Registrierung als
+  Standard": keine Zuordnungstabelle, sondern eine Stelle, an der man
+  sieht, was passiert. `hole` BLEIBT daneben, weil es etwas anderes tut
+  (Bytes holen, pipe-faehig).
+- **HTML WIRD ZUERST AM INHALT ERKANNT, notfalls an der Endung**
+  (`programme::sieht_nach_html_aus`) — GENAU ANDERSHERUM als bei
+  Programmen. Grund: Ein ELF hat eine Signatur, HTML nicht; viele Seiten
+  fangen mit einem Kommentar oder `<body` an. Die Endung ist hier der
+  Notnagel und nicht die Abkuerzung.
+- **`browser --pruefen` IST DER VIERTE DEBUG-BLICK:** `htmldump` sagt
+  „Parser oder Layout?", `cssdump` „welche Regel?", `cssdump --layout`
+  „was kommt heraus?" — und dieser beantwortet die Frage, die erst mit
+  einem Browser entsteht: **„Was haette der Benutzer gesehen?"** (Titel,
+  Zustand, Fehler, Sicherheitsbefund, JS-Diagnose, AUFGELOESTE Verweise).
+  Ohne ihn liessen sich genau diese Dinge nur fotografieren; mit ihm sind
+  sie die 8 Tests in tests/browser.rs.
+- **ZAHLEN:** 284 Host-Tests in unter einer Sekunde (25 speedhttp, 63
+  speedhtml, 56 speedcss, 60 speedlayout, 45 speedui, 35 speedpaint),
+  8 QEMU-Tests. Die Messung aus Teil 7 laeuft mit dem neuen Browser
+  UNVERAENDERT weiter — das Umstiegskriterium bleibt reproduzierbar
+  (`--messen=N` und `--fenster=BxH` sind erhalten geblieben). ELF
+  `browser` 1 343 224 B.
+
 ## DER RENDERER: MALEN, SCROLLEN, INVALIDIEREN (Serie 8, Teil 7, speedpaint/)
 - **MEILENSTEIN: `starte browser /platte/seiten/cern.html &` zeigt die
   erste Webseite der Welt an** — geparst, kaskadiert, gesetzt und gemalt in

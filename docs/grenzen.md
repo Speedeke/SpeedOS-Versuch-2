@@ -394,15 +394,15 @@ Kaskade und Vererbung durch (`speedcss`). Was **nicht** dabei ist:
   `<img src="https://…">` bekommt den Platzhalter. Nebenher zu laden
   braucht eine Ereignisschleife, die das kann — das gehört nicht in
   einen Renderer.
-* **Ein geladenes Bild löst NIE ein Neu-Layout aus**, weil das Layout ein
-  Bild nie nach seiner Größe fragt. Folge: Ein `<img>` **ohne**
-  `width`/`height` wird in den Platzhalter von 32×32 gequetscht. Echte
-  Browser layouten nach dem Laden neu — das kostet den berüchtigten
-  Seitensprung und eine Layout-Runde je Bild.
-* **Keine Links, keine Auswahl, kein Suchen.** Der Browser zeigt an und
-  scrollt. `Befehl::Text` trägt zwar seine `KnotenId` (Klickziele wären
-  also auflösbar), aber es gibt keine Navigation — ein Klick auf einen
-  blauen, unterstrichenen Text tut nichts.
+* ~~**Ein geladenes Bild löst NIE ein Neu-Layout aus.**~~ **GESCHLOSSEN in
+  Serie 8, Teil 8.** Das Layout fragt jetzt über `Metrik::bild_masse` nach
+  der Eigengröße, und ein Bild ohne `width`/`height` löst nach dem Laden
+  ein Neu-Setzen aus — den berüchtigten Seitensprung. Ein Bild **mit**
+  Angabe kostet weiterhin nur sein Rechteck.
+* ~~**Keine Links, keine Auswahl, kein Suchen.**~~ **Links GESCHLOSSEN in
+  Serie 8, Teil 8** (Klickziele über die `KnotenId` der Anzeige-Befehle,
+  aufgelöst mit `speedhttp::verweis_aufloesen`). **Auswahl und Suchen in
+  der Seite fehlen weiterhin**, ebenso Zoom.
 * **Beim Umlegen auf eine neue Fensterbreite wird der Scroll-Versatz
   nicht inhaltlich mitgeführt.** Er wird nur in den neuen erlaubten
   Bereich geklemmt; nach einer Breitenänderung steht man deshalb an
@@ -410,6 +410,37 @@ Kaskade und Vererbung durch (`speedcss`). Was **nicht** dabei ist:
 * **Alpha wird gegen WEISS gemischt**, nicht gegen den echten
   Untergrund — `Fenster` gibt den gelesenen Pixel nicht heraus. Auf
   einer hellen Seite fällt das nicht auf, auf einer dunklen schon.
+
+### Der Browser: was er als Programm nicht kann
+
+*(Serie 8, Teil 8 — `userland/browser`, `docs/browser.md`)*
+
+* **Kein JavaScript.** Gar keins. Eine Seite, die ihren Inhalt per Skript
+  aufbaut, bleibt leer — der Browser **erkennt das und sagt es** (leeres
+  Rendering + `<script>`-Blöcke), statt eine weiße Fläche zu zeigen.
+* **Externe Stylesheets werden nicht geholt.** Nur `<style>`-Blöcke im
+  Dokument wirken; ein `<link rel="stylesheet">` wird ignoriert. Auf
+  vielen Seiten ist das der Grund, warum sie schmuckloser aussehen als im
+  echten Browser.
+* **Formulare werden angezeigt, aber nicht abgeschickt.** Keine Cookies,
+  keine Anmeldung, keine Sitzungen.
+* **Der Scroll-Versatz wird beim Umlegen auf eine neue Fensterbreite nur
+  geklemmt, nicht inhaltlich mitgeführt** — nach einer Breitenänderung
+  steht man an einer anderen Stelle des Textes.
+* **Höchstens 8 Tabs**, weil mehr nicht in die Leiste passen.
+* **Der Verlauf ist pro Tab und nicht dauerhaft** — er endet mit dem
+  Fenster. Nur die Lesezeichen und die Startseite überleben
+  (`/platte/system/lesezeichen.txt`).
+* **Der Cache ist eine Sitzungs-Sache**: kein `Cache-Control`, kein
+  `ETag`, kein Verfallsdatum, nichts auf der Platte. Er kann nicht
+  veralten, weil er die Sitzung nicht überlebt.
+* **Ein Ladevorgang blockiert die Oberfläche.** Der Klient ist synchron;
+  vor dem Abruf wird die Ladeanzeige gezeichnet und übertragen, danach
+  steht der Browser bis zur Antwort (Frist: 15 s). Nur die **Bilder**
+  laden nebenher — eines je Durchgang.
+* **`Strg+H` ist nicht von Backspace unterscheidbar** (beide U+0008, die
+  Fenster-ABI hat keine Modifikatortasten). Aufgelöst am Kontext:
+  im Adressfeld Backspace, sonst Verlauf.
 
 ---
 

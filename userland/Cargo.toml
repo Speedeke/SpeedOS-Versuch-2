@@ -217,7 +217,7 @@ path = "src/bin/cssdump.rs"
 # Umstiegskriterium aus docs/fenster-syscalls.md.
 [[bin]]
 name = "browser"
-path = "src/bin/browser.rs"
+path = "src/bin/browser/main.rs"
 
 # panic = "abort" ist Pflicht: Abwickeln (unwinding) bräuchte eine
 # Personality-Funktion und Landing Pads — beides gibt es ohne std nicht.

@@ -1083,3 +1083,157 @@ fn test_kleine_seite() {
     let letzte_y = t.iter().map(|(_, y, _)| *y).max().unwrap();
     assert!(letzte_y > titel_y);
 }
+
+// ===========================================================================
+// BILDGROESSEN UND REFLOW (Serie 8, Teil 8)
+// ===========================================================================
+
+use crate::inline::masse_waehlen;
+
+/// Eine Metrik, die die Eigengroesse EINES Bildes kennt.
+struct MitBild {
+    innen: FesteMetrik,
+    quelle: &'static str,
+    masse: (i32, i32),
+}
+
+impl Metrik for MitBild {
+    fn text_breite(&self, text: &str, groesse: i32, fett: bool, kursiv: bool) -> i32 {
+        self.innen.text_breite(text, groesse, fett, kursiv)
+    }
+    fn zeilen_hoehe(&self, groesse: i32) -> i32 {
+        self.innen.zeilen_hoehe(groesse)
+    }
+    fn grundlinie(&self, groesse: i32) -> i32 {
+        self.innen.grundlinie(groesse)
+    }
+    fn bild_masse(&self, quelle: &str) -> Option<(i32, i32)> {
+        if quelle == self.quelle {
+            Some(self.masse)
+        } else {
+            None
+        }
+    }
+}
+
+/// Die drei Stufen als reine Funktion.
+#[test]
+fn test_masse_waehlen_drei_stufen() {
+    // 1. Beide Angaben schlagen alles.
+    assert_eq!(masse_waehlen(Some(10), Some(20), Some((800, 600))), (10, 20));
+    // 2. Keine Angabe, aber Eigengroesse bekannt.
+    assert_eq!(masse_waehlen(None, None, Some((800, 600))), (800, 600));
+    // 3. Nichts bekannt -> Platzhalter.
+    assert_eq!(masse_waehlen(None, None, None), (32, 32));
+}
+
+/// DIE HALBE ANGABE: `<img width="200">` an einem 800x600-Bild muss
+/// 200x150 ergeben, nicht 200x32. Seiten, die nur die Breite vorgeben,
+/// sind haeufig — ohne das Seitenverhaeltnis wird jedes solche Bild
+/// gequetscht.
+#[test]
+fn test_halbe_angabe_ergaenzt_aus_dem_seitenverhaeltnis() {
+    assert_eq!(masse_waehlen(Some(200), None, Some((800, 600))), (200, 150));
+    assert_eq!(masse_waehlen(None, Some(300), Some((800, 600))), (400, 300));
+    // Ohne Eigengroesse bleibt der Platzhalter fuer die fehlende Seite.
+    assert_eq!(masse_waehlen(Some(200), None, None), (200, 32));
+    // Und eine Eigengroesse von 0 fuehrt nicht zur Division durch null.
+    assert_eq!(masse_waehlen(Some(200), None, Some((0, 600))), (200, 32));
+    assert_eq!(masse_waehlen(None, Some(200), Some((800, 0))), (32, 200));
+}
+
+/// Ohne bekannte Eigengroesse bleibt es beim Platzhalter — der Stand von
+/// Teil 7, unveraendert.
+#[test]
+fn test_bild_ohne_wissen_bleibt_platzhalter() {
+    let metrik = FesteMetrik::neu();
+    let (_, liste) = crate::seite_setzen("<img src='a.png'>", "", 400, &metrik);
+    let bild = liste
+        .befehle
+        .iter()
+        .find_map(|b| match b {
+            crate::Befehl::Bild { rechteck, .. } => Some(*rechteck),
+            _ => None,
+        })
+        .expect("Bild-Befehl");
+    assert_eq!((bild.breite, bild.hoehe), (32, 32));
+}
+
+/// **DER REFLOW.** Dasselbe Dokument, dieselbe Breite — nur der Wirt kennt
+/// das Bild jetzt. Das Layout MUSS ein anderes sein.
+///
+/// Das ist die Zusage, auf der die Invalidierungs-Regel des Browsers
+/// steht: Ein Bild ohne Massangabe aendert nach dem Laden die Geometrie,
+/// also reicht ein Neu-MALEN nicht.
+#[test]
+fn test_geladenes_bild_aendert_das_layout() {
+    let html = "<img src='a.png'><p>text darunter</p>";
+    let ohne = FesteMetrik::neu();
+    let (vorher, liste_vorher) = crate::seite_setzen(html, "", 400, &ohne);
+
+    let mit = MitBild {
+        innen: FesteMetrik::neu(),
+        quelle: "a.png",
+        masse: (120, 90),
+    };
+    let (nachher, liste_nachher) = crate::seite_setzen(html, "", 400, &mit);
+
+    // Das Bild hat jetzt seine Eigengroesse.
+    let bild = liste_nachher
+        .befehle
+        .iter()
+        .find_map(|b| match b {
+            crate::Befehl::Bild { rechteck, .. } => Some(*rechteck),
+            _ => None,
+        })
+        .expect("Bild-Befehl");
+    assert_eq!((bild.breite, bild.hoehe), (120, 90));
+
+    // Und die Seite ist dadurch hoeher geworden — der Text darunter ist
+    // nach unten gerueckt. GENAU DAS ist der Reflow.
+    assert!(
+        nachher.hoehe > vorher.hoehe,
+        "90 px Bild statt 32 px Platzhalter muss die Seite hoeher machen ({} -> {})",
+        vorher.hoehe,
+        nachher.hoehe
+    );
+    let y_vorher = text_y_von(&liste_vorher, "text");
+    let y_nachher = text_y_von(&liste_nachher, "text");
+    assert!(
+        y_nachher > y_vorher,
+        "der Text unter dem Bild muss nach unten wandern ({} -> {})",
+        y_vorher,
+        y_nachher
+    );
+}
+
+/// Ein Bild MIT Massangabe aendert das Layout NICHT, auch wenn seine
+/// Eigengroesse ganz anders ist. Deshalb darf der Browser in diesem Fall
+/// beim blossen Neu-Malen bleiben.
+#[test]
+fn test_bild_mit_massangabe_loest_keinen_reflow_aus() {
+    let html = "<img src='a.png' width='40' height='30'><p>text</p>";
+    let ohne = FesteMetrik::neu();
+    let (vorher, _) = crate::seite_setzen(html, "", 400, &ohne);
+    let mit = MitBild {
+        innen: FesteMetrik::neu(),
+        quelle: "a.png",
+        masse: (800, 600),
+    };
+    let (nachher, _) = crate::seite_setzen(html, "", 400, &mit);
+    assert_eq!(
+        vorher.hoehe, nachher.hoehe,
+        "die Angabe im Dokument schlaegt die Eigengroesse"
+    );
+}
+
+fn text_y_von(liste: &crate::Anzeigeliste, gesucht: &str) -> i32 {
+    liste
+        .befehle
+        .iter()
+        .find_map(|b| match b {
+            crate::Befehl::Text { y, text, .. } if text == gesucht => Some(*y),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("Text '{}' nicht gefunden", gesucht))
+}

@@ -593,6 +593,22 @@ impl ExplorerApp {
                     AppReaktion::danach(move || {
                         programm_starten_aus_explorer(&pfad);
                     })
+                } else if crate::programme::sieht_nach_html_aus(&pfad) {
+                    // HTML gehoert in den Browser (Serie 8, Teil 8).
+                    //
+                    // Erkannt wird das ZUERST am Inhalt und nur notfalls
+                    // an der Endung — HTML hat keine verlaessliche
+                    // Signatur, anders als ein ELF. Die Begruendung steht
+                    // bei `sieht_nach_html_aus`.
+                    //
+                    // Wer den QUELLTEXT sehen will, oeffnet die Datei
+                    // weiterhin mit SpeedText ueber das Kontextmenue —
+                    // der Doppelklick zeigt jetzt die SEITE.
+                    AppReaktion::danach(move || {
+                        if let Err(meldung) = crate::programme::browser_oeffnen(Some(&pfad)) {
+                            crate::serial_println!("[explorer] Browser: {}", meldung);
+                        }
+                    })
                 } else {
                     // SpeedText öffnen — NACH dem Lock (danach trägt den
                     // Pfad per move in die Box, siehe AppReaktion-Doku).

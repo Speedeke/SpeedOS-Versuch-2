@@ -43,7 +43,11 @@
 // vor; `url_parsen` nimmt schemalose Eingaben ohnehin an. Der Kernel-Klient
 // `hole` hat kein TLS und meldet deshalb genau das, was Sache ist.
 
-#![no_std]
+// Serie 8, Teil 8: `cfg_attr` statt hartem `no_std`, damit die
+// URL-Aufloesung Host-Tests haben kann (dasselbe Muster wie speedhtml,
+// speedcss, speedlayout und speedpaint). Fuer Kernel und Ring 3 aendert
+// sich nichts: dort ist `test` aus, also gilt `no_std`.
+#![cfg_attr(not(test), no_std)]
 
 extern crate alloc;
 
@@ -73,6 +77,15 @@ pub enum HttpFehler {
     UnvollstaendigeAntwort,
     ZuGross,
     ZuVieleWeiterleitungen,
+    /// Ein Schema, das man nicht ansteuern kann: `mailto:`, `javascript:`,
+    /// `tel:` …
+    ///
+    /// EIGENE VARIANTE UND NICHT `UngueltigeUrl`, weil es etwas anderes
+    /// ist: Die URL ist in Ordnung, wir koennen sie nur nicht besuchen.
+    /// Ein Browser sagt dann „Verweise dieser Art oeffnet SpeedOS nicht"
+    /// statt „kaputte Adresse" — und ein `javascript:`-Link ist auf
+    /// echten Seiten haeufig.
+    SchemaNichtNavigierbar,
 }
 
 impl HttpFehler {
@@ -86,6 +99,9 @@ impl HttpFehler {
             HttpFehler::UnvollstaendigeAntwort => "die Antwort kam unvollstaendig an",
             HttpFehler::ZuGross => "die Antwort ist zu gross",
             HttpFehler::ZuVieleWeiterleitungen => "zu viele Weiterleitungen",
+            HttpFehler::SchemaNichtNavigierbar => {
+                "Verweise dieser Art oeffnet SpeedOS nicht (mailto:, javascript: …)"
+            }
         }
     }
 }
@@ -553,3 +569,209 @@ pub fn naechstes_ziel(basis: &Ziel, location: &str) -> Result<Ziel, HttpFehler> 
         url,
     })
 }
+
+// ===========================================================================
+// VERWEISE AUFLOESEN — was ein BROWSER braucht (Serie 8, Teil 8)
+// ===========================================================================
+//
+// `naechstes_ziel` loest Weiterleitungen auf und reicht dafuer voellig.
+// Ein Browser stellt aber eine schwierigere Frage: Auf einer Seite steht
+// `<a href="../bilder/x.png#oben">` — wohin zeigt das?
+//
+// Der Unterschied sind vier Dinge, die eine `Location:` praktisch nie hat
+// und ein `href` staendig:
+//
+//   1. **`.` und `..`** muessen WEG. `/a/b/../c` ist `/a/c`. Ohne das
+//      wandern die Punkte in die Anfrage; viele Server antworten trotzdem,
+//      aber unser Schleifenschutz vergleicht Texte — und `/a/b/../c` und
+//      `/a/c` waeren zwei verschiedene Seiten, obwohl es eine ist.
+//   2. **Fragmente** (`#oben`) gehoeren NICHT in die Anfrage. Sie sind
+//      Sache des Anzeigenden. Ein `href="#oben"` laedt gar nichts.
+//   3. **Query-Referenzen** (`?seite=2`) ersetzen die Query, behalten aber
+//      den Pfad.
+//   4. **Schema-relative Verweise** (`//host/pfad`) uebernehmen das Schema
+//      der aktuellen Seite — auf echten Seiten sehr haeufig.
+//
+// UND: Nicht jedes Schema ist ansteuerbar. `mailto:` und `javascript:`
+// sind keine kaputten URLs, wir koennen sie nur nicht besuchen — dafuer
+// gibt es `SchemaNichtNavigierbar` statt `UngueltigeUrl`.
+//
+// DIE SERIE-5- UND SERIE-7-FUNKTIONEN BLEIBEN UNANGETASTET. Das hier ist
+// eine ERGAENZUNG, die auf ihnen aufsetzt (`ziel_aus_autoritaet`) —
+// dasselbe Muster wie `ziel_parsen`/`naechstes_ziel` in Serie 7, Teil 5
+// und aus demselben Grund: Ihre Tests sind der Beweis, dass der Parser
+// fuer jede neue Schicht unveraendert bleiben konnte.
+
+/// Ein aufgeloester Verweis.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Verweis {
+    /// Wohin geladen wird — OHNE Fragment.
+    pub ziel: Ziel,
+    /// Der Teil hinter `#`, ohne das `#`. Wird nie mitgesendet.
+    pub fragment: Option<String>,
+    /// `true`, wenn der Verweis auf DIESELBE Seite zeigt und sich nur das
+    /// Fragment aendert. Dann darf ein Browser NICHT neu laden — er
+    /// springt nur.
+    pub gleiche_seite: bool,
+}
+
+/// Loest einen `href` gegen die Seite auf, auf der er steht.
+///
+/// Folgt RFC 3986 §5.2 in der Teilmenge, die wir brauchen. **Panickt
+/// nie**, und rät nie: Was nicht aufloesbar ist, ist ein Fehler.
+pub fn verweis_aufloesen(basis: &Ziel, referenz: &str) -> Result<Verweis, HttpFehler> {
+    let roh = referenz.trim();
+
+    // (2) Fragment abtrennen — IMMER zuerst. Es gehoert zu keiner der
+    // folgenden Entscheidungen und darf nie in die Anfrage geraten.
+    let (ohne_fragment, fragment) = match roh.find('#') {
+        Some(i) => (&roh[..i], Some(roh[i + 1..].to_string())),
+        None => (roh, None),
+    };
+
+    // Leer (oder nur ein Fragment): dieselbe Seite.
+    if ohne_fragment.is_empty() {
+        return Ok(Verweis {
+            ziel: basis.clone(),
+            fragment,
+            gleiche_seite: true,
+        });
+    }
+
+    let ziel = ziel_fuer_referenz(basis, ohne_fragment)?;
+    let gleiche_seite = ziel.als_text() == basis.als_text();
+    Ok(Verweis {
+        ziel,
+        fragment,
+        gleiche_seite,
+    })
+}
+
+/// Der Ziel-Teil der Aufloesung (ohne Fragment).
+fn ziel_fuer_referenz(basis: &Ziel, referenz: &str) -> Result<Ziel, HttpFehler> {
+    // (4) Schema-relativ: `//host/pfad` — Schema der aktuellen Seite.
+    // MUSS vor dem Test auf `/` stehen, sonst faengt der die zwei
+    // Schraegstriche ab und macht daraus einen absoluten Pfad.
+    if let Some(rest) = referenz.strip_prefix("//") {
+        return ziel_aus_autoritaet(basis.tls, rest);
+    }
+
+    // Absolut mit Schema?
+    if let Some(schema) = schema_von(referenz) {
+        let rest = &referenz[schema.len() + 1..];
+        return match schema {
+            "http" => ziel_aus_autoritaet(false, rest.trim_start_matches('/')),
+            "https" => ziel_aus_autoritaet(true, rest.trim_start_matches('/')),
+            _ => Err(HttpFehler::SchemaNichtNavigierbar),
+        };
+    }
+
+    let (basis_pfad, basis_query) = pfad_und_query(&basis.url.pfad);
+
+    // (3) Nur eine Query: Pfad bleibt, Query wird ersetzt.
+    if let Some(query) = referenz.strip_prefix('?') {
+        return Ok(mit_pfad(basis, &format!("{}?{}", basis_pfad, query)));
+    }
+
+    // Absoluter Pfad.
+    if referenz.starts_with('/') {
+        return Ok(mit_pfad(basis, &pfad_normalisieren(referenz)));
+    }
+
+    // Relativ: gegen das VERZEICHNIS des Basispfads (RFC 3986 §5.3 merge).
+    let _ = basis_query;
+    let verzeichnis = match basis_pfad.rfind('/') {
+        Some(i) => &basis_pfad[..=i],
+        None => "/",
+    };
+    let zusammen = format!("{}{}", verzeichnis, referenz);
+    Ok(mit_pfad(basis, &pfad_normalisieren(&zusammen)))
+}
+
+/// Dasselbe Ziel mit einem anderen Pfad.
+fn mit_pfad(basis: &Ziel, pfad: &str) -> Ziel {
+    Ziel {
+        tls: basis.tls,
+        url: Url {
+            host: basis.url.host.clone(),
+            port: basis.url.port,
+            pfad: pfad.to_string(),
+        },
+    }
+}
+
+/// Das Schema am Anfang, falls eines dasteht (`"http"`, `"mailto"` …).
+///
+/// Ein Schema ist ein Buchstabe, gefolgt von Buchstaben/Ziffern/`+-.`, dann
+/// ein `:`. Steht vorher ein `/`, `?` oder `#`, ist es KEIN Schema — sonst
+/// waere `bilder/a:b.png` eines.
+fn schema_von(referenz: &str) -> Option<&str> {
+    let erste = referenz.chars().next()?;
+    if !erste.is_ascii_alphabetic() {
+        return None;
+    }
+    for (i, zeichen) in referenz.char_indices() {
+        match zeichen {
+            ':' => return Some(&referenz[..i]),
+            '/' | '?' | '#' => return None,
+            z if z.is_ascii_alphanumeric() || z == '+' || z == '-' || z == '.' => {}
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// Trennt Pfad und Query (die Query INKLUSIVE `?` als zweiter Teil).
+fn pfad_und_query(pfad: &str) -> (&str, &str) {
+    match pfad.find('?') {
+        Some(i) => (&pfad[..i], &pfad[i..]),
+        None => (pfad, ""),
+    }
+}
+
+/// Entfernt `.` und `..` aus einem Pfad (RFC 3986 §5.2.4).
+///
+/// Die Query bleibt unangetastet — in ihr sind Punkte gewoehnliche
+/// Zeichen. Und **`..` ueber die Wurzel hinaus verpufft**, es fuehrt nicht
+/// nach oben: `/../../x` ist `/x`. Das ist nicht nur die Spezifikation,
+/// sondern auch die Sicherheitsfrage — sonst koennte ein Verweis aus dem
+/// Dokumentbaum eines Servers herauszeigen.
+pub fn pfad_normalisieren(pfad: &str) -> String {
+    let (roh, query) = pfad_und_query(pfad);
+    let absolut = roh.starts_with('/');
+    // `Vec<&str>` als Stapel: `..` nimmt herunter, alles andere legt auf.
+    let mut teile: Vec<&str> = Vec::new();
+    for stueck in roh.split('/') {
+        match stueck {
+            "" | "." => {}
+            ".." => {
+                teile.pop();
+            }
+            anderes => teile.push(anderes),
+        }
+    }
+    let mut aus = String::new();
+    if absolut {
+        aus.push('/');
+    }
+    for (i, teil) in teile.iter().enumerate() {
+        if i > 0 {
+            aus.push('/');
+        }
+        aus.push_str(teil);
+    }
+    // EINEN SCHLUSS-SCHRAEGSTRICH ERHALTEN: `/a/b/` und `/a/b` sind fuer
+    // viele Server verschiedene Seiten (das eine ein Verzeichnis, das
+    // andere eine Datei).
+    if roh.len() > 1 && roh.ends_with('/') && !aus.ends_with('/') {
+        aus.push('/');
+    }
+    if aus.is_empty() {
+        aus.push('/');
+    }
+    aus.push_str(query);
+    aus
+}
+
+#[cfg(test)]
+mod tests;

@@ -32,10 +32,11 @@ pub fn alle_apps() -> &'static [AppEintrag] {
     &APPS
 }
 
-static APPS: [AppEintrag; 12] = [
+static APPS: [AppEintrag; 13] = [
     AppEintrag { name: "Terminal", icon: &grafik::ICON_TERMINAL, start: terminal_starten },
     AppEintrag { name: "Explorer", icon: &grafik::ICON_ORDNER, start: explorer_starten },
     AppEintrag { name: "SpeedText", icon: &grafik::ICON_DATEI, start: crate::speedtext::starten },
+    AppEintrag { name: "Browser", icon: &grafik::ICON_BROWSER, start: browser_starten },
     AppEintrag { name: "Einstellungen", icon: &grafik::ICON_ZAHNRAD, start: crate::einstellungen::starten },
     AppEintrag { name: "Task-Manager", icon: &grafik::ICON_TASKS, start: crate::taskmanager::starten },
     AppEintrag { name: "Widget-Galerie", icon: &grafik::ICON_ZAHNRAD, start: galerie_starten },
@@ -59,6 +60,31 @@ fn terminal_starten() {
             )
             .mit_art(crate::task::TaskArt::Fenster),
         );
+    }
+}
+
+/// Der Browser (Serie 8, Teil 8) — und der erste Startmenue-Eintrag, der
+/// einen RING-3-PROZESS startet statt eines Kernel-Fensters.
+///
+/// ===================================================================
+/// WARUM DAS EIN EIGENER FALL IST
+///
+/// Alle anderen Eintraege rufen `fenster::app_starten` und laufen damit
+/// IM Kernel. Der Browser ist ein unprivilegiertes Programm auf der
+/// Platte; ihn zu starten heisst, einen Adressraum anzulegen und ein ELF
+/// zu laden. Das Fenster macht er sich danach selbst ueber die
+/// Syscalls aus Serie 8, Teil 1.
+///
+/// KEINE PIPE und kein Warten — genau wie bei `starte … &` in der Shell:
+/// Solange ein Kernel-Task synchron wartet, kommt der Compositor nicht
+/// dran, und niemand saehe das Fenster.
+fn browser_starten() {
+    // Der Fehler geht auf die serielle Leitung: Ein Startmenue-Eintrag
+    // hat kein Fenster, in dem er sich beschweren koennte, und ein
+    // stilles `let _ =` waere genau das, was die Daten-Integritaets-Regel
+    // verbietet.
+    if let Err(meldung) = crate::programme::browser_oeffnen(None) {
+        crate::serial_println!("[apps] Browser: {}", meldung);
     }
 }
 

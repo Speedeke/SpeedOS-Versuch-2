@@ -36,6 +36,7 @@
 use crate::fs;
 use alloc::format;
 use alloc::string::String;
+use alloc::vec::Vec;
 use spin::Mutex;
 
 /// Ein eingebettetes Programm.
@@ -806,4 +807,93 @@ fn seite_installieren(ordner: &str, name: &str, inhalt: &[u8]) -> bool {
             false
         }
     }
+}
+
+// ===========================================================================
+// DER BROWSER ALS SYSTEM-DIENST (Serie 8, Teil 8)
+// ===========================================================================
+
+/// Oeffnet den Browser — optional mit einer Adresse.
+///
+/// ===================================================================
+/// EINE STELLE, DURCH DIE ALLES LAEUFT
+///
+/// Startmenue, Explorer-Doppelklick auf eine HTML-Datei und der
+/// Shell-Befehl `browser` rufen ALLE diese Funktion. Das ist die
+/// „Registrierung als Standard" aus der Aufgabe: nicht eine Tabelle von
+/// Zuordnungen, sondern eine Funktion, an der man sieht, WAS passiert —
+/// und die man an genau einer Stelle aendert, wenn der Browser einmal
+/// anders gestartet werden soll.
+///
+/// IMMER IM HINTERGRUND, nie synchron: Ein Kernel-Task, der auf den
+/// Browser wartet, haelt den Compositor an, und dann sieht niemand das
+/// Fenster (Serie 8, Teil 1). Deshalb kein `warten_auf`.
+///
+/// Liefert die PID, damit ein Aufrufer melden kann, dass es geklappt hat.
+pub fn browser_oeffnen(adresse: Option<&str>) -> Result<crate::prozess::Pid, String> {
+    let pfad = pfad("browser");
+    if !datei_vorhanden(&pfad) {
+        return Err(String::from(
+            "Der Browser ist nicht installiert (/platte/programme/browser fehlt).",
+        ));
+    }
+    // `argv[0]` ist der Programmname — wie ueberall in der ABI.
+    let mut argumente: Vec<&str> = alloc::vec!["browser"];
+    if let Some(adresse) = adresse {
+        argumente.push(adresse);
+    }
+    match crate::prozess::prozess_starten_mit(&pfad, &argumente, None, None, None, false) {
+        Ok(pid) => Ok(pid),
+        Err(fehler) => Err(fehler.meldung()),
+    }
+}
+
+/// Sieht diese Datei nach HTML aus?
+///
+/// ===================================================================
+/// ERST DER INHALT, DANN DER NAME — und warum es hier BEIDES braucht
+///
+/// Bei PROGRAMMEN entscheidet SpeedOS an den ersten Bytes
+/// (`prozess::ist_programm`), und der Kommentar dort sagt zu Recht: Eine
+/// Endung ist nur eine Behauptung. Bei HTML geht das nur zur Haelfte —
+/// **HTML hat keine verlaessliche Signatur.** Viele Seiten beginnen mit
+/// `<!DOCTYPE html>` oder `<html`, aber genauso viele mit einem
+/// Kommentar, einem `<?xml`, einer Leerzeile oder gleich mit `<body`.
+///
+/// Deshalb: Zuerst wird HINEINGESEHEN (das ist die verlaessliche
+/// Auskunft), und nur wenn das nichts ergibt, entscheidet die Endung.
+/// Die Endung ist hier nicht die bequeme Abkuerzung, sondern der
+/// Notnagel — genau andersherum als bei den Programmen.
+pub fn sieht_nach_html_aus(pfad: &str) -> bool {
+    // (1) Hineinsehen: die ersten 256 Byte reichen fuer jede Einleitung.
+    let anfang = fs::mit_fs(|dateisystem| {
+        let mut puffer = alloc::vec![0u8; 256];
+        dateisystem
+            .read_at(pfad, 0, &mut puffer)
+            .map(|gelesen| {
+                puffer.truncate(gelesen);
+                puffer
+            })
+    });
+    if let Ok(bytes) = anfang {
+        let text = String::from_utf8_lossy(&bytes);
+        let klein: String = text.chars().take(256).flat_map(|z| z.to_lowercase()).collect();
+        let gestutzt = klein.trim_start();
+        for marke in ["<!doctype html", "<html", "<head", "<body", "<!-- "] {
+            if gestutzt.starts_with(marke) {
+                return true;
+            }
+        }
+        // Auch mitten am Anfang: `<html` nach einem Kommentar o. Ae.
+        if klein.contains("<html") || klein.contains("<!doctype html") {
+            return true;
+        }
+    }
+    // (2) Der Notnagel: die Endung.
+    let name = match pfad.rfind('/') {
+        Some(i) => &pfad[i + 1..],
+        None => pfad,
+    };
+    let klein: String = name.chars().flat_map(|z| z.to_lowercase()).collect();
+    klein.ends_with(".html") || klein.ends_with(".htm")
 }

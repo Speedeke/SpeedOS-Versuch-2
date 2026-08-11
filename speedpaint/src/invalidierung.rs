@@ -37,17 +37,24 @@
 //     Der Kern von Aufgabe 2. Der Versatz ist eine Anzeige-Groesse; kein
 //     Kasten aendert dabei seine Koordinaten.
 //
-// (4) BILD FERTIG GELADEN -> nur sein Rechteck neu malen, NIE layouten.
-//     Das gilt bei uns AUSNAHMSLOS, und der Grund ist nachpruefbar:
-//     `speedlayout` fragt ein Bild nie nach seiner Groesse. Der Kasten
-//     entsteht aus `width`/`height` (Stil schlaegt Attribut) oder — wenn
-//     beides fehlt — aus einem festen Platzhalter von 32x32
-//     (`inline.rs`). Ein ankommendes Bild kann die Geometrie also gar
-//     nicht veraendern.
-//     DER PREIS, ehrlich benannt und in docs/grenzen.md eingetragen: Ein
-//     `<img>` ohne Massangabe wird in 32x32 gequetscht. Echte Browser
-//     layouten nach dem Laden neu; das kostet den beruechtigten
-//     Seitensprung und braucht eine Layout-Runde je Bild.
+// (4) BILD FERTIG GELADEN -> es kommt darauf an, und seit Serie 8, Teil 8
+//     ist das eine ECHTE Fallunterscheidung:
+//
+//     * Stand im Dokument `width`/`height`, ist die Geometrie schon
+//       richtig — es genuegt SEIN RECHTECK.
+//     * Stand dort NICHTS, wurde bis eben mit dem 32x32-Platzhalter
+//       gerechnet. Jetzt kennt der Wirt die Eigengroesse
+//       (`Metrik::bild_masse`), und das Layout wird ein anderes: NEU
+//       SETZEN. Das ist der beruechtigte Seitensprung, den jeder Browser
+//       hat — und die ehrliche Alternative dazu waere ein gequetschtes
+//       Bild.
+//
+//     TEIL 7 HATTE HIER NOCH „NIE LAYOUTEN" STEHEN, mit der richtigen
+//     Begruendung fuer den damaligen Stand: `speedlayout` fragte ein Bild
+//     nie nach seiner Groesse, also KONNTE ein ankommendes Bild die
+//     Geometrie nicht aendern. Geaendert hat sich nicht die Regel,
+//     sondern was das Layout kann — und deshalb wird die Regel
+//     nachgezogen und nicht der Test passend gemacht.
 //
 // (5) NEUE SEITE / NEUES STYLESHEET -> alles von vorn.
 //
@@ -74,7 +81,15 @@ pub enum Anlass {
     },
     /// Ein Bild ist eingetroffen. `bereich` ist sein Rechteck auf der
     /// Leinwand.
-    BildGeladen { bereich: Rechteck },
+    ///
+    /// `aendert_masse` sagt, ob das Bild dadurch seine GROESSE aendert —
+    /// also ob es im Dokument ohne `width`/`height` stand und bis eben
+    /// mit dem Platzhalter gerechnet wurde. Dann muss neu gesetzt werden;
+    /// sonst genuegt sein Rechteck. Siehe Regel (4).
+    BildGeladen {
+        bereich: Rechteck,
+        aendert_masse: bool,
+    },
     /// Eine andere Seite wurde geladen.
     NeueSeite,
     /// Das Erscheinungsbild hat sich geaendert.
@@ -182,8 +197,13 @@ pub fn entscheiden(anlass: Anlass) -> Massnahme {
             (false, None) => Massnahme::Nichts,
         },
         // Regel (4)
-        Anlass::BildGeladen { bereich } => {
-            if bereich.breite <= 0 || bereich.hoehe <= 0 {
+        Anlass::BildGeladen {
+            bereich,
+            aendert_masse,
+        } => {
+            if aendert_masse {
+                Massnahme::NeuLayouten
+            } else if bereich.breite <= 0 || bereich.hoehe <= 0 {
                 Massnahme::Nichts
             } else {
                 Massnahme::Teil(bereich)

@@ -380,3 +380,50 @@ impl crate::umgebung::Dateiquelle for TestDateien {
         }
     }
 }
+
+#[cfg(test)]
+mod teilleinwand_tests {
+    use super::*;
+    use crate::umgebung::TeilLeinwand;
+
+    /// Die Huelle verschiebt Koordinaten und meldet die Groesse des
+    /// AUSSCHNITTS — das ist der ganze Trick, mit dem ein Widget-Baum in
+    /// einen Streifen passt, ohne davon zu wissen.
+    #[test]
+    fn test_teilleinwand_verschiebt_und_luegt_ueber_die_groesse() {
+        let mut unten = MalProtokoll::neu(800, 600);
+        {
+            let mut oben = TeilLeinwand::neu(&mut unten, Rechteck::neu(10, 20, 300, 40));
+            assert_eq!(oben.masse(), (300, 40), "der Baum sieht nur den Ausschnitt");
+            oben.fuellen(Rechteck::neu(0, 0, 50, 10), Farbe::neu(1, 2, 3));
+            oben.text(5, 5, "hallo", 16, false, Farbe::neu(4, 5, 6));
+        }
+        match &unten.striche[0] {
+            Strich::Fuellen(r, _) => {
+                assert_eq!((r.x, r.y), (10, 20), "um den Ursprung verschoben")
+            }
+            anderes => panic!("Fuellen erwartet, war {:?}", anderes),
+        }
+        match &unten.striche[1] {
+            Strich::Text(x, y, t, ..) => {
+                assert_eq!((*x, *y), (15, 25));
+                assert_eq!(t, "hallo");
+            }
+            anderes => panic!("Text erwartet, war {:?}", anderes),
+        }
+    }
+
+    /// Ein Widget, das sich verrechnet, kann NICHT aus seinem Streifen
+    /// heraus malen — die Huelle clippt immer auf den Ausschnitt.
+    #[test]
+    fn test_teilleinwand_clippt_auf_den_ausschnitt() {
+        let mut unten = MalProtokoll::neu(800, 600);
+        {
+            let mut oben = TeilLeinwand::neu(&mut unten, Rechteck::neu(10, 20, 300, 40));
+            // Weit ueber den Streifen hinaus.
+            oben.fuellen(Rechteck::neu(0, 0, 5000, 5000), Farbe::neu(1, 2, 3));
+        }
+        // Der Aufruf geht durch, aber MIT gesetztem Clip auf den Streifen.
+        assert_eq!(unten.striche.len(), 1);
+    }
+}

@@ -5,6 +5,80 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### SERIE 8, TEIL 8: Aus dem Renderer wird ein Browser
+
+**Adresse eintippen, Seite erscheint, Links funktionieren, Zurück
+funktioniert** — auf dem eigenen Kernel, dem eigenen TCP/IP-Stack, dem
+eigenen TLS-Weg, im eigenen Prozess, mit dem eigenen Renderer.
+Vollständig in [`docs/browser.md`](docs/browser.md).
+
+**Tabs, Verlauf, Adressleiste, Lesezeichen.** Ein Tab ist ein
+vollständiger Browser-Zustand (Dokument, Stile, Anzeigeliste,
+Scroll-Position, Verlauf, Bilder) — deshalb ist ein Wechsel eine
+Zeigeränderung und kein Neuladen. Geteilt sind nur Klient und Cache, und
+beides aus gutem Grund. Lesezeichen und Startseite liegen zeilenweise
+lesbar in `/platte/system/lesezeichen.txt`.
+
+**Die URL-Auflösung ist neu und eigen** (`speedhttp::verweis_aufloesen`,
+25 Host-Tests). `naechstes_ziel` reichte für Weiterleitungen; ein `href`
+hat `..`, Fragmente, Query-Referenzen und schema-relative Formen. Drei
+Entscheidungen zählen: **`..` über die Wurzel hinaus verpufft** (die
+Spezifikation *und* die Sicherheitsfrage — lokale Dateien benutzen
+denselben Normalisierer), **`href="#oben"` lädt gar nichts** (sonst holt
+jeder Klick aufs Inhaltsverzeichnis die Seite neu), und `mailto:`/
+`javascript:` bekommen einen **eigenen** Fehlerwert statt „ungültige
+Adresse". Die Serie-5- und Serie-7-Funktionen sind dabei unverändert
+geblieben — ein Test nagelt fest, dass `naechste_url` weiterhin *nicht*
+normalisiert.
+
+**Bilder laden asynchron nach, eines je Durchgang** — wer alle auf einmal
+holt, friert die Oberfläche für die Summe aller Abrufe ein.
+
+**Die Invalidierungs-Regel für Bilder wurde nachgezogen, nicht der Test.**
+Teil 7 sagte „ein geladenes Bild löst NIE ein Neu-Layout aus", mit der
+damals richtigen Begründung: `speedlayout` fragte ein Bild nie nach seiner
+Größe, *konnte* also nichts ändern. Jetzt kann es (`Metrik::bild_masse`,
+mit Voreinstellung `None`), und daraus wird eine echte
+Fallunterscheidung — mit Maßangabe nur das Rechteck, ohne Maßangabe der
+berüchtigte Seitensprung. Beide Hälften sind geprüft. Nebenbei fällt der
+Fall weg, den man vergisst: `<img width="200">` an einem 800×600-Bild
+ergibt jetzt 200×150 statt 200×32.
+
+**Der Ehrlichkeits-Teil.** `speedos:info` listet auf, was der Browser
+kann und was nicht — im Browser, nicht nur in `grenzen.md`. Und **eine
+Seite, die ohne JavaScript leer bleibt, wird erkannt**: kein Text im
+gesetzten Dokument UND `<script>`-Blöcke vorhanden — beide Bedingungen,
+denn die zweite allein wäre falsch (fast jede Seite hat Skripte) und die
+erste allein auch (eine Seite darf leer sein). Statt einer weißen Fläche
+kommt ein Hinweis; der *Ort* bleibt der der echten Seite, damit Neu-Laden
+und Lesezeichen auf sie zeigen. Zertifikatsfehler bekommen eine **eigene**
+Seite ohne jeden Knopf, der weiterführt.
+
+**Ins System integriert** über eine Funktion (`programme::browser_oeffnen`):
+Startmenü-Eintrag mit Weltkugel-Icon (der erste, der einen Ring-3-Prozess
+startet), Explorer-Doppelklick auf HTML (erkannt **zuerst am Inhalt**, nur
+notfalls an der Endung — HTML hat keine verlässliche Signatur, anders als
+ein ELF), und der Shell-Befehl `browser` ohne `&`.
+
+**Zwei Tastatur-Befunde, die man nur im laufenden Programm sieht:**
+**Strg+H *ist* Backspace** (beide U+0008), und unsere Fenster-ABI hat
+keine Modifikatortasten — jeder Backspace beim Tippen einer Adresse
+öffnete den Verlauf. Aufgelöst am Kontext, wie es jeder Browser tut.
+Und **Enter leert das `Textfeld`**: Es ist das Eingabefeld der Shell, wo
+Enter eine Zeile beendet — wer den Text danach liest, bekommt einen
+leeren String und lädt nichts.
+
+**Neu im Toolkit:** `speedui::TeilLeinwand` (ein Widget-Baum in einem
+Streifen, ohne dass er davon weiß) und `Textfeld::text_setzen` (die
+Adressleiste muss zeigen, was *wirklich* geladen ist).
+
+**Zahlen:** 284 Host-Tests in unter einer Sekunde, 8 neue QEMU-Tests
+(`tests/browser.rs`), die Messung aus Teil 7 läuft mit dem neuen Browser
+unverändert weiter. Der vierte Debug-Blick ist `browser --pruefen`: Titel,
+Zustand, Fehler, Sicherheitsbefund, JS-Diagnose und aufgelöste Verweise
+als Zahlen — die Dinge, die man sonst nur fotografieren kann.
+
+
 ### SERIE 8, TEIL 7: SpeedOS zeigt eine Webseite an
 
 **`starte browser /platte/seiten/cern.html &` — und da steht sie.** Die

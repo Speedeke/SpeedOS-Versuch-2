@@ -58,7 +58,8 @@ pub mod widgets;
 
 pub use typen::{icon_farbe, Farbe, Icon, Rechteck, Taste};
 pub use umgebung::{
-    Dateiquelle, Farbrolle, Leinwand, Maler, Mass, Schrift, Stil, Thema, Uhr, UiKontext,
+    Dateiquelle, Farbrolle, Leinwand, Maler, Mass, Schrift, Stil, TeilLeinwand, Thema, Uhr,
+    UiKontext,
 };
 
 use alloc::boxed::Box;

@@ -360,6 +360,12 @@ impl Textfeld {
     pub fn fokus_setzen(&mut self, fokus: bool) {
         self.fokus = fokus;
     }
+
+    /// Den Inhalt von aussen setzen — die Adressleiste eines Browsers
+    /// muss zeigen, was WIRKLICH geladen ist (Serie 8, Teil 8).
+    pub fn text_setzen(&mut self, text: &str) {
+        self.editor.zeile_setzen(text);
+    }
 }
 
 impl Widget for Textfeld {

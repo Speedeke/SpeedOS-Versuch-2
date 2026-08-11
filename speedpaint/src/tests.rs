@@ -720,17 +720,35 @@ fn test_regel_scrollen_layoutet_nie() {
     assert!(!keins.malt());
 }
 
-/// (4) Ein fertiges Bild malt nur sein Rechteck neu.
+/// (4a) Ein Bild MIT Massangabe malt nur sein Rechteck neu.
 #[test]
 fn test_regel_bild_nur_sein_bereich() {
     let bereich = Rechteck::neu(10, 40, 100, 80);
-    let massnahme = entscheiden(Anlass::BildGeladen { bereich });
+    let massnahme = entscheiden(Anlass::BildGeladen {
+        bereich,
+        aendert_masse: false,
+    });
     assert_eq!(massnahme, Massnahme::Teil(bereich));
     assert!(
         !massnahme.layoutet(),
-        "unser Layout fragt ein Bild nie nach seiner Groesse — \
-         ein geladenes Bild kann die Geometrie nicht aendern"
+        "die Geometrie stand schon im Dokument — nichts zu setzen"
     );
+}
+
+/// (4b) Ein Bild OHNE Massangabe aendert nach dem Laden die Geometrie —
+/// dann MUSS neu gesetzt werden.
+///
+/// Das ist der Reflow. `speedlayout::tests::test_geladenes_bild_aendert_
+/// das_layout` beweist die andere Haelfte: dass dasselbe Dokument mit
+/// bekannter Bildgroesse wirklich ein anderes Layout ergibt.
+#[test]
+fn test_regel_bild_ohne_massangabe_layoutet_neu() {
+    let massnahme = entscheiden(Anlass::BildGeladen {
+        bereich: Rechteck::neu(10, 40, 32, 32),
+        aendert_masse: true,
+    });
+    assert_eq!(massnahme, Massnahme::NeuLayouten);
+    assert!(massnahme.layoutet());
 }
 
 /// (5) und (6).
@@ -779,7 +797,8 @@ fn test_massnahmen_verstaerken_sich() {
 fn test_leeres_bild_loest_nichts_aus() {
     assert_eq!(
         entscheiden(Anlass::BildGeladen {
-            bereich: Rechteck::neu(0, 0, 0, 0)
+            bereich: Rechteck::neu(0, 0, 0, 0),
+            aendert_masse: false,
         }),
         Massnahme::Nichts
     );
