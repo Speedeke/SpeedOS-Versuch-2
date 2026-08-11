@@ -146,7 +146,10 @@ nichts.
 
 **Nicht dabei:** Kombinatoren `>` `+` `~`, Attributselektoren
 (`a[href]`), funktionale Pseudoklassen (`:not()`, `:nth-child()`) und
-Pseudo-**Elemente** (`::before`).
+Pseudo-**Elemente** (`::before`). *(Das HTML-Attribut `hidden` ist seit
+Serie 9, Teil 1 trotzdem wirksam — nicht als Selektor, sondern als das,
+was es ist: eine Aussage der HTML-Spezifikation über das Element.
+Begründung in `grenzen.md`.)*
 
 **Sie machen den Selektor UNERFÜLLBAR, statt näherungsweise zu passen.**
 Das ist die wichtigste Entscheidung dieses Abschnitts: `div > p { display:
@@ -171,13 +174,27 @@ Regel. Ein `style`-Attribut schlägt jeden Selektor.
 zu einer Zahl verrechnet — sonst schlagen elf Klassen eine ID, und das
 ist falsch.
 
-**Keine Kaskade über externe Stylesheets:** `<link rel=stylesheet>` wird
-**nicht geholt**. Das würde aus dem Parsen eine Netz-Operation machen, mit
-Frist, Fehlerfall und Größenlimit; `speedcss` kennt kein Netz. Die Folge
-ist ehrlich zu benennen: Auf Seiten, die ihr gesamtes Aussehen aus
-externen Dateien beziehen — heute die Regel —, wirkt nur das
-Standard-Stylesheet. Der Browser kann die Dateien später selbst holen und
-hereinreichen; die Kaskade ändert sich dadurch nicht.
+**Externe Stylesheets** *(dieser Absatz ist in Serie 9, Teil 1 abgelöst
+worden — der ursprüngliche Wortlaut steht darunter, weil die Begründung
+weiter gilt)*: `<link rel=stylesheet>` **wird geholt**, und zwar vom
+Browser, nicht von `speedcss`. Die Kiste meldet über
+`blaetter_einsammeln`, *was* eine Seite braucht — in Dokumentreihenfolge,
+gemischt aus externen Verweisen und `<style>`-Blöcken; `browser::stil`
+holt, parst und reicht die Liste an `kaskade::berechnen`. **Die Kaskade
+hat sich dadurch nicht geändert** — sie nimmt seit Teil 5 eine Liste von
+Blättern entgegen. Genau so war es hier vorhergesagt:
+
+> *„Keine Kaskade über externe Stylesheets: `<link rel=stylesheet>` wird
+> nicht geholt. Das würde aus dem Parsen eine Netz-Operation machen, mit
+> Frist, Fehlerfall und Größenlimit; `speedcss` kennt kein Netz. Die Folge
+> ist ehrlich zu benennen: Auf Seiten, die ihr gesamtes Aussehen aus
+> externen Dateien beziehen — heute die Regel —, wirkt nur das
+> Standard-Stylesheet. Der Browser kann die Dateien später selbst holen und
+> hereinreichen; die Kaskade ändert sich dadurch nicht."*
+
+Was daran **nicht** stimmte, steht in der zweiten Messung von
+`browser-realitaet.md`: Die Folge betraf nicht „jede Seite außer der von
+1991", sondern vier der zehn — fünf liefern ihr CSS inline.
 
 **`@media` wird übersprungen** — aber *sauber*, mit balancierter
 Klammerung. Wer nur die Zeile überspringt, lässt den Block offen, und die

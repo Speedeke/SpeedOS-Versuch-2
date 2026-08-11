@@ -39,8 +39,62 @@ Parser-, Layout- oder Netz-Logik findet, hat einen Fehler gefunden:
 | `speedui` | Widgets, Themen, Leinwand | 45 (Host) |
 | `libspeed` | Fenster, Netz, Bilder, Heap | — |
 
-Der Browser hat sechs Module: `main` (Ereignisschleife), `ort`, `tab`,
-`laden`, `chrome`, `seiten`, `merkliste`.
+Der Browser hat sieben Module: `main` (Ereignisschleife), `ort`, `tab`,
+`laden`, **`stil`**, `chrome`, `seiten`, `merkliste`.
+
+---
+
+## 1a. Externe Stylesheets (Serie 9, Teil 1)
+
+Der [Realitäts-Bericht](browser-realitaet.md) hat die häufigste
+Fehlerursache benannt — nicht JavaScript, sondern das nicht geholte
+`<link rel="stylesheet">`. `browser::stil` behebt das, und die
+Schichtgrenze bleibt dabei stehen:
+
+| Wer | Was |
+|---|---|
+| `speedcss::blaetter_einsammeln` | **was** das Dokument braucht — in Dokumentreihenfolge |
+| `Ort::aufloesen` | **wohin** die Adresse zeigt (`speedhttp`) |
+| `laden::nebensache_laden` | **wie** die Bytes kommen (`libspeed::netz`) |
+| `browser::stil` | wie viele, wie groß, wie lange, und was bei Fehlschlag |
+
+**Die Reihenfolge ist die halbe Aufgabe:**
+
+```
+Standard  <  externe Blätter + <style>-Blöcke in Dokumentreihenfolge  <  style=""
+```
+
+Ein `<style>` **vor** einem `<link>` ist schwächer, eines **danach**
+stärker. Wer erst alle externen und dann alle inline einsortiert, bekommt
+auf jeder Seite, die beides mischt, eine andere Darstellung als jeder
+echte Browser — und zwar eine, die genauso falsch aussieht wie vorher,
+nur anders.
+
+**Seriell, nicht parallel.** Die Versuchung ist groß (fünf Blätter = fünf
+Handshakes = 60–180 ms), aber: Der Klient ist blockierend gebaut,
+parallel wäre eine *zweite* Abrufschicht neben der bestehenden, die
+Oberfläche gewinnt nichts (der Prozess steht so oder so), und der
+eigentliche Hebel zeigt in die andere Richtung — mit
+HTTP/1.1-Keep-Alive kosten fünf Blätter vom selben Host **einen**
+Handshake, parallel kosten sie fünf auf fünf Sockets.
+
+**Grenzen** (alle in `browser::stil`, alle gezählt und in `--pruefen`
+sichtbar): 10 Blätter, 512 KiB je Blatt, 1,5 MiB gesamt, 8 s Frist,
+`@import` **eine Ebene tief** mit Schleifenschutz über die aufgelöste
+Adresse.
+
+**Ein Blatt, das nicht lädt, verhindert die Seite nicht.** Es gibt keinen
+Fehler-Rückgabewert — was ankam, wird benutzt, was fehlt, steht in der
+Statuszeile. Dieselbe Haltung wie im HTML-Parser: Ein halbes Dokument ist
+lesbar, ein Fehler zeigt nichts.
+
+**Kaskadiert wird genau einmal.** `Tab::inhalt_setzen` zerfällt deshalb in
+zwei Schritte, und die Reihenfolge ist zwingend: erst `dokument_setzen`
+(parsen — *erst danach* weiß irgendjemand, welche Blätter die Seite
+will), dann `stile_setzen` (holen und kaskadieren). Der bequeme Weg
+— schon mit den `<style>`-Blöcken rechnen und nach dem Abruf noch einmal
+— kostete auf einem Wikipedia-Artikel 11 ms für ein Ergebnis, das sofort
+weggeworfen wird.
 
 ---
 
@@ -255,8 +309,12 @@ Vollständig in [`grenzen.md`](grenzen.md). Die wichtigsten:
 * **Kein JavaScript.** Gar keins.
 * Formulare werden angezeigt, aber nicht abgeschickt. Keine Cookies,
   keine Anmeldung.
-* Externe Stylesheets (`<link rel=stylesheet>`) werden **nicht** geholt —
-  nur `<style>`-Blöcke im Dokument.
+* **Kein `float`, kein `position`, kein Flexbox.** Seit die externen
+  Stylesheets da sind, ist das die *häufigste* verbliebene Ursache dafür,
+  dass eine Seite falsch aussieht — Seitenleisten stehen über dem Inhalt
+  statt daneben.
+* Externe Stylesheets werden geholt, aber gedeckelt (10 Blätter, 1,5 MiB,
+  seriell) und `@media` bleibt übersprungen.
 * Die Schrift ist das 5×7-Raster: nur ASCII, alles GROSS, keine Umlaute.
   Die *Breiten* stimmen, Zeilen brechen also richtig um.
 * Kein Suchen in der Seite, keine Textauswahl, kein Zoom.
@@ -267,11 +325,24 @@ Vollständig in [`grenzen.md`](grenzen.md). Die wichtigsten:
 
 ## 9. Prüfung
 
-* **284 Host-Tests** in den sechs Kisten, zusammen unter einer Sekunde.
-* **8 QEMU-Tests** (`tests/browser.rs`): lokale Seite mit Titel,
+* **298 Host-Tests** in den sechs Kisten, zusammen unter einer Sekunde.
+* **11 QEMU-Tests** (`tests/browser.rs`): lokale Seite mit Titel,
   relative Verweise, `speedos:info`, unbekannte eingebaute Seite,
   Fehlerseite, JavaScript-Befund in beide Richtungen, Lesezeichen-Format,
-  fünf Läufe ohne verlorenen Frame.
+  fünf Läufe ohne verlorenen Frame — und drei für die externen
+  Stylesheets (Reihenfolge + `display:none`, Grenze + Fehlschlag, der
+  Vergleich mit und ohne Blatt).
+
+Der Stylesheet-Prüfstand (`assets/testseiten/stiltest.*`) ist **selbst
+geschrieben** und nicht geholt: Reihenfolge, Grenzen, `@import`-Tiefe und
+Schleifenschutz lassen sich an einer fremden Seite nicht festnageln, weil
+sie sich ändert. Jeder Absatz trägt seinen Befund im eigenen Text —
+`REGEL-A SICHTBAR` beweist „extern schlägt `<style>` davor",
+`REGEL-B` das Gegenstück, `REGEL-E` dass die zweite `@import`-Ebene
+**nicht** verfolgt wird. Gelesen wird das über die neue `--pruefen`-Zeile
+`TEXT=`, die den sichtbaren Text **aus der Anzeigeliste** ausgibt: Erst
+damit ist „der Screenreader-Text ist verschwunden" eine prüfbare Aussage
+statt eines Bildschirmfotos.
 * **3 QEMU-Tests** (`tests/browser_rendern.rs`): die Messung aus Teil 7
   läuft mit dem neuen Browser weiter — das Umstiegskriterium bleibt
   reproduzierbar.

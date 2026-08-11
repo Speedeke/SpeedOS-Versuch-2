@@ -3,8 +3,16 @@
 *Bestandsaufnahme nach dem Serie-8-Abschluss — August 2026*
 
 Serie 8 hat einen Browser gebaut. Der
-[Realitäts-Bericht](browser-realitaet.md) sagt, was er kann: sechs von
-zehn echten Seiten sind wirklich benutzbar, zwei teilweise, zwei nicht.
+[Realitäts-Bericht](browser-realitaet.md) sagt, was er kann: fünf von
+zehn echten Seiten sind wirklich benutzbar, drei teilweise, zwei nicht.
+
+> **Nachtrag, Serie 9, Teil 1:** Die unten empfohlene erste Maßnahme
+> (externe Stylesheets) ist umgesetzt. Die
+> [zweite Messung](browser-realitaet.md#zweite-messung-mit-externen-stylesheets)
+> steht bei **7 lesbar / 2 teilweise / 1 unbrauchbar**. Die Bewertung
+> der drei großen Wege darunter ändert das nicht — sie stützt sie: Was
+> billig war, ist getan, und die Frage lautet jetzt unverändert
+> JavaScript, Anwendungen oder Fundament.
 
 Daraus folgt die Frage dieser Serie: **Wohin geht die Kraft?** Drei Wege
 stehen offen, und sie schließen sich in den nächsten Monaten praktisch
@@ -159,12 +167,22 @@ Rechner benutzbar ist oder eine Demonstration in einer VM bleibt.
 
 Bevor irgendeine große Entscheidung fällt:
 
-* **Externe Stylesheets holen** (~1 Tag). Behebt die häufigste
-  Fehlerursache auf *acht von zehn* Seiten. Alles dafür steht schon:
-  Cache, URL-Auflösung, CSS-Parser, Kaskade mit mehreren Blättern.
-* **`display:none` wirkt dann auch** — und damit verschwindet der
-  Screenreader-Text von github und das Overlay des Rust-Buchs.
-* Optional (~1 Tag): einfache `float`-Unterstützung für Seitenleisten.
+* ~~**Externe Stylesheets holen** (~1 Tag).~~ **ERLEDIGT** (Serie 9,
+  Teil 1). Bilanz nach dem Augenschein: *5/3/2 → 7/2/1*. Zwei Dinge sind
+  dabei anders gekommen als hier vorhergesagt, und beide stehen in der
+  [zweiten Messung](browser-realitaet.md#zweite-messung-mit-externen-stylesheets):
+  **(a)** Es waren nicht acht von zehn Seiten, sondern vier — fünf
+  liefern ihr CSS inline. **(b)** `display:none` allein reichte für
+  github *nicht*; seine Screenreader-Meldungen hängen am HTML-Attribut
+  `hidden`, das erst danach dazukam.
+* **Jetzt der größte Einzelposten am Browser: `float` und `position`**
+  (~1–2 Tage für den einfachen Fall). Seit das CSS da ist, ist das die
+  **häufigste** verbliebene Ursache dafür, dass eine Seite falsch
+  aussieht: Wikipedias Seitenleiste steht als lange Liste über dem
+  Artikel, und das ändert kein Stylesheet der Welt.
+* Danach lohnenswert und billig: **`@media` wenigstens für `screen` und
+  feste `min-width`/`max-width` auswerten**. lite.cnn.com liefert 199 KB
+  CSS, und davon bleiben 16 Regeln — der Rest steckt in Media-Queries.
 
 Das ist kein Serien-Thema, sondern der Rest von Serie 8. Es wäre
 unklug, mit einer Monats-Entscheidung anzufangen, solange zwei Tage so
@@ -207,7 +225,11 @@ zweite Monat beginnt.
 Kleinigkeiten, die in keine der drei Richtungen fallen, aber notiert
 gehören (vollständig in [`grenzen.md`](grenzen.md)):
 
-* Externe Stylesheets (siehe oben — der größte Einzelposten).
+* ~~Externe Stylesheets~~ — erledigt (Serie 9, Teil 1). Neu offen daraus:
+  **HTTP/1.1-Keep-Alive**. Fünf Blätter vom selben Host kosten heute fünf
+  TLS-Handshakes; mit Keep-Alive wäre es einer. Das ist der Grund, warum
+  seriell geholt wird und nicht parallel — Parallelität stünde ihm
+  hinterher im Weg.
 * Der Browser blockiert beim Laden; nur Bilder laden nebenher.
   Nicht-blockierendes Laden bräuchte entweder Threads im Prozess oder
   einen nicht-blockierenden Klienten.

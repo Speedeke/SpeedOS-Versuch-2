@@ -635,6 +635,11 @@
   ihren Inhalt im HTML und sehen nur falsch aus — und was per CSS
   VERSTECKT sein sollte, wird sichtbar (Screenreader-Text, Overlays).
   Externe Stylesheets sind ein TAGESPROJEKT, eine JS-Engine sind MONATE.
+  **NACHTRAG SERIE 9, TEIL 1: umgesetzt, zweite Messung 7/2/1.** Zwei
+  Teile der Erkenntnis waren dabei ZU PAUSCHAL und stehen korrigiert im
+  Bericht: Es waren nicht acht von zehn Seiten, sondern VIER (fuenf
+  liefern ihr CSS inline), und `display:none` allein reichte fuer github
+  NICHT — dort haengt es am HTML-Attribut `hidden`.
 - **DIE MECHANISCHE BEWERTUNG WAR ZU GUTMUETIG, und das steht so im
   Bericht:** Der Test sagte 8/2/0 (Befehle x Hoehe), der Augenschein
   sagt 5/3/2. Ein Browser kann viel Text zeichnen und trotzdem
@@ -701,19 +706,94 @@
   1–2 Wochen je Stueck (JSON fehlt, ist zwei Tage); YouTube scheitert an
   VIDEO-DEKODIERUNG (Monate, kein no_std-Weg, SIMD ist abgeschaltet) —
   der ehrliche Weg dorthin sind Podcasts, sobald es Audio-Ausgabe gibt.
-  **EMPFEHLUNG: erst die zwei Tage fuer externe Stylesheets, dann USB
-  (xHCI).** Begruendung in einem Satz: Es ist das Einzige, das darueber
+  **EMPFEHLUNG: erst die zwei Tage fuer externe Stylesheets (ERLEDIGT,
+  Serie 9, Teil 1 — offen daraus: `float`/`position`, jetzt die
+  haeufigste Fehlerursache), dann USB (xHCI).** Begruendung in einem Satz: Es ist das Einzige, das darueber
   entscheidet, ob SpeedOS ein System ist, das man BENUTZEN kann — auf
   echter Hardware gibt es keine PS/2-Tastatur, also kann man den Browser
   dort nicht bedienen. **Die Entscheidung gehoert dem Projektbesitzer.**
+
+## EXTERNE STYLESHEETS (Serie 9, Teil 1 — browser::stil)
+- **DIE SCHICHTGRENZE BLEIBT, WAS GEFEHLT HAT WAR DIE TRENNUNG.**
+  `speedcss` kennt WEITER KEIN NETZ: `blaetter_einsammeln(dokument)` sagt,
+  **WAS** ein Dokument braucht (`Blattbedarf::Extern/Inline`), **OB und
+  WIE** es ankommt gehoert dem Wirt. Wer speedcss einen Abruf einbaut,
+  zerstoert dieselbe Aussage wie eine Abhaengigkeit in `speedhttp`.
+- **DIE REIHENFOLGE IST DIE HALBE AUFGABE:** Standard < externe Blaetter
+  UND `<style>`-Bloecke **in DOKUMENTREIHENFOLGE** < `style`-Attribut.
+  Ein `<style>` VOR einem `<link>` ist schwaecher, eines DANACH staerker.
+  Nach Sorte zu trennen saehe anders falsch aus als vorher, nicht besser.
+  Der Arena-Index IST die Dokumentreihenfolge, also genuegt ein Lauf ueber
+  `alle()`. `rel="alternate stylesheet"` und `media="print"` werden NICHT
+  angewandt; Feature-Abfragen koennen wir nicht auswerten, **also raten
+  wir nicht**.
+- **SERIELL, NICHT PARALLEL — und die Begruendung ist der dritte Grund:**
+  Alle Blaetter kommen fast immer vom SELBEN Host. Mit
+  HTTP/1.1-Keep-Alive kosten fuenf Blaetter EINEN Handshake, parallel
+  kosten sie FUENF auf fuenf Sockets — wer parallelisiert, baut die
+  Struktur, die Keep-Alive danach im Weg steht. (Gruende 1 und 2: Der
+  Klient ist blockierend gebaut, parallel waere eine ZWEITE Abrufschicht
+  neben `libspeed::netz::Klient`; und die Oberflaeche gewinnt nichts, der
+  Prozess steht so oder so.) **Keep-Alive fehlt noch** (`Connection:
+  close` steht fest in `anfrage_bauen`) — das ist der naechste Schritt.
+- **GRENZEN, alle gezaehlt und in `--pruefen` sichtbar:** 10 Blaetter,
+  512 KiB je Blatt, 1,5 MiB CSS gesamt, 8 s Frist (kuerzer als die 15 s
+  einer Seite — ein Blatt ist nicht wichtig genug, um sie aufzuhalten),
+  `@import` **EINE Ebene tief** mit Schleifenschutz ueber die AUFGELOESTE
+  Adresse. Die Grenze SCHNEIDET AB, sie lehnt nicht ab.
+  **EIN BLATT, DAS NICHT LAEDT, VERHINDERT DIE SEITE NICHT** — es gibt
+  keinen Fehler-Rueckgabewert, nur Zaehler und einen Satz in der
+  Statuszeile. Dieselbe Haltung wie im HTML-Parser.
+- **KASKADIERT WIRD GENAU EINMAL.** `Tab::inhalt_setzen` zerfaellt in
+  `dokument_setzen` (parsen — **erst danach weiss irgendjemand, welche
+  Blaetter die Seite will**, die `<link>` stehen im Dokument) und
+  `stile_setzen` (holen, kaskadieren). Schon vorher mit den
+  `<style>`-Bloecken zu rechnen kostete auf Wikipedia 11 ms fuer ein
+  Ergebnis, das sofort weggeworfen wird. Die Blaetter werden nach der
+  Kaskade FALLENGELASSEN (nur `StilBefund` bleibt); sobald `:hover`
+  wirklich gemeldet wird, faellt genau dort auf, dass es sie ein zweites
+  Mal braucht.
+- **ZWEI BEFUNDE, DIE MAN NUR DURCH HINSEHEN FINDET** (zweite Messung in
+  docs/browser-realitaet.md): Nach dem Holen blieben githubs
+  Screenreader-Meldungen TROTZ 4 678 geladener Regeln stehen — sie
+  haengen am HTML-Attribut **`hidden`**, nicht an einer Klasse. Und
+  `<template>`-Inhalt wurde gezeichnet, obwohl er ein Bauplan fuer
+  JavaScript ist. Beides ist behoben; **`hidden` ist AUSDRUECKLICH KEINE
+  Aufweichung der Regel „keine Attributselektoren"** — es ist eine
+  Aussage der HTML-Spezifikation ueber das Element, kein Stil, und es
+  laeuft als Regel der Herkunft STANDARD mit Klassen-Spezifitaet, damit
+  eine Autor-Regel es schlagen darf.
+- **`TEXT=` IN `--pruefen` IST DER SICHTBARE TEXT AUS DER ANZEIGELISTE**
+  (nicht aus dem Dokument). Der Unterschied IST die Wirkung des CSS: Ein
+  `display: none` erzeugt keinen Textbefehl. Nur deshalb ist „der
+  Screenreader-Text ist verschwunden" eine pruefbare Aussage statt eines
+  Bildschirmfotos.
+- **DER PRUEFSTAND IST SELBST GESCHRIEBEN** (`assets/testseiten/stiltest.*`,
+  NICHT in HERKUNFT.txt): Reihenfolge, Grenzen, `@import`-Tiefe und
+  Schleifenschutz lassen sich an einer FREMDEN Seite nicht festnageln,
+  weil sie sich aendert. Jeder Absatz traegt seinen Befund im TEXT
+  (`REGEL-A SICHTBAR` = extern schlaegt `<style>` davor, `REGEL-B` das
+  Gegenstueck, `REGEL-E SICHTBAR` = zweite `@import`-Ebene wird NICHT
+  verfolgt). Die `.css`-Dateien MUESSEN in denselben Ordner wie die Seite
+  — der Verweis ist relativ, und genau das soll er beweisen.
+- **DIE NEUE REIHENFOLGE DER FEHLERURSACHEN, gemessen statt vermutet:**
+  (1) kein `float`/`position`/Flexbox — jetzt die HAEUFIGSTE (Wikipedias
+  Seitenleiste steht weiter ueber dem Artikel, und das aendert kein
+  Stylesheet), (2) kein JavaScript, (3) `@media` wird uebersprungen
+  (lite.cnn.com: 199 KB CSS -> 16 Regeln), (4) die Blaetter-Obergrenze
+  (github fordert 27 an, bekommt 10).
+- **WAS DIE ERSTE MESSUNG FALSCH SAGTE, BLEIBT STEHEN UND WIRD BENANNT:**
+  „betrifft jede der zehn Seiten ausser der von 1991" war zu pauschal —
+  FUENF der zehn liefern ihr CSS inline. Ein Bericht, den man
+  nachtraeglich glattzieht, ist keine Messung mehr.
 
 ## DER BROWSER (Serie 8, Teil 8, userland/src/bin/browser/)
 - **MEILENSTEIN: Adresse eintippen, Seite erscheint, Links funktionieren,
   Zurueck funktioniert** — eigener Kernel, eigener TCP/IP-Stack, eigener
   TLS-Weg, eigener Prozess, eigener Renderer. Vollstaendig in
-  docs/browser.md. Der Browser VERDRAHTET nur; wer in seinen sechs Modulen
-  (main/ort/tab/laden/chrome/seiten/merkliste) Parser-, Layout-, Netz- oder
-  URL-Logik findet, hat einen Fehler gefunden.
+  docs/browser.md. Der Browser VERDRAHTET nur; wer in seinen Modulen
+  (main/ort/tab/laden/stil/chrome/seiten/merkliste) Parser-, Layout-,
+  Netz- oder URL-Logik findet, hat einen Fehler gefunden.
 - **DIE URL-AUFLOESUNG IST NEU UND EIGEN** (`speedhttp::verweis_aufloesen`,
   25 Host-Tests). `naechstes_ziel` reichte fuer WEITERLEITUNGEN; ein `href`
   hat `..`, Fragmente, Query-Referenzen und schema-relative Formen. DREI
@@ -810,9 +890,9 @@
   Zustand, Fehler, Sicherheitsbefund, JS-Diagnose, AUFGELOESTE Verweise).
   Ohne ihn liessen sich genau diese Dinge nur fotografieren; mit ihm sind
   sie die 8 Tests in tests/browser.rs.
-- **ZAHLEN:** 284 Host-Tests in unter einer Sekunde (25 speedhttp, 63
-  speedhtml, 56 speedcss, 60 speedlayout, 45 speedui, 35 speedpaint),
-  8 QEMU-Tests. Die Messung aus Teil 7 laeuft mit dem neuen Browser
+- **ZAHLEN:** 298 Host-Tests in unter einer Sekunde (25 speedhttp, 63
+  speedhtml, 70 speedcss, 60 speedlayout, 45 speedui, 35 speedpaint),
+  11 QEMU-Tests (Stand Serie 9, Teil 1). Die Messung aus Teil 7 laeuft mit dem neuen Browser
   UNVERAENDERT weiter — das Umstiegskriterium bleibt reproduzierbar
   (`--messen=N` und `--fenster=BxH` sind erhalten geblieben). ELF
   `browser` 1 343 224 B.

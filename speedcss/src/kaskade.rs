@@ -265,6 +265,63 @@ const INLINE_SPEZIFITAET: Spezifitaet = Spezifitaet {
     typen: 0,
 };
 
+// ---------------------------------------------------------------------------
+// DAS `hidden`-ATTRIBUT
+// ---------------------------------------------------------------------------
+
+/// `<div hidden>` — die EINE Attributregel, die es bei uns gibt.
+///
+/// ===================================================================
+/// WARUM DAS KEINE AUSNAHME VON „KEINE ATTRIBUTSELEKTOREN" IST
+///
+/// Die Regel aus docs/browser-v1.md steht: Ein Selektor mit
+/// `[href]`, `[data-x=y]` und Konsorten wird UNERFUELLBAR, statt
+/// naeherungsweise zu passen. Sie bleibt gueltig, und `parser` lehnt
+/// solche Selektoren weiter ab.
+///
+/// `hidden` ist etwas anderes: **kein Stil, sondern eine Aussage der
+/// HTML-Spezifikation ueber das Element** („not yet, or no longer,
+/// relevant"). Dass Browser sie als `[hidden] { display: none }` im
+/// UA-Stylesheet umsetzen, ist eine Implementierungsform — der Sinn
+/// steckt im HTML, nicht im CSS. Hier steht deshalb keine
+/// Selektor-Maschinerie, sondern ein Blick auf EIN Attribut mit
+/// festgelegter Bedeutung.
+///
+/// ===================================================================
+/// UND WARUM ES UEBERHAUPT AUFFIEL
+///
+/// Der zweite Realitaets-Bericht (Serie 9, Teil 1). Nach dem Holen der
+/// externen Blaetter war die Erwartung, githubs Screenreader-Meldungen
+/// („You signed in with another tab or window") wuerden verschwinden.
+/// Sie blieben stehen — weil sie nicht ueber eine Klasse versteckt sind,
+/// sondern ueber genau dieses Attribut. Eine Vorhersage, die die Messung
+/// widerlegt hat, und der billigste Fix des ganzen Schrittes.
+///
+/// **HERKUNFT STANDARD, nicht Autor**: Ein Autor-Stylesheet, das
+/// `.flash { display: block }` sagt, muss gewinnen duerfen — genau so
+/// steht es in der Spezifikation. Die Spezifitaet ist die eines
+/// Attributselektors, also die einer Klasse.
+fn hidden_deklarationen(knoten: &Knoten) -> Vec<Deklaration> {
+    // Die HTML-Spezifikation kennt `hidden="until-found"`: Der Inhalt ist
+    // versteckt, aber durchsuchbar und klappt beim Finden auf. Ohne
+    // Suchfunktion ist das fuer uns dasselbe wie versteckt.
+    match knoten.attribut("hidden") {
+        Some(_) => alloc::vec![Deklaration {
+            name: String::from("display"),
+            wert: String::from("none"),
+            wichtig: false,
+        }],
+        None => Vec::new(),
+    }
+}
+
+/// Die Spezifitaet eines Attributselektors — die einer Klasse.
+const HIDDEN_SPEZIFITAET: Spezifitaet = Spezifitaet {
+    ids: 0,
+    klassen: 1,
+    typen: 0,
+};
+
 /// Den berechneten Stil EINES Elements bestimmen.
 ///
 /// `eltern` ist der schon berechnete Stil des Elternteils (fuer
@@ -287,6 +344,19 @@ pub fn stil_fuer(
     }
 
     let mut liste = kandidaten(blaetter, dokument, ziel, zustand);
+
+    // Das `hidden`-Attribut — als Regel des STANDARD-Stylesheets, damit
+    // eine Autor-Regel sie schlagen kann.
+    let versteckt = hidden_deklarationen(knoten);
+    for deklaration in &versteckt {
+        liste.push(Kandidat {
+            deklaration,
+            herkunft: Herkunft::Standard,
+            spezifitaet: HIDDEN_SPEZIFITAET,
+            reihenfolge: usize::MAX,
+            selektor: "[hidden]",
+        });
+    }
 
     // Der Inline-Stil kommt dazu — mit der hoechsten Spezifitaet.
     let inline = inline_deklarationen(knoten);
@@ -499,6 +569,22 @@ pub fn erklaeren(
     zustand: Zustand,
 ) -> Vec<Erklaerung> {
     let mut liste = kandidaten(blaetter, dokument, ziel, zustand);
+    // Dieselben zwei Zusaetze wie in `stil_fuer` — sonst zeigte `cssdump`
+    // bei einem `<div hidden>` „Anfangswert" an, waehrend der berechnete
+    // Wert `none` ist. Genau dann sucht man an der falschen Stelle.
+    let versteckt = dokument
+        .knoten(ziel)
+        .map(hidden_deklarationen)
+        .unwrap_or_default();
+    for deklaration in &versteckt {
+        liste.push(Kandidat {
+            deklaration,
+            herkunft: Herkunft::Standard,
+            spezifitaet: HIDDEN_SPEZIFITAET,
+            reihenfolge: usize::MAX,
+            selektor: "[hidden]",
+        });
+    }
     let inline = dokument
         .knoten(ziel)
         .map(inline_deklarationen)

@@ -307,6 +307,45 @@ fn bericht_zehn_echte_seiten() {
             zahl(&ausgabe, "LINKS="),
             zahl(&ausgabe, "HEAP_SPITZE=")
         );
+        // ===============================================================
+        // DIE ZAHLEN DER ZWEITEN MESSUNG (Serie 9, Teil 1)
+        //
+        // Sie gehen NICHT in die Bewertung ein — die Methode bleibt
+        // Wort fuer Wort dieselbe wie in der ersten Messung, sonst waere
+        // der Vergleich wertlos. Sie sind der BELEG dafuer, WARUM sich
+        // ein Urteil geaendert hat: `VERSTECKT` sagt, wie viele
+        // Teilbaeume durch die geholten Blaetter aus der Seite gefallen
+        // sind, und das ist genau der Unterschied zwischen „github zeigt
+        // Screenreader-Text" und „github zeigt ihn nicht mehr".
+        serial_println!(
+            "[REALITAET]   CSS: {}/{} Blaetter, {} Regeln, {} B, {} Teilbaeume versteckt{}",
+            zahl(&ausgabe, "STIL_EXTERN_GELADEN="),
+            zahl(&ausgabe, "STIL_EXTERN_VERSUCHT="),
+            zahl(&ausgabe, "STIL_REGELN="),
+            zahl(&ausgabe, "STIL_BYTES="),
+            zahl(&ausgabe, "STIL_VERSTECKT="),
+            if feld(&ausgabe, "STIL_MELDUNG=") == "-" {
+                String::new()
+            } else {
+                alloc::format!(" | {}", feld(&ausgabe, "STIL_MELDUNG="))
+            }
+        );
+        // Der ANFANG des sichtbaren Textes. Er beantwortet die Frage, an
+        // der die mechanische Bewertung in der ersten Messung gescheitert
+        // ist: Ein Browser kann viel Text zeichnen und trotzdem
+        // unbenutzbar sein, wenn es der FALSCHE Text ist.
+        let text = feld(&ausgabe, "TEXT=");
+        // GEKUERZT WIRD NACH ZEICHEN, NICHT NACH BYTES. `&text[..160]`
+        // waere der Klassiker: Der sichtbare Text kommt aus der
+        // Anzeigeliste und damit woertlich aus einer fremden Seite —
+        // Umlaute im Wikipedia-Artikel, typografische Anfuehrungszeichen
+        // und Gedankenstriche bei NPR und CNN sind der Normalfall, nicht
+        // der Randfall. Faellt die Bytegrenze mitten in ein solches
+        // Zeichen, PANICKT das Slicing, und zwar im TESTKERNEL — ein
+        // Bericht, der die Messung abbricht, ueber die er berichtet.
+        // Dieselbe Regel wie bei `text_breite` (chars, nie len).
+        let kurz: String = text.chars().take(160).collect();
+        serial_println!("[REALITAET]   Text: {}", kurz);
         scheduler::aufraeumen();
     }
 

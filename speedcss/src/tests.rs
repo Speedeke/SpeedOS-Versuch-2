@@ -1305,6 +1305,62 @@ fn test_kaskade_ueber_mehrere_blaetter() {
     assert_eq!(baum.stil(zweiter).display, Display::Block);
 }
 
+/// **Das HTML-Attribut `hidden` versteckt** — und eine Autor-Regel darf
+/// es trotzdem schlagen.
+///
+/// Gefunden hat das der zweite Realitaets-Bericht: Nach dem Holen der
+/// externen Blaetter blieben githubs Screenreader-Meldungen stehen, weil
+/// sie nicht ueber eine Klasse versteckt sind, sondern ueber genau
+/// dieses Attribut.
+#[test]
+fn test_hidden_attribut() {
+    let dokument = speedhtml::parsen(
+        "<div hidden>weg</div><div hidden=\"until-found\">auch weg</div>\
+         <div class=\"trotzdem\" hidden>doch da</div><div>normal</div>",
+    );
+    let standard = standard_stylesheet();
+    // Eine AUTOR-Regel muss das Standard-Verhalten schlagen koennen —
+    // so steht es in der Spezifikation.
+    let autor = parser::parsen(".trotzdem { display: block }");
+    let blaetter: Vec<(&Stylesheet, Herkunft)> = alloc::vec![
+        (&standard, Herkunft::Standard),
+        (&autor, Herkunft::Autor),
+    ];
+    let baum = kaskade::berechnen(&dokument, &blaetter, Zustand::default());
+
+    let divs: Vec<_> = dokument
+        .alle()
+        .filter(|(_, k)| k.name() == Some("div"))
+        .map(|(id, _)| id)
+        .collect();
+    assert_eq!(baum.stil(divs[0]).display, Display::Keine, "<div hidden>");
+    assert_eq!(
+        baum.stil(divs[1]).display,
+        Display::Keine,
+        "hidden=\"until-found\" ist ohne Suchfunktion dasselbe"
+    );
+    assert_eq!(
+        baum.stil(divs[2]).display,
+        Display::Block,
+        "eine Autor-Regel schlaegt das Standard-Verhalten"
+    );
+    assert_eq!(baum.stil(divs[3]).display, Display::Block, "ohne Attribut");
+}
+
+/// **Der Inhalt von `<template>` wird nie gezeichnet.**
+///
+/// Er ist ein Bauplan fuer JavaScript, kein Seiteninhalt — wer ihn
+/// zeichnet, zeigt Text, den auch ein echter Browser nie zeigt.
+#[test]
+fn test_template_inhalt_ist_unsichtbar() {
+    let (dokument, baum) = rechnen(
+        "<body><template><p>NIEMALS SICHTBAR</p></template><p>sichtbar</p></body>",
+        "",
+    );
+    let template = dokument.erstes("template").expect("<template>");
+    assert_eq!(baum.stil(template).display, Display::Keine);
+}
+
 /// **`display: none` aus einem externen Blatt muss wirken** — das ist der
 /// sichtbarste Teil des Fixes (Screenreader-Text, Overlays).
 ///

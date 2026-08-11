@@ -61,8 +61,14 @@ body {
 
 /* Was NICHT erscheint. `display: none` ist hier wichtiger als es
    aussieht: Ohne diese Regel stuende der Inhalt von <head> — Titel,
-   Skripte, Stile — als Text oben auf der Seite. */
-head, title, meta, link, style, script, base, noscript { display: none }
+   Skripte, Stile — als Text oben auf der Seite.
+
+   <template> steht seit Serie 9, Teil 1 dabei, und es ist der Fall, den
+   man ohne echte Seiten nicht findet: Sein Inhalt ist ein BAUPLAN, den
+   JavaScript spaeter einsetzt — er gehoert per Definition nie auf den
+   Schirm. Wer ihn zeichnet, zeigt Text, den auch ein echter Browser
+   niemals zeigt, und zwar auf jeder modernen Seite. */
+head, title, meta, link, style, script, base, noscript, template { display: none }
 
 /* ---------------------------------------------------------------
    Block-Elemente

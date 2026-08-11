@@ -306,16 +306,20 @@ die nächsten Schritte. Was am Parser selbst fehlt:
 SpeedOS versteht seit Serie 8, Teil 5 eine CSS-Teilmenge und rechnet
 Kaskade und Vererbung durch (`speedcss`). Was **nicht** dabei ist:
 
-* **Externe Stylesheets werden nicht geholt.** `<link rel=stylesheet>`
-  wird ignoriert — nur `<style>`-Blöcke und `style`-Attribute wirken.
-  **Das ist die folgenreichste Lücke:** Auf Seiten, die ihr Aussehen aus
-  externen Dateien beziehen (heute die Regel), wirkt nur das eingebaute
-  Standard-Stylesheet. Der Grund ist eine Schichtgrenze, keine
-  Vergesslichkeit — `speedcss` kennt kein Netz; der Browser kann die
-  Dateien später holen und hereinreichen.
+* ~~Externe Stylesheets werden nicht geholt.~~ **Seit Serie 9, Teil 1
+  werden sie geholt** (`browser::stil`); `speedcss` meldet über
+  `blaetter_einsammeln` nur noch, *was* eine Seite braucht, und kennt
+  weiterhin kein Netz. Was dabei an Grenzen gilt, steht unten beim
+  Browser.
 * **`@media` wird übersprungen** (sauber, mit balancierter Klammerung —
   die Regeln darin schlagen also *nicht* durch). Bei „mobile first"-Seiten,
   die ihr ganzes Layout in Media-Queries haben, bleibt entsprechend wenig.
+  **Seit die externen Blätter da sind, ist das messbar:** lite.cnn.com
+  liefert 199 KB CSS, und davon bleiben **16 Regeln** übrig — der Rest
+  steckt in Media-Queries (`docs/browser-realitaet.md`, zweite Messung).
+* **Kein `@supports`, kein `@layer`, keine Container-Queries** — sie
+  laufen über dieselbe At-Regel-Behandlung und verschwinden mitsamt
+  Inhalt.
 * **Kein `calc()`, keine Custom Properties** (`--x`/`var()`).
 * **Keine Einheiten** `vw`/`vh`/`ex`/`ch`/`cm`/`mm`/`in` — sie werden
   abgelehnt, nicht geraten.
@@ -324,6 +328,17 @@ Kaskade und Vererbung durch (`speedcss`). Was **nicht** dabei ist:
   Selektoren machen die Regel **unerfüllbar** statt näherungsweise
   passend — `div > p { display: none }` als Nachfahren zu deuten würde
   mehr verstecken als gemeint.
+  **Die eine Ausnahme, und sie ist keine:** Das HTML-Attribut `hidden`
+  wird beachtet (`kaskade::hidden_deklarationen`, Herkunft *Standard*,
+  Spezifität einer Klasse). Es ist kein Stil, sondern eine Aussage der
+  HTML-Spezifikation über das Element; dass Browser es als
+  `[hidden] { display: none }` im UA-Stylesheet umsetzen, ist eine
+  Implementierungsform. Gefunden hat das der zweite Realitäts-Bericht:
+  githubs Screenreader-Meldungen blieben trotz 4 678 geladener Regeln
+  stehen, weil sie genau daran hängen.
+* **Der Inhalt von `<template>` wird nie gezeichnet** (seit Serie 9,
+  Teil 1 im Standard-Stylesheet). Er ist ein Bauplan für JavaScript;
+  wer ihn zeichnet, zeigt Text, den auch ein echter Browser nie zeigt.
 * **`:hover` ist vorbereitet, aber unbenutzt** — die Kaskade kann es, der
   Browser meldet den Zustand noch nicht.
 * **Kein Blocksatz**: `text-align: justify` wird gelesen und wie `left`
@@ -418,10 +433,29 @@ Kaskade und Vererbung durch (`speedcss`). Was **nicht** dabei ist:
 * **Kein JavaScript.** Gar keins. Eine Seite, die ihren Inhalt per Skript
   aufbaut, bleibt leer — der Browser **erkennt das und sagt es** (leeres
   Rendering + `<script>`-Blöcke), statt eine weiße Fläche zu zeigen.
-* **Externe Stylesheets werden nicht geholt.** Nur `<style>`-Blöcke im
-  Dokument wirken; ein `<link rel="stylesheet">` wird ignoriert. Auf
-  vielen Seiten ist das der Grund, warum sie schmuckloser aussehen als im
-  echten Browser.
+* **Externe Stylesheets werden geholt — aber mit harten Grenzen**
+  (seit Serie 9, Teil 1, `browser::stil`): höchstens **10 Blätter** je
+  Dokument, **512 KiB** je Blatt, **1,5 MiB** CSS insgesamt, **8 s**
+  Frist je Abruf. Darüber wird übersprungen und gezählt; github fordert
+  27 an und bekommt 10. Ein Blatt, das nicht lädt, **verhindert die
+  Seite nicht** — es steht in der Statuszeile.
+* **Geholt wird SERIELL**, nicht parallel. Fünf Blätter sind fünf
+  TLS-Handshakes hintereinander. Die Begründung steht im Kopfkommentar
+  von `browser::stil`: Der Klient ist blockierend gebaut, parallel wäre
+  eine zweite Abrufschicht, und der eigentliche Hebel ist
+  HTTP/1.1-Keep-Alive (fehlt noch — `Connection: close` steht fest in
+  `anfrage_bauen`), dem Parallelität hinterher im Weg stünde.
+* **`@import` wird EINE Ebene tief verfolgt**, tiefer nicht (gezählt in
+  `STIL_IMPORTE_IGNORIERT`), höchstens 4 insgesamt, mit Schleifenschutz
+  über die aufgelöste Adresse. Ein `@import` nach der ersten Regel wird
+  gar nicht erst gemeldet — er wirkt laut Spezifikation in keinem
+  Browser.
+* **Kein CSS-Cache über die Sitzung hinaus.** Die Blätter liegen im
+  Sitzungs-Cache (8 MiB, geteilt mit den Bildern) und sind nach dem
+  Schließen weg.
+* **Die Blätter werden nach der Kaskade fallengelassen.** Sobald
+  `:hover` wirklich gemeldet wird, braucht es sie ein zweites Mal — dann
+  fällt es an `Tab::stile_setzen` auf.
 * **Formulare werden angezeigt, aber nicht abgeschickt.** Keine Cookies,
   keine Anmeldung, keine Sitzungen.
 * **Der Scroll-Versatz wird beim Umlegen auf eine neue Fensterbreite nur

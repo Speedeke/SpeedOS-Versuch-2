@@ -5,6 +5,73 @@ Format angelehnt an [Keep a Changelog](https://keepachangelog.com/de/).
 
 ## [Unveröffentlicht]
 
+### SERIE 9, TEIL 1: Externe Stylesheets — die häufigste Fehlerursache
+
+Der Realitäts-Bericht hatte die Reihenfolge umgedreht, die alle erwartet
+hatten: nicht JavaScript, sondern das nicht geholte
+`<link rel="stylesheet">`. **Das ist jetzt behoben — und die zweite
+Messung steht daneben in
+[`docs/browser-realitaet.md`](docs/browser-realitaet.md):
+5 lesbar / 3 teilweise / 2 unbrauchbar → *7 / 2 / 1*.**
+
+**Die Schichtgrenze bleibt, was gefehlt hat, war die Trennung.**
+`speedcss` kennt weiter kein Netz: `blaetter_einsammeln` sagt, **was**
+ein Dokument braucht — in **Dokumentreihenfolge**, gemischt aus externen
+Verweisen und `<style>`-Blöcken. Ob und wie es ankommt, gehört dem Wirt.
+
+* **Die Reihenfolge ist die halbe Aufgabe:** Standard < externe Blätter
+  und `<style>`-Blöcke *in Dokumentreihenfolge* < `style`-Attribut. Ein
+  `<style>` **vor** einem `<link>` ist schwächer, eines **danach**
+  stärker. Nach Sorte zu trennen sähe anders falsch aus als vorher,
+  nicht besser.
+* `rel="alternate stylesheet"` und `media="print"` werden nicht
+  angewandt; Feature-Abfragen (`(max-width: 600px)`) können wir nicht
+  auswerten, **also raten wir nicht**.
+* `Stylesheet::importe` **meldet** `@import`-Adressen (nur vor der ersten
+  Regel — später sind sie laut Spezifikation ungültig und wirken in
+  keinem Browser), holt sie aber nicht.
+
+**`browser::stil` trifft die Entscheidungen, die keine Schicht darunter
+treffen kann.** **Seriell, nicht parallel** — der Klient ist blockierend
+gebaut, parallel wäre eine *zweite* Abrufschicht, und der eigentliche
+Hebel ist HTTP/1.1-Keep-Alive, dem Parallelität hinterher im Weg stünde.
+Grenzen: 10 Blätter, 512 KiB je Blatt, 1,5 MiB gesamt, 8 s Frist,
+`@import` **eine Ebene tief** mit Schleifenschutz. **Ein Blatt, das nicht
+lädt, verhindert die Seite nicht** — es wird gezählt und in der
+Statuszeile genannt.
+
+**Kaskadiert wird genau einmal.** `Tab::inhalt_setzen` zerfällt in
+`dokument_setzen` (parsen — erst danach weiß man, welche Blätter die
+Seite will) und `stile_setzen` (holen, kaskadieren). Die Blätter werden
+danach fallengelassen; nur die Zahlen bleiben.
+
+**Zwei Befunde, die man nur durch Hinsehen findet.** Nach dem Holen
+blieben githubs Screenreader-Meldungen *trotz 4 678 geladener Regeln*
+stehen — sie hängen am HTML-Attribut **`hidden`**, nicht an einer Klasse.
+Dazu kam `<template>`, dessen Inhalt ein Bauplan für JavaScript ist und
+nie auf den Schirm gehört. Beides ist jetzt da; `hidden` ist
+ausdrücklich **keine** Aufweichung der Regel „keine Attributselektoren"
+(es ist eine Aussage der HTML-Spezifikation über das Element, kein Stil).
+
+**Neu in `browser --pruefen`:** `STIL_*` und — wichtiger — **`TEXT=`**,
+der sichtbare Text *aus der Anzeigeliste*. Erst damit ist „der
+Screenreader-Text ist verschwunden" eine prüfbare Aussage statt eines
+Bildschirmfotos.
+
+**Prüfstand:** `assets/testseiten/stiltest.*` — **selbst geschrieben,
+nicht geholt**, weil sich Reihenfolge, Grenzen, `@import`-Tiefe und
+Schleifenschutz an einer fremden Seite nicht festnageln lassen. Jeder
+Absatz trägt seinen Befund im Text (`REGEL-A SICHTBAR` …).
+
+**Tests:** 298 Host (speedcss 70, +14), 11 QEMU in `tests/browser.rs`
+(+3). `browser_rendern`, `browser_boesartig` und `browser_speicher`
+unverändert grün — 30 Sitzungen, Frames +0.
+
+**Die neue Reihenfolge der Fehlerursachen** (gemessen, nicht vermutet):
+1. kein `float`/`position`/Flexbox, 2. kein JavaScript, 3. `@media` wird
+übersprungen (lite.cnn.com: 199 KB CSS → 16 Regeln), 4. die
+Blätter-Obergrenze (github fordert 27 an, bekommt 10).
+
 ### SERIE-8-ABSCHLUSS: Angriffe, Zahlen, Grenzen, und die grosse Weiche
 
 **Der Realitäts-Bericht** ([`docs/browser-realitaet.md`](docs/browser-realitaet.md)):
