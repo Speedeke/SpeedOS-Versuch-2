@@ -45,7 +45,8 @@ pub use werte::kleinschreiben;
 pub use parser::{parsen, parsen_mit, Befund, Grenzen, Regel, Selektor, Spezifitaet, Stylesheet};
 pub use standard::STANDARD_CSS;
 pub use stil::{
-    Ausrichtung, Dekoration, Display, Familie, Kanten, Listenzeichen, RahmenStil, Stil, Vertikal,
+    Ausrichtung, Dekoration, Display, Familie, Kanten, Leerraum, Listenzeichen, RahmenStil, Stil,
+    Vertikal,
     Zeilenhoehe, ANFANG,
 };
 pub use werte::{Farbe, Laenge};
@@ -214,6 +215,105 @@ pub fn autor_stylesheet(dokument: &Dokument) -> Stylesheet {
         css.push('\n');
     }
     parser::parsen(&css)
+}
+
+/// **Was die Seite anfordert, das wir nicht koennen** — nach Haeufigkeit.
+///
+/// ===================================================================
+/// WOFUER ES DIESE FUNKTION GIBT
+///
+/// Serie 9, Teil 2 faengt mit einer Regel an: *nicht nach Gefuehl
+/// optimieren.* Nach dem Stylesheet-Fix sind die verbleibenden Maengel
+/// sichtbar, aber „sichtbar" heisst nicht „haeufig" — der auffaelligste
+/// Fehler und der haeufigste sind selten derselbe. Diese Funktion
+/// liefert die Zahl, an der sich die Auswahl entscheiden kann.
+///
+/// ===================================================================
+/// SIE BENUTZT `stil::bekannt` UND KEINE EIGENE LISTE
+///
+/// Das ist der ganze Trick. Eine zweite, hier gepflegte Liste
+/// unterstuetzter Eigenschaften waere ab der ersten Erweiterung falsch:
+/// Wer `position` einbaut und vergisst, es hier auszutragen, misst
+/// weiterhin einen Mangel, den es nicht mehr gibt — und optimiert
+/// zweimal dasselbe. So kann die Messung dem Code nicht davonlaufen.
+///
+/// ===================================================================
+/// GEZAEHLT WIRD JE DEKLARATION, NICHT JE ELEMENT — und das ist eine
+/// EHRLICHE NAEHERUNG, keine Messung der Wirkung
+///
+/// Wie oft eine Eigenschaft im Stylesheet STEHT, ist nicht dasselbe wie,
+/// auf wie viele Elemente sie WIRKEN wuerde: Eine Regel in einem nie
+/// passenden Selektor zaehlt hier mit, und ein einzelnes `position:
+/// fixed` auf der Kopfzeile zaehlt einfach, obwohl man es auf jedem
+/// Bildschirmfoto sieht.
+///
+/// Die Wirkung zu messen hiesse, fuer JEDES Element die Kandidaten zu
+/// bestimmen — also die Kaskade ein zweites Mal zu fahren. Bei github
+/// sind das 4 678 Regeln gegen ~5 000 Knoten; das kostet Sekunden und
+/// steht in keinem Verhaeltnis zu der Frage, die beantwortet werden
+/// soll („welche drei baue ich als naechstes?"). Wo die Naeherung
+/// traegt und wo nicht, gehoert in den Bericht — nicht in eine
+/// stillschweigend teurere Funktion.
+/// ===================================================================
+/// DREI SORTEN, DIE MAN NICHT IN EINEN TOPF WERFEN DARF
+///
+/// Die erste Fassung dieser Messung zaehlte alles zusammen — und lieferte
+/// fuer lite.cnn.com eine Liste aus `--primitive-border-01`,
+/// `--primitive-color-blue-100` und so weiter. Das sind keine
+/// Eigenschaften, die uns fehlen, das sind VARIABLEN; sie stehen fuer
+/// EIN fehlendes Feature (`var()`), nicht fuer zwoelf. Genauso sind
+/// `-webkit-transform` und `-moz-transform` keine zwei Luecken, sondern
+/// zweimal dieselbe.
+///
+/// Wer das zusammenzaehlt, bekommt ein Ranking, in dem die lauteste
+/// Seite gewinnt statt der haeufigsten Ursache — und optimiert danach.
+pub struct EigenschaftsBilanz {
+    /// Echte Standard-Eigenschaften, die wir nicht umsetzen — absteigend
+    /// nach Haeufigkeit.
+    pub unbekannt: Vec<(String, usize)>,
+    /// `--foo: …` — Deklarationen von CSS-Variablen.
+    pub variablen: usize,
+    /// `-webkit-…`, `-moz-…`, `-ms-…`, `-o-…` — Herstellerpraefixe.
+    pub praefixe: usize,
+}
+
+pub fn unbekannte_eigenschaften(blaetter: &[&Stylesheet]) -> EigenschaftsBilanz {
+    let mut aus: Vec<(String, usize)> = Vec::new();
+    let mut variablen = 0usize;
+    let mut praefixe = 0usize;
+    for blatt in blaetter {
+        for regel in &blatt.regeln {
+            for deklaration in &regel.deklarationen {
+                if stil::bekannt(&deklaration.name) {
+                    continue;
+                }
+                // Eine CSS-Variable faengt mit ZWEI Strichen an, ein
+                // Herstellerpraefix mit EINEM. Die Reihenfolge der beiden
+                // Pruefungen ist deshalb nicht beliebig.
+                if deklaration.name.starts_with("--") {
+                    variablen += 1;
+                    continue;
+                }
+                if deklaration.name.starts_with('-') {
+                    praefixe += 1;
+                    continue;
+                }
+                match aus.iter_mut().find(|(n, _)| n == &deklaration.name) {
+                    Some((_, anzahl)) => *anzahl += 1,
+                    None => aus.push((deklaration.name.clone(), 1)),
+                }
+            }
+        }
+    }
+    // Absteigend nach Haeufigkeit, bei Gleichstand alphabetisch — damit
+    // zwei Laeufe ueber dieselbe Seite dieselbe Liste ergeben. Eine
+    // Messung, deren Reihenfolge schwankt, laedt zum Rosinenpicken ein.
+    aus.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    EigenschaftsBilanz {
+        unbekannt: aus,
+        variablen,
+        praefixe,
+    }
 }
 
 /// Der bequeme Weg: Dokument hinein, Stil-Baum heraus.

@@ -154,10 +154,19 @@ a:visited { color: #551a8b; text-decoration: underline }
 /* ---------------------------------------------------------------
    Monospace
 
-   `white-space: pre` koennen wir nicht (es gehoert dem Layout, und
-   das gibt es noch nicht) — <pre> bekommt hier nur Schrift und
-   Abstaende. Der Zeilenumbruch von <pre> ist Sache des Renderers.
+   SEIT SERIE 9, TEIL 2 STEHT `white-space` HIER. Vorher konnten wir es
+   nicht, und der Kastenbaum entschied statt dessen am TAG-NAMEN, ob
+   Leerraum erhalten bleibt (`ist_vorformatiert` lief den Baum hoch und
+   suchte `pre`). Die dritte Messung hat gezeigt, dass die Eigenschaft
+   auf 4 von 10 Seiten steht — kein Einzelfall mehr, sondern
+   Alltags-CSS (vor allem `nowrap`).
+
+   Der Gewinn ist doppelt: `nowrap` wirkt jetzt ueberhaupt, UND eine
+   Autor-Regel `pre { white-space: normal }` kann den Standard schlagen.
+   Am Tag-Namen ging das nicht — dieselbe Bewegung wie ueberall in
+   dieser Datei.
    --------------------------------------------------------------- */
+pre, textarea { white-space: pre }
 pre { display: block; font-family: monospace; margin-top: 1em; margin-bottom: 1em }
 code, kbd, samp, tt { font-family: monospace }
 

@@ -79,6 +79,58 @@ pub enum Ausrichtung {
     Blocksatz,
 }
 
+/// `white-space` — wie mit Leerraum und Umbruch umgegangen wird.
+///
+/// ===================================================================
+/// WARUM DIESE EIGENSCHAFT IN SERIE 9, TEIL 2 DAZUKAM
+///
+/// Bis hierher entschied der TAG-NAME darueber, ob Leerraum erhalten
+/// bleibt (`kasten::ist_vorformatiert` lief den Baum hoch und suchte
+/// `<pre>`). Der Kommentar dort nannte den Grund ehrlich: `white-space`
+/// nur fuer diesen einen Fall aufzunehmen waere eine halbe Eigenschaft.
+///
+/// **Die Messung hat das widerlegt** (docs/browser-realitaet.md, dritte
+/// Messung): `white-space` steht auf 4 der 10 Seiten und insgesamt
+/// 110x. Es ist kein Einzelfall, sondern gehoert zum taeglichen CSS —
+/// vor allem `nowrap` auf Navigationsleisten und Tabellenzellen.
+///
+/// Damit faellt zugleich ein Hack weg: Der Tag-Name entscheidet nicht
+/// mehr, das Stylesheet tut es (`pre, textarea { white-space: pre }`
+/// steht jetzt im Standard-Blatt). Das ist dieselbe Bewegung wie beim
+/// Standard-Stylesheet ueberhaupt — `<h1>` ist nicht gross, WEIL es h1
+/// heisst, sondern weil eine Regel es sagt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Leerraum {
+    /// `normal` — Leerraum wird gefaltet, es wird umgebrochen.
+    Normal,
+    /// `nowrap` — gefaltet, aber KEIN automatischer Umbruch.
+    KeinUmbruch,
+    /// `pre` — jedes Zeichen zaehlt, kein automatischer Umbruch.
+    Vor,
+    /// `pre-wrap` — jedes Zeichen zaehlt, Umbruch erlaubt.
+    VorUmbruch,
+    /// `pre-line` — Leerraum gefaltet, aber `\n` bleibt ein Umbruch.
+    VorZeile,
+}
+
+impl Leerraum {
+    /// Bleibt der Leerraum, wie er im Dokument steht?
+    pub fn erhaelt_leerraum(self) -> bool {
+        matches!(self, Leerraum::Vor | Leerraum::VorUmbruch)
+    }
+    /// Darf am Zeilenende automatisch umgebrochen werden?
+    pub fn bricht_um(self) -> bool {
+        !matches!(self, Leerraum::KeinUmbruch | Leerraum::Vor)
+    }
+    /// Ist ein `\n` im Text ein erzwungener Umbruch?
+    pub fn zeilenumbruch_zaehlt(self) -> bool {
+        matches!(
+            self,
+            Leerraum::Vor | Leerraum::VorUmbruch | Leerraum::VorZeile
+        )
+    }
+}
+
 /// `font-family`, auf das abgebildet, was wir HABEN.
 ///
 /// EHRLICHE LAGE: SpeedOS hat genau EINE Schriftfamilie
@@ -190,6 +242,7 @@ pub struct Stil {
     pub ausrichtung: Ausrichtung,
     pub listenzeichen: Listenzeichen,
     pub dekoration: Dekoration,
+    pub leerraum: Leerraum,
     // --- nicht geerbt ---
     pub hintergrund: Farbe,
     pub margin: Kanten<Laenge>,
@@ -226,6 +279,7 @@ pub const ANFANG: Stil = Stil {
         durchgestrichen: false,
         ueberstrichen: false,
     },
+    leerraum: Leerraum::Normal,
     hintergrund: Farbe::DURCHSICHTIG,
     margin: Kanten::alle(Laenge::Px(0)),
     padding: Kanten::alle(Laenge::Px(0)),
@@ -277,6 +331,14 @@ impl Stil {
             ausrichtung: eltern.ausrichtung,
             listenzeichen: eltern.listenzeichen,
             dekoration: eltern.dekoration,
+            // ACHTUNG BEIM ERGAENZEN EINER GEERBTEN EIGENSCHAFT: Sie
+            // gehoert an DREI Stellen — in `erbt()` (das entscheidet nur
+            // ueber `unset`), in `global_setzen` (fuer `inherit`) und
+            // HIER. Nur diese Liste macht die Vererbung wirklich; die
+            // beiden anderen sahen bei `white-space` schon richtig aus,
+            // waehrend der Wert trotzdem nicht ankam
+            // (`test_white_space_wird_vererbt` hat es gefunden).
+            leerraum: eltern.leerraum,
             ..ANFANG
         }
     }
@@ -322,6 +384,7 @@ pub fn bekannt(name: &str) -> bool {
             | "text-align"
             | "text-decoration"
             | "text-decoration-line"
+            | "white-space"
             | "list-style-type"
             | "list-style"
             | "vertical-align"
@@ -368,6 +431,7 @@ pub fn erbt(name: &str) -> bool {
             | "list-style"
             | "text-decoration"
             | "text-decoration-line"
+            | "white-space"
     )
 }
 
@@ -470,6 +534,14 @@ pub fn anwenden(stil: &mut Stil, name: &str, wert_text: &str, eltern: &Stil) -> 
         },
         "font-family" => setze(&mut stil.familie, familie_waehlen(&wert)),
         "line-height" => zeilenhoehe_setzen(stil, &wert),
+        "white-space" => match wert.as_str() {
+            "normal" => setze(&mut stil.leerraum, Leerraum::Normal),
+            "nowrap" => setze(&mut stil.leerraum, Leerraum::KeinUmbruch),
+            "pre" => setze(&mut stil.leerraum, Leerraum::Vor),
+            "pre-wrap" | "break-spaces" => setze(&mut stil.leerraum, Leerraum::VorUmbruch),
+            "pre-line" => setze(&mut stil.leerraum, Leerraum::VorZeile),
+            _ => false,
+        },
         "text-align" => match wert.as_str() {
             "left" | "start" => setze(&mut stil.ausrichtung, Ausrichtung::Links),
             "center" => setze(&mut stil.ausrichtung, Ausrichtung::Mitte),
@@ -590,6 +662,7 @@ fn global_setzen(stil: &mut Stil, name: &str, quelle: &Stil) -> Ergebnis {
         "font-family" => stil.familie = quelle.familie,
         "line-height" => stil.zeilenhoehe = quelle.zeilenhoehe,
         "text-align" => stil.ausrichtung = quelle.ausrichtung,
+        "white-space" => stil.leerraum = quelle.leerraum,
         "text-decoration" | "text-decoration-line" => stil.dekoration = quelle.dekoration,
         "list-style-type" | "list-style" => stil.listenzeichen = quelle.listenzeichen,
         "vertical-align" => stil.vertikal = quelle.vertikal,
@@ -894,6 +967,7 @@ pub fn wert_als_text(stil: &Stil, name: &str) -> String {
             Zeilenhoehe::Laenge(l) => laenge(l),
         },
         "text-align" => format!("{:?}", stil.ausrichtung),
+        "white-space" => format!("{:?}", stil.leerraum),
         "text-decoration" => format!("{:?}", stil.dekoration),
         "list-style-type" => format!("{:?}", stil.listenzeichen),
         "vertical-align" => format!("{:?}", stil.vertikal),

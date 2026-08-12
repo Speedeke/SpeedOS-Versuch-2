@@ -145,10 +145,29 @@ pub(crate) fn zeilen_setzen(
             }
             Inhalt::Wort(wort) => {
                 let w = metrik.text_breite(wort, groesse, stueck.stil.fett, stueck.stil.kursiv);
-                if laufende_breite + w <= umbruch_breite || laufend.is_empty() {
+                // `white-space: nowrap` (Serie 9, Teil 2) — DIE ENTSCHEIDUNG
+                // FAELLT JE STUECK UND NICHT JE CONTAINER. Die Eigenschaft
+                // wird vererbt, also traegt jedes Stueck den Wert, der fuer
+                // SEIN Element gilt; ein `<span style="white-space:nowrap">`
+                // mitten in einem umbrechenden Absatz wirkt damit genau auf
+                // sich selbst. Am Container festgemacht waere es eine
+                // Eigenschaft des Absatzes, und das ist sie nicht.
+                //
+                // Die Folge ist ein UEBERLAUF, kein Abschneiden — dieselbe
+                // Haltung wie bei zu breitem Inhalt ueberhaupt (Serie 8,
+                // Teil 6): Stilles Abschneiden versteckt Text, und niemand
+                // sieht warum. Gezaehlt wird er trotzdem.
+                let bricht_um = stueck.stil.leerraum.bricht_um();
+                if laufende_breite + w <= umbruch_breite || laufend.is_empty() || !bricht_um {
                     // Passt — oder die Zeile ist leer, dann MUSS es hinein
                     // (sonst dreht sich die Schleife ewig).
-                    if laufend.is_empty() && w > umbruch_breite {
+                    if !bricht_um && laufende_breite + w > umbruch_breite {
+                        befund.ueberlaeufe += 1;
+                    }
+                    // HART GETRENNT WIRD BEI `nowrap` NICHT. Ein Wort, das
+                    // nicht umbrechen darf, darf erst recht nicht mitten
+                    // durchgeschnitten werden.
+                    if laufend.is_empty() && w > umbruch_breite && bricht_um {
                         // Ein einzelnes Wort, das breiter ist als die
                         // Zeile: HART TRENNEN. Eine lange URL ist der
                         // Normalfall dafuer, nicht die Ausnahme.
@@ -193,7 +212,8 @@ pub(crate) fn zeilen_setzen(
             }
             Inhalt::Kasten(k) => {
                 let w = k.masse.margin_box().breite;
-                if laufende_breite + w <= umbruch_breite || laufend.is_empty() {
+                let bricht_um = stueck.stil.leerraum.bricht_um();
+                if laufende_breite + w <= umbruch_breite || laufend.is_empty() || !bricht_um {
                     laufend.push((stueck, w));
                     laufende_breite += w;
                     i += 1;

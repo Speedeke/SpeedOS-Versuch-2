@@ -311,27 +311,6 @@ pub fn leerraum_falten(text: &str) -> String {
     aus
 }
 
-/// Ist dieses Element ein `<pre>`-artiges (Leerraum bleibt erhalten)?
-///
-/// Ueber den TAG-NAMEN und nicht ueber `white-space`: Die Eigenschaft
-/// steht nicht in unserer CSS-Teilmenge (docs/browser-v1.md §2.3), und
-/// sie nur fuer diesen einen Fall aufzunehmen waere eine halbe
-/// Eigenschaft. Der Tag-Name trifft dieselbe Menge Faelle.
-fn ist_vorformatiert(dokument: &Dokument, mut knoten: Option<KnotenId>) -> bool {
-    // Bis zu 32 Ebenen nach oben schauen — mehr braucht kein `<pre>`.
-    for _ in 0..32 {
-        let Some(id) = knoten else { return false };
-        let Some(k) = dokument.knoten(id) else {
-            return false;
-        };
-        if matches!(k.name(), Some("pre") | Some("textarea")) {
-            return true;
-        }
-        knoten = k.eltern;
-    }
-    false
-}
-
 // ---------------------------------------------------------------------------
 // DEN BAUM BAUEN
 // ---------------------------------------------------------------------------
@@ -369,7 +348,13 @@ fn kinder_bauen(
     let Some(knoten) = dokument.knoten(eltern) else {
         return aus;
     };
-    let vorformatiert = ist_vorformatiert(dokument, Some(eltern));
+    // DIE VERERBUNG ERLEDIGT DEN BAUMLAUF. Vorher lief hier
+    // `ist_vorformatiert` bis zu 32 Ebenen nach oben und suchte nach dem
+    // Tag-Namen `pre`; seit `white-space` eine echte Eigenschaft ist
+    // (Serie 9, Teil 2), steht die Antwort schon im berechneten Stil —
+    // `white-space` wird vererbt, also hat die Kaskade den Weg nach oben
+    // laengst gemacht. Eine Schleife weniger, und eine Autor-Regel wirkt.
+    let vorformatiert = stile.stil(eltern).leerraum.erhaelt_leerraum();
 
     for kind_id in &knoten.kinder {
         let Some(kind) = dokument.knoten(*kind_id) else {

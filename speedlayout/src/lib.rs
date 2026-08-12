@@ -36,8 +36,10 @@ pub mod attrappe;
 pub mod inline;
 pub mod kasten;
 pub mod layout;
+pub mod textkarte;
 
 pub use anzeige::{Befehl, Anzeigeliste};
+pub use textkarte::{Lauf, Stelle, Textkarte, Treffer};
 pub use kasten::{Kasten, KastenArt, Kanten, Masse, Rechteck};
 
 use alloc::string::String;

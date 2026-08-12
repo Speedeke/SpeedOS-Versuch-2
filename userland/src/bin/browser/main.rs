@@ -931,6 +931,28 @@ fn pruefmodus(b: &Browser) {
     // Zahl, an der man den Fix von Serie 9, Teil 1 sieht: Ohne externe
     // Blaetter ist sie auf fast jeder Seite 0, mit ihnen dreistellig.
     println!("STIL_VERSTECKT={}", versteckte_elemente(tab));
+    // WAS DIE SEITE ANFORDERT UND WIR NICHT KOENNEN — die Datengrundlage
+    // fuer die Frage „was baue ich als naechstes?". Eine Zeile, damit sie
+    // sich ueber zehn Seiten hinweg zusammenzaehlen laesst; Format
+    // `name:anzahl`, getrennt durch Leerzeichen.
+    {
+        let mut zeile = String::new();
+        for (name, anzahl) in &tab.stil_befund.unbekannt {
+            if !zeile.is_empty() {
+                zeile.push(' ');
+            }
+            zeile.push_str(&alloc::format!("{}:{}", name, anzahl));
+        }
+        println!(
+            "STIL_UNBEKANNT={}",
+            if zeile.is_empty() { "-" } else { &zeile }
+        );
+    }
+    // GETRENNT AUSGEWIESEN, nicht in die Rangliste gemischt: CSS-
+    // Variablen sind EIN fehlendes Feature (`var()`), und Praefixe sind
+    // Dubletten der Standard-Eigenschaft daneben.
+    println!("STIL_VARIABLEN={}", tab.stil_befund.variablen);
+    println!("STIL_PRAEFIXE={}", tab.stil_befund.praefixe);
     // WAS WIRKLICH DASTEHT. Die Zahl `BEFEHLE` sagt, wie VIEL gezeichnet
     // wurde; diese Zeile sagt, WAS — und erst damit laesst sich pruefen,
     // dass etwas WEG ist. „Der Screenreader-Text ist verschwunden" ist

@@ -1237,3 +1237,135 @@ fn text_y_von(liste: &crate::Anzeigeliste, gesucht: &str) -> i32 {
         })
         .unwrap_or_else(|| panic!("Text '{}' nicht gefunden", gesucht))
 }
+
+// ===========================================================================
+// TEXTKARTE: AUSWAHL UND SUCHE (Serie 9, Teil 2)
+//
+// Alle Zahlen hier sind KOPFRECHNUNG mit der Attrappe: 10 px je Zeichen
+// bei 16 px Schrift. Ein Test, dessen Erwartung aus dem Ergebnis
+// abgeschrieben ist, prueft nichts.
+// ===========================================================================
+
+use crate::textkarte::Textkarte;
+
+fn karte(html: &str, css: &str, breite: i32) -> (Textkarte, FesteMetrik) {
+    let metrik = FesteMetrik::neu();
+    let (_, liste) = seite_setzen(html, css, breite, &metrik);
+    (Textkarte::neu(&liste, &metrik), metrik)
+}
+
+/// Der Gesamttext haengt die Woerter mit Leerzeichen aneinander.
+#[test]
+fn test_textkarte_gesamttext() {
+    let (k, _) = karte("<p>Hallo schoene Welt</p>", "", 800);
+    assert_eq!(k.text(), "Hallo schoene Welt");
+}
+
+/// **Ein Treffer ueber die Wortgrenze hinweg.** Das ist der Fall, an dem
+/// eine Suche je Anzeige-Befehl scheitern wuerde: „Hallo" und „Welt"
+/// sind zwei Befehle.
+#[test]
+fn test_suche_ueber_wortgrenze() {
+    let (k, _) = karte("<p>Hallo schoene Welt</p>", "", 800);
+    let treffer = k.suchen("schoene Welt");
+    assert_eq!(treffer.len(), 1, "der Ausdruck steht ueber zwei Befehle");
+    assert_eq!(k.text_zwischen(treffer[0].von, treffer[0].bis), "schoene Welt");
+}
+
+/// **Ein Treffer ueber eine INLINE-Grenze hinweg**, also ohne
+/// Leerzeichen. `<b>Rust</b>aceans` sind zwei Laeufe, die unmittelbar
+/// aneinanderstossen — dort darf KEIN Trennzeichen eingefuegt werden,
+/// sonst ist „Rustaceans" unauffindbar, obwohl es so auf dem Schirm
+/// steht.
+#[test]
+fn test_suche_ueber_inline_grenze() {
+    let (k, _) = karte("<p><b>Rust</b>aceans</p>", "", 800);
+    assert_eq!(k.text(), "Rustaceans", "kein Leerzeichen an der Inline-Naht");
+    assert_eq!(k.suchen("Rustaceans").len(), 1);
+}
+
+/// Gross/Klein wird ignoriert — auch bei Umlauten. Ein ASCII-Vergleich
+/// wuerde „UEBER" finden und „ÜBER" nicht.
+#[test]
+fn test_suche_ignoriert_gross_klein_mit_umlauten() {
+    let (k, _) = karte("<p>Über Öl und Äpfel</p>", "", 800);
+    assert_eq!(k.suchen("über").len(), 1, "Ü gegen ü");
+    assert_eq!(k.suchen("ÖL").len(), 1, "Ö gegen ö");
+    assert_eq!(k.suchen("äPFEL").len(), 1);
+}
+
+/// Treffer ueberlappen nicht: „aa" in „aaaa" sind ZWEI Treffer, nicht
+/// drei. Sonst rueckt „weiter suchen" um ein Zeichen statt
+/// voranzukommen.
+#[test]
+fn test_suche_ueberlappt_nicht() {
+    let (k, _) = karte("<p>aaaa</p>", "", 800);
+    assert_eq!(k.suchen("aa").len(), 2);
+}
+
+/// Eine leere Nadel findet nichts (und haengt nicht).
+#[test]
+fn test_suche_leer() {
+    let (k, _) = karte("<p>Text</p>", "", 800);
+    assert!(k.suchen("").is_empty());
+    assert!(k.suchen("Textttt").is_empty(), "laenger als der Text");
+}
+
+/// Umlaute werden in ZEICHEN gezaehlt, nicht in Bytes. „Grüße" hat fuenf
+/// Zeichen und sieben Bytes — wer in Bytes rechnet, waehlt hier falsch
+/// aus und schneidet im schlimmsten Fall mitten in ein Zeichen.
+#[test]
+fn test_auswahl_zaehlt_zeichen_nicht_bytes() {
+    let (k, _) = karte("<p>Grüße Welt</p>", "", 800);
+    assert_eq!(k.text_zwischen(0, 5), "Grüße");
+    assert_eq!(k.text_zwischen(6, 10), "Welt");
+}
+
+/// Rueckwaerts ausgewaehlt ist dasselbe wie vorwaerts.
+#[test]
+fn test_auswahl_richtungsunabhaengig() {
+    let (k, _) = karte("<p>Hallo Welt</p>", "", 800);
+    assert_eq!(k.text_zwischen(6, 10), k.text_zwischen(10, 6));
+}
+
+/// Ein Klick trifft die Zeichengrenze, an der er am naechsten ist:
+/// linke Haelfte -> davor, rechte Haelfte -> dahinter. Bei 10 px je
+/// Zeichen liegt die Mitte des ersten Zeichens bei x=5.
+#[test]
+fn test_auswahl_rundet_zur_naechsten_zeichengrenze() {
+    let (k, m) = karte("<p>Hallo</p>", "body,p{margin:0;padding:0}", 800);
+    let y = 8; // irgendwo in der ersten Zeile
+    assert_eq!(k.stelle_bei(0, y, &m), 0, "ganz links");
+    assert_eq!(k.stelle_bei(4, y, &m), 0, "linke Haelfte des ersten Zeichens");
+    assert_eq!(k.stelle_bei(6, y, &m), 1, "rechte Haelfte -> dahinter");
+    assert_eq!(k.stelle_bei(14, y, &m), 1, "linke Haelfte des zweiten");
+}
+
+/// Rechts neben das Zeilenende geklickt heisst: ans Zeilenende. Es gibt
+/// IMMER eine Antwort, sonst haette jede Auswahl Loecher.
+#[test]
+fn test_auswahl_hinter_dem_zeilenende() {
+    let (k, m) = karte("<p>Hallo</p>", "body,p{margin:0;padding:0}", 800);
+    assert_eq!(k.stelle_bei(9999, 8, &m), 5, "hinter das letzte Zeichen");
+}
+
+/// **Eine Auswahl ueber zwei Zeilen ergibt zwei Rechtecke.** Ein
+/// einzelnes umschliessendes Rechteck waere falsch — es faerbte auch
+/// den Rand rechts und links mit.
+#[test]
+fn test_auswahl_ueber_zwei_zeilen_gibt_zwei_rechtecke() {
+    // 70 px Breite = 7 Zeichen je Zeile: „aaa" und „bbb" landen
+    // untereinander (aaa + Leerzeichen + bbb = 7 Zeichen passt genau,
+    // deshalb hier enger).
+    let (k, m) = karte("<p>aaa bbb</p>", "body,p{margin:0;padding:0;width:40px}", 40);
+    let rechtecke = k.rechtecke(0, k.len(), &m);
+    assert_eq!(rechtecke.len(), 2, "je Zeile ein Rechteck: {:?}", rechtecke);
+    assert_ne!(rechtecke[0].y, rechtecke[1].y, "sie liegen untereinander");
+}
+
+/// Eine leere Auswahl bedeckt nichts.
+#[test]
+fn test_auswahl_leer_ergibt_keine_rechtecke() {
+    let (k, m) = karte("<p>Hallo</p>", "", 800);
+    assert!(k.rechtecke(3, 3, &m).is_empty());
+}

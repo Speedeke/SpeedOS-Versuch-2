@@ -165,11 +165,37 @@ pub struct StilBefund {
     pub bytes: usize,
     pub regeln: usize,
     pub meldung: Option<String>,
+    /// Welche Eigenschaften die Seite anfordert, die wir nicht koennen —
+    /// absteigend nach Haeufigkeit, gekuerzt auf die groessten Posten.
+    ///
+    /// **Das ist die Datengrundlage von Serie 9, Teil 2.** Sie steht hier
+    /// und nicht in einem Extra-Werkzeug, weil sie sonst nur dann
+    /// entstuende, wenn jemand eigens danach fragt — und dann misst man
+    /// die Seite, die man ohnehin verdaechtigt. So faellt sie bei JEDEM
+    /// `--pruefen` mit an, auch bei den zehn Seiten des
+    /// Realitaets-Berichts.
+    pub unbekannt: Vec<(String, usize)>,
+    /// Deklarationen von CSS-Variablen (`--foo: …`). **Eine** Luecke
+    /// (`var()`), nicht so viele, wie die Seite Variablen hat.
+    pub variablen: usize,
+    /// Deklarationen mit Herstellerpraefix — per Definition Dubletten.
+    pub praefixe: usize,
 }
 
 impl Stilquellen {
     /// Die Zahlen, die den Kaskaden-Lauf ueberleben.
     pub fn befund(&self) -> StilBefund {
+        // GEZAEHLT WIRD HIER, weil es der letzte Ort ist, an dem die
+        // Blaetter noch leben — direkt danach werden sie fallengelassen.
+        let blaetter: Vec<&Stylesheet> = self.blaetter.iter().collect();
+        let bilanz = speedcss::unbekannte_eigenschaften(&blaetter);
+        // GEKUERZT AUF 40, NICHT AUF 12. Die erste Fassung nahm zwoelf —
+        // und schnitt damit auf jeder grossen Seite genau die Haelfte
+        // weg, die man fuer eine Rangliste braucht. Eine Messung, die je
+        // Seite nur die Spitze zeigt, summiert sich ueber zehn Seiten zu
+        // einer Rangliste der SPITZEN, nicht der Haeufigkeiten.
+        let mut unbekannt = bilanz.unbekannt;
+        unbekannt.truncate(40);
         StilBefund {
             inline_blaetter: self.blaetter.len() - self.extern_geladen - self.importe_geladen,
             extern_versucht: self.extern_versucht,
@@ -182,6 +208,9 @@ impl Stilquellen {
             bytes: self.bytes,
             regeln: self.regeln,
             meldung: self.meldung.clone(),
+            unbekannt,
+            variablen: bilanz.variablen,
+            praefixe: bilanz.praefixe,
         }
     }
 

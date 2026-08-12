@@ -278,6 +278,12 @@ fn bericht_zehn_echte_seiten() {
     let mut lesbar = 0;
     let mut teilweise = 0;
     let mut unbrauchbar = 0;
+    // DIE AGGREGATION FUER AUFGABE 1 (Serie 9, Teil 2). Je Eigenschaft:
+    // wie oft insgesamt, und auf WIE VIELEN der zehn Seiten. Die zweite
+    // Zahl ist die wichtigere — „steht 400x auf einer einzigen Seite"
+    // und „steht auf neun von zehn Seiten" sind voellig verschiedene
+    // Befunde, und nur der zweite rechtfertigt Arbeit am Renderer.
+    let mut gesamt: Vec<(String, usize, usize)> = Vec::new();
 
     for (adresse, name) in SEITEN {
         let (ende, ausgabe, dauer) = browser_pruefen(adresse);
@@ -346,6 +352,25 @@ fn bericht_zehn_echte_seiten() {
         // Dieselbe Regel wie bei `text_breite` (chars, nie len).
         let kurz: String = text.chars().take(160).collect();
         serial_println!("[REALITAET]   Text: {}", kurz);
+        // Die nicht unterstuetzten Eigenschaften dieser Seite einsammeln.
+        // Format der Zeile: `name:anzahl name:anzahl …`, `-` = keine.
+        let unbekannt = feld(&ausgabe, "STIL_UNBEKANNT=");
+        if unbekannt != "-" && !unbekannt.is_empty() {
+            serial_println!("[REALITAET]   Fehlt: {}", unbekannt);
+            for stueck in unbekannt.split(' ') {
+                let Some((name, anzahl_text)) = stueck.rsplit_once(':') else {
+                    continue;
+                };
+                let anzahl: usize = anzahl_text.parse().unwrap_or(0);
+                match gesamt.iter_mut().find(|(n, _, _)| n == name) {
+                    Some((_, summe, seiten)) => {
+                        *summe += anzahl;
+                        *seiten += 1;
+                    }
+                    None => gesamt.push((String::from(name), anzahl, 1)),
+                }
+            }
+        }
         scheduler::aufraeumen();
     }
 
@@ -357,6 +382,26 @@ fn bericht_zehn_echte_seiten() {
         unbrauchbar,
         SEITEN.len()
     );
+
+    // ===================================================================
+    // AUFGABE 1: DIE VERBLEIBENDEN URSACHEN NACH HAEUFIGKEIT
+    //
+    // Sortiert nach der ZAHL DER SEITEN, nicht nach der Gesamtzahl der
+    // Deklarationen. Begruendung steht bei `gesamt`: Eine Eigenschaft,
+    // die auf einer einzigen Seite vierhundertmal vorkommt, ist eine
+    // Eigenheit dieser Seite; eine, die auf neun von zehn Seiten steht,
+    // ist eine Eigenschaft des Webs.
+    gesamt.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| b.1.cmp(&a.1)).then_with(|| a.0.cmp(&b.0)));
+    serial_println!("");
+    serial_println!("[REALITAET] NICHT UNTERSTUETZTE EIGENSCHAFTEN (Seiten / gesamt):");
+    for (name, summe, seiten) in gesamt.iter().take(25) {
+        serial_println!(
+            "[REALITAET]   {:>2}/10 Seiten  {:>5}x  {}",
+            seiten,
+            summe,
+            name
+        );
+    }
 
     // DIE EINZIGE ZUSAGE dieses Berichts: Nach zehn fremden Seiten laeuft
     // das System noch. Was die Server geantwortet haben, ist Bericht —

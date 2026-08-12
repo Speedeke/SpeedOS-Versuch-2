@@ -1389,3 +1389,63 @@ fn test_display_none_aus_externem_blatt() {
     assert_eq!(baum.stil(versteckt).display, Display::Keine);
     assert_eq!(baum.stil(sichtbar).display, Display::Block);
 }
+
+// ===========================================================================
+// white-space (Serie 9, Teil 2)
+// ===========================================================================
+
+/// Die fuenf Werte werden erkannt.
+#[test]
+fn test_white_space_werte() {
+    use crate::stil::Leerraum;
+    let faelle = [
+        ("normal", Leerraum::Normal),
+        ("nowrap", Leerraum::KeinUmbruch),
+        ("pre", Leerraum::Vor),
+        ("pre-wrap", Leerraum::VorUmbruch),
+        ("pre-line", Leerraum::VorZeile),
+    ];
+    for (text, erwartet) in faelle {
+        let css = alloc::format!("p {{ white-space: {} }}", text);
+        let (dokument, baum) = rechnen("<p>x</p>", &css);
+        assert_eq!(
+            stil_von(&dokument, &baum, "p").leerraum,
+            erwartet,
+            "white-space: {}",
+            text
+        );
+    }
+}
+
+/// `white-space` WIRD VERERBT. Genau davon lebt die Umstellung im
+/// Layout: Der Kastenbaum fragt nur noch den berechneten Stil, statt den
+/// Baum nach einem `<pre>`-Vorfahren abzusuchen.
+#[test]
+fn test_white_space_wird_vererbt() {
+    use crate::stil::Leerraum;
+    let (dokument, baum) = rechnen("<div><span>x</span></div>", "div { white-space: nowrap }");
+    assert_eq!(
+        stil_von(&dokument, &baum, "span").leerraum,
+        Leerraum::KeinUmbruch
+    );
+}
+
+/// Das Standard-Stylesheet macht `<pre>` vorformatiert — und eine
+/// Autor-Regel kann es UEBERSTIMMEN. Am Tag-Namen ging das nicht; das
+/// ist der eigentliche Gewinn der Umstellung.
+#[test]
+fn test_autor_regel_schlaegt_pre_standard() {
+    use crate::stil::Leerraum;
+    let (dokument, baum) = rechnen("<pre>x</pre>", "");
+    assert_eq!(
+        stil_von(&dokument, &baum, "pre").leerraum,
+        Leerraum::Vor,
+        "Standard macht pre vorformatiert"
+    );
+    let (dokument, baum) = rechnen("<pre>x</pre>", "pre { white-space: normal }");
+    assert_eq!(
+        stil_von(&dokument, &baum, "pre").leerraum,
+        Leerraum::Normal,
+        "Autor schlaegt Standard"
+    );
+}
