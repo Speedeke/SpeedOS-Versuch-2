@@ -305,14 +305,28 @@ In QEMU antwortet alles sofort, deshalb war es dort unsichtbar. Auf
 echter Hardware gibt es Hubs und Ports, die Ereignisse melden, ohne
 dass ein brauchbares Gerät dranhängt.
 
-Behoben:
+**Der erste Behebungsversuch war falsch und machte alles schlimmer.**
+Er kürzte die Fristen auf 50 ms. Das half dem Executor — und liess die
+Aufzählung auf echter Hardware **scheitern**, weil dieselben Fristen
+auch beim Booten gelten. Ohne PS/2 hatte der Rechner danach überhaupt
+keine Eingabe mehr. Aus „zäh" wurde „tot".
 
-* Fristen auf das, was die Spezifikation wirklich verlangt: Kommando
-  und Transfer 50 ms, Port-Reset 120 ms (statt 1000/1000/500).
-* **Höchstens eine Aufzählung je Poll-Durchgang.** Ein Schwall von
-  Port-Ereignissen darf sich nicht zu einer Kette summieren; der Rest
-  wird zurückgestellt (nicht verworfen) und kommt 8 ms später dran.
+Die Einsicht, die vorher fehlte: **Es gibt zwei Aufrufpfade mit
+gegensätzlichen Anforderungen.**
 
-Lieber eine Aufzählung abbrechen als das System anhalten: Ein Gerät,
-das zu langsam antwortet, wird beim nächsten Steckereignis erneut
-versucht. Ein eingefrorener Rechner nicht.
+* **Beim Booten** läuft noch kein Executor. Blockieren ist dort völlig
+  in Ordnung; es zählt nur, dass langsame Hardware genug Zeit bekommt.
+* **Zur Laufzeit** hält jede Millisekunde alles andere an. Dort zählt,
+  dass es *nicht wiederholt* passiert.
+
+Richtig behoben:
+
+* **Fristen bleiben großzügig** (500 ms) — Hardware braucht sie.
+* **Höchstens eine Aufzählung je Poll-Durchgang**; der Rest wird
+  zurückgestellt, nicht verworfen.
+* **Ein Port, an dem die Aufzählung scheitert, wird nicht erneut
+  versucht**, bis er wirklich getrennt und neu angesteckt wurde. Damit
+  kostet ein hängender Port *eine* Pause — einmal, nicht alle 8 ms.
+
+Das ist der Punkt, an dem das Problem gar nicht erst entsteht: nicht
+eine kürzere Pause, sondern keine Wiederholung.

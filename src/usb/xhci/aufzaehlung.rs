@@ -65,7 +65,7 @@ const TRANSFER_RING_TRBS: u32 = 64;
 const TRB_LINK: u32 = 6;
 
 // ===========================================================================
-// DIE FRISTEN — und warum sie KURZ sein muessen
+// DIE FRISTEN — und warum sie GROSSZUEGIG BLEIBEN MUESSEN
 //
 // Hier standen einmal 1 000 000 us (eine Sekunde) je Kommando. Das war
 // „grosszuegig gegen Haenger" gedacht und hat auf dem Laptop das
@@ -86,18 +86,29 @@ const TRB_LINK: u32 = 6;
 // Ereignisse melden, ohne dass ein brauchbares Geraet dranhaengt, friert
 // die Maschine ein.
 //
-// Die Werte orientieren sich jetzt an dem, was die Spezifikation
-// wirklich verlangt, nicht an „lieber zu viel":
-//   * Ein Kommando quittiert der Controller in Mikrosekunden.
-//   * Ein Control-Transfer ist nach wenigen Millisekunden durch.
-//   * Ein Port-Reset dauert laut Spezifikation rund 50 ms.
+// DER ERSTE VERSUCH, DAS ZU BEHEBEN, WAR FALSCH UND HAT ALLES ZERSTOERT:
+// Die Fristen wurden auf 50 ms gekuerzt. Das half dem Executor — und
+// liess die Aufzaehlung auf echter Hardware SCHEITERN, weil dieselben
+// Fristen auch BEIM BOOTEN gelten. Ohne PS/2 hatte der Rechner danach
+// ueberhaupt keine Eingabe mehr. Aus „zaeh" wurde „tot".
 //
-// LIEBER EINE AUFZAEHLUNG ABBRECHEN ALS DAS SYSTEM ANHALTEN: Ein
-// Geraet, das zu langsam antwortet, wird beim naechsten Steckereignis
-// erneut versucht. Ein eingefrorener Rechner nicht.
-const FRIST_KOMMANDO_US: u64 = 50_000;
-const FRIST_TRANSFER_US: u64 = 50_000;
-const FRIST_PORT_RESET_US: u64 = 120_000;
+// DIE EINSICHT, die vorher fehlte: Es gibt ZWEI Aufrufpfade, und sie
+// haben GEGENSAETZLICHE Anforderungen.
+//
+//   * BEIM BOOTEN (`starten`) laeuft noch kein Executor. Blockieren ist
+//     dort voellig in Ordnung — es gibt niemanden, den man aufhaelt.
+//     Hier zaehlt nur, dass langsame Hardware genug Zeit bekommt.
+//   * ZUR LAUFZEIT (`usb_task`) haelt jede Millisekunde alles andere
+//     an. Hier zaehlt, dass es NICHT WIEDERHOLT passiert.
+//
+// Deshalb bleiben die Fristen grosszuegig (Hardware braucht sie), und
+// das Laufzeit-Problem wird an seiner Wurzel geloest: Eine Aufzaehlung,
+// die gescheitert ist, wird NICHT WIEDERHOLT, solange sich am Port
+// nichts aendert (siehe `fehlgeschlagene_ports` in mod.rs). Ein
+// haengender Port kostet damit EINE Pause — einmal, nicht alle 8 ms.
+const FRIST_KOMMANDO_US: u64 = 500_000;
+const FRIST_TRANSFER_US: u64 = 500_000;
+const FRIST_PORT_RESET_US: u64 = 500_000;
 
 /// Wie viele Aufzaehlungen HOECHSTENS je Poll-Durchgang laufen.
 ///

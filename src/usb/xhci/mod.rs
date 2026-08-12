@@ -253,6 +253,28 @@ pub struct Controller {
     /// verarbeitet — das Nachlegen des naechsten Transfers laeuft sonst
     /// aus der Pumpe heraus in sie selbst zurueck.
     hid_warteschlange: Vec<(u8, u8)>,
+    /// Ports, an denen die Aufzaehlung gescheitert ist.
+    ///
+    /// ===================================================================
+    /// DAMIT DAS PROBLEM GAR NICHT ERST AUFTRITT
+    ///
+    /// Eine Aufzaehlung blockiert den kooperativen Executor, solange sie
+    /// laeuft — das ist unvermeidlich, denn sie muss auf die Hardware
+    /// warten, und die Fristen muessen grosszuegig sein (langsame
+    /// Geraete). Ertraeglich ist das genau dann, wenn es EINMAL
+    /// passiert.
+    ///
+    /// Toedlich wurde es dadurch, dass ein Port, an dem die Aufzaehlung
+    /// scheitert, bei JEDEM Poll-Durchgang erneut versucht wurde: alle
+    /// 8 ms eine Pause von mehreren hundert Millisekunden. Das ist kein
+    /// zaehes System mehr, das ist ein stehendes.
+    ///
+    /// Ein gescheiterter Port kommt deshalb hier hinein und wird erst
+    /// wieder versucht, wenn er WIRKLICH etwas Neues meldet — also
+    /// nachdem er getrennt war. Kein Zeitgeber, keine Wiederholzahl:
+    /// Der einzige Grund, es noch einmal zu versuchen, ist ein Geraet,
+    /// das neu ansteckt.
+    fehlgeschlagene_ports: Vec<u8>,
 
     /// Die zuletzt gesehenen Port-Zustaende — fuer `usb` und um
     /// Aenderungen zu erkennen.
@@ -659,6 +681,7 @@ fn starten() -> Result<(), XhciFehler> {
         letzter_transfer: None,
         port_warteschlange: Vec::new(),
         hid_warteschlange: Vec::new(),
+        fehlgeschlagene_ports: Vec::new(),
         ports,
         speicher,
     };
@@ -998,6 +1021,12 @@ impl Controller {
         let bekannte = crate::usb::geraet::slots_an_port(port);
 
         if zustand.angeschlossen && bekannte.is_empty() {
+            // SCHON EINMAL GESCHEITERT? Dann nicht schon wieder — jeder
+            // Versuch haelt den ganzen Rechner an (siehe
+            // `fehlgeschlagene_ports`).
+            if self.fehlgeschlagene_ports.contains(&port) {
+                return;
+            }
             // NEU EINGESTECKT.
             match self.geraet_aufzaehlen(port) {
                 Ok(slot) => serial_println!(
@@ -1006,13 +1035,27 @@ impl Controller {
                     slot,
                     crate::usb::geraet::anzahl()
                 ),
-                Err(fehler) => serial_println!(
-                    "[xhci] Port {}: Aufzaehlung fehlgeschlagen — {}",
-                    port,
-                    fehler.text()
-                ),
+                Err(fehler) => {
+                    // MERKEN. Ohne das wiederholt sich der Versuch bei
+                    // jedem Poll-Durchgang, und jeder davon haelt das
+                    // System fuer Hunderte von Millisekunden an.
+                    self.fehlgeschlagene_ports.push(port);
+                    serial_println!(
+                        "[xhci] Port {}: Aufzaehlung fehlgeschlagen — {}. \
+                         Wird erst nach erneutem Anstecken wieder versucht.",
+                        port,
+                        fehler.text()
+                    );
+                }
             }
-        } else if !zustand.angeschlossen && !bekannte.is_empty() {
+        } else if !zustand.angeschlossen {
+            // GETRENNT: Die Sperre faellt — beim naechsten Anstecken
+            // darf es wieder versucht werden. Das ist der EINZIGE Weg
+            // zurueck, und zwar mit Absicht: Ein Geraet, das einmal
+            // nicht wollte, will beim blossen Nachfragen auch nicht.
+            self.fehlgeschlagene_ports.retain(|p| *p != port);
+        }
+        if !zustand.angeschlossen && !bekannte.is_empty() {
             // ABGEZOGEN — jeder Slot dieses Ports wird abgeraeumt.
             for slot in bekannte {
                 self.geraet_entfernen(slot);
