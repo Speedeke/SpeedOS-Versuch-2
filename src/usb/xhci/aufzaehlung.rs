@@ -162,6 +162,14 @@ pub struct SlotRessourcen {
     pub hid_puffer_phys: PhysAddr,
     /// Wie viele Byte ein Report hat.
     pub hid_bytes: u16,
+    /// Welcher Puffer-Platz als naechstes gelesen wird.
+    ///
+    /// Es sind MEHRERE Uebertragungen gleichzeitig unterwegs (siehe
+    /// `HID_UEBERTRAGUNGEN`), jede mit ihrem eigenen Platz. Der
+    /// Controller arbeitet sie in Ring-Reihenfolge ab — deshalb genuegt
+    /// ein umlaufender Zaehler, um zu wissen, welcher Platz gerade
+    /// fertig geworden ist.
+    pub hid_naechster: u8,
     /// Der Tastatur-Zustand (Dauerfeuer, letzte Tasten).
     pub tastatur: crate::usb::hid::TastaturZustand,
 }
@@ -455,6 +463,7 @@ impl Controller {
             hid_puffer: VirtAddr::new(0),
             hid_puffer_phys: PhysAddr::new(0),
             hid_bytes: 0,
+            hid_naechster: 0,
             tastatur: crate::usb::hid::TastaturZustand::default(),
         })
     }
@@ -1021,6 +1030,33 @@ fn standard_paket0(tempo: Tempo) -> u16 {
 /// Der TRB-Typ „Normal" — ein gewoehnlicher Datentransfer.
 const TRB_NORMAL: u32 = 1;
 
+/// Wie viele HID-Uebertragungen GLEICHZEITIG unterwegs sind.
+///
+/// ===================================================================
+/// WARUM NICHT EINE — der Grund, warum die Maus ruckelte
+///
+/// Ein Interrupt-Endpunkt liefert nur, solange ein TRB im Ring steht.
+/// Die erste Fassung stellte GENAU EINEN ein und legte den naechsten
+/// erst nach, wenn der Poll-Task den Bericht verarbeitet hatte.
+///
+/// Damit stand zwischen zwei Berichten gar kein TRB im Ring: Der
+/// Controller KONNTE das Geraet nicht abfragen, auch wenn es laut
+/// seinem `bInterval` alle 1 ms gedurft haette. Die Maus lief also
+/// nicht mit ihrer eigenen Rate, sondern mit unserer Task-Rate von
+/// 8 ms — plus der Schwankung, die dadurch entsteht, dass der Task mal
+/// frueher und mal spaeter drankommt. Genau das fuehlt sich ruckelig
+/// an, und zwar unabhaengig davon, wie schnell der Rechner ist.
+///
+/// Mit acht offenen Uebertragungen fragt der Controller das Geraet
+/// DURCHGEHEND in seinem eigenen Takt ab und legt die Berichte der
+/// Reihe nach ab. Unser Task holt sie dann gebuendelt ab — die
+/// Bewegung ist vollstaendig und gleichmaessig, statt auf ein Paket je
+/// 8 ms beschnitten zu sein.
+///
+/// Acht Plaetze a hoechstens 64 Byte sind 512 Byte und passen bequem
+/// in die eine Seite, die ohnehin fuer den Puffer alloziert wird.
+pub const HID_UEBERTRAGUNGEN: u8 = 8;
+
 impl Controller {
     /// Ein HID-Geraet in Betrieb nehmen: Boot Protocol setzen und den
     /// ersten Transfer einstellen.
@@ -1088,7 +1124,11 @@ impl Controller {
             res.hid_dci,
             res.hid_bytes
         );
-        self.hid_transfer_einstellen(res);
+        // ALLE Uebertragungen auf einmal einstellen. Ab jetzt fragt der
+        // Controller das Geraet durchgehend ab, ohne auf uns zu warten.
+        for platz in 0..HID_UEBERTRAGUNGEN {
+            self.hid_transfer_einstellen(res, platz);
+        }
     }
 
     /// Einen Normal-TRB auf dem Interrupt-Endpunkt einstellen.
@@ -1103,7 +1143,7 @@ impl Controller {
     /// Das ist der Unterschied zu einem IRQ-Geraet, und es ist die
     /// Stelle, an der eine Tastatur nach dem ersten Tastendruck
     /// verstummt, wenn man es vergisst.
-    pub(super) fn hid_transfer_einstellen(&mut self, res: &mut SlotRessourcen) {
+    pub(super) fn hid_transfer_einstellen(&mut self, res: &mut SlotRessourcen, platz: u8) {
         if res.hid_dci == 0 {
             return;
         }
@@ -1116,7 +1156,10 @@ impl Controller {
         };
         let index = stand.index;
         let cycle = stand.cycle;
-        let ziel = res.hid_puffer_phys.as_u64();
+        // JEDE Uebertragung bekommt ihren EIGENEN Platz — sonst
+        // ueberschreiben sich die Berichte gegenseitig, sobald mehrere
+        // gleichzeitig unterwegs sind.
+        let ziel = res.hid_puffer_phys.as_u64() + (platz as u64) * res.hid_bytes as u64;
         // SAFETY: index < nutzbare Ringgroesse, der Ring ist eine Seite.
         unsafe {
             let z = (ring.as_u64() + index as u64 * TRB_BYTES as u64) as *mut u32;
@@ -1169,7 +1212,11 @@ impl Controller {
         }
         let jetzt = crate::zeit::ms_seit_boot();
         let bytes = self.slots[pos].hid_bytes as usize;
-        let puffer = self.slots[pos].hid_puffer;
+        // DER PLATZ, DER GERADE FERTIG GEWORDEN IST. Die Uebertragungen
+        // werden in Ring-Reihenfolge abgearbeitet — ein umlaufender
+        // Zaehler genuegt.
+        let platz = self.slots[pos].hid_naechster;
+        let puffer = self.slots[pos].hid_puffer + (platz as u64) * bytes as u64;
         // SAFETY: `puffer` ist eine von uns allozierte Seite,
         // `bytes` <= 64.
         let daten: Vec<u8> = (0..bytes)
@@ -1195,8 +1242,12 @@ impl Controller {
         }
 
         // DEN NAECHSTEN TRANSFER NACHLEGEN — sonst verstummt das Geraet.
+        // DEN VERBRAUCHTEN PLATZ WIEDER EINSTELLEN — sonst laufen die
+        // offenen Uebertragungen nach und nach aus, und am Ende steht
+        // wieder keine im Ring.
+        self.slots[pos].hid_naechster = (platz + 1) % HID_UEBERTRAGUNGEN;
         let mut res = self.slots.swap_remove(pos);
-        self.hid_transfer_einstellen(&mut res);
+        self.hid_transfer_einstellen(&mut res, platz);
         self.slots.push(res);
     }
 
