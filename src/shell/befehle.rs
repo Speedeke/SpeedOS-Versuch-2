@@ -844,8 +844,12 @@ impl Befehl for Usb {
                 controller.diagnose();
             }
             println!("");
-            println!("Hinweis: Dieser Schritt laesst den Controller nur LAUFEN.");
-            println!("Geraete werden noch nicht angesprochen (docs/xhci.md).");
+            let eingabe = crate::usb::eingabe_vorhanden();
+            println!(
+                "Eingabe ueber USB: {}",
+                if eingabe { "AKTIV" } else { "keine (HID Boot) gefunden" }
+            );
+            println!("Grenzen: nur HID Boot Protocol, keine Hubs (docs/grenzen.md).");
             if !roh {
                 println!("`usb --roh` schreibt Interrupter und Event Ring ins Protokoll.");
             }

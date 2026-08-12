@@ -8,4 +8,29 @@
 
 pub mod deskriptor;
 pub mod geraet;
+pub mod hid;
 pub mod xhci;
+
+/// Liefert USB gerade Eingaben?
+///
+/// ===================================================================
+/// DIE FRAGE, DIE SEIT SERIE 4 OFFEN WAR
+///
+/// `framebuffer::meldung_zeigen("keine PS/2-Eingabe gefunden")` stand
+/// bis hierher auf JEDEM Rechner ohne 8042 — auch auf einem, dessen
+/// USB-Tastatur tadellos funktioniert. Ab jetzt ist die Meldung an
+/// BEIDE Wege gebunden: Sie erscheint nur, wenn weder PS/2 noch USB
+/// etwas liefert.
+///
+/// Gezaehlt wird nicht „ist ein USB-Geraet da", sondern „ist eins da,
+/// das wir auch LESEN koennen" — ein Massenspeicher am selben
+/// Controller macht die Maschine nicht bedienbar.
+pub fn eingabe_vorhanden() -> bool {
+    use deskriptor::KLASSE_HID;
+    geraet::mit_geraeten(|liste| {
+        liste.iter().any(|g| {
+            let (k, u, p) = g.klasse_finden();
+            k == KLASSE_HID && hid::art_von(k, u, p).is_some()
+        })
+    })
+}

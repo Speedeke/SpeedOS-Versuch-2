@@ -249,6 +249,10 @@ pub struct Controller {
     letztes_kommando: Option<aufzaehlung::KommandoErgebnis>,
     letzter_transfer: Option<u8>,
     port_warteschlange: Vec<u8>,
+    /// Fertige HID-Transfers: (Slot, DCI). Sie werden NACH der Pumpe
+    /// verarbeitet — das Nachlegen des naechsten Transfers laeuft sonst
+    /// aus der Pumpe heraus in sie selbst zurueck.
+    hid_warteschlange: Vec<(u8, u8)>,
 
     /// Die zuletzt gesehenen Port-Zustaende — fuer `usb` und um
     /// Aenderungen zu erkennen.
@@ -654,6 +658,7 @@ fn starten() -> Result<(), XhciFehler> {
         letztes_kommando: None,
         letzter_transfer: None,
         port_warteschlange: Vec::new(),
+        hid_warteschlange: Vec::new(),
         ports,
         speicher,
     };
@@ -844,7 +849,27 @@ impl Controller {
                     });
                 }
                 TRB_TYP_TRANSFER_EVENT => {
-                    self.letzter_transfer = Some((trb[2] >> 24) as u8);
+                    let code = (trb[2] >> 24) as u8;
+                    let slot = (trb[3] >> 24) as u8;
+                    let dci = ((trb[3] >> 16) & 0x1F) as u8;
+                    // DCI 1 ist EP0 — das gehoert zur Aufzaehlung und
+                    // wird von `auf_transfer_warten` abgeholt. Alles
+                    // andere ist ein HID-Report.
+                    if dci <= 1 {
+                        self.letzter_transfer = Some(code);
+                    } else if code == 1 || code == 13 {
+                        // 13 = Short Packet: Das Geraet hat weniger
+                        // geschickt als angefordert — bei HID der
+                        // Normalfall, kein Fehler.
+                        self.hid_warteschlange.push((slot, dci));
+                    } else {
+                        serial_println!(
+                            "[xhci] Transfer-Fehler an Slot {} DCI {} (Code {}).",
+                            slot,
+                            dci,
+                            code
+                        );
+                    }
                 }
                 _ => {
                     serial_println!(
@@ -1321,7 +1346,7 @@ pub async fn usb_task() {
     if !vorhanden() {
         return;
     }
-    serial_println!("[xhci] Event-Task laeuft (gepollt, 100 ms).");
+    serial_println!("[xhci] Event-Task laeuft (gepollt, 8 ms — Eingabe muss fluessig sein).");
     loop {
         mit_controller(|c| {
             if let Some(controller) = c {
@@ -1333,8 +1358,13 @@ pub async fn usb_task() {
                 for port in controller.ports_mit_aenderung() {
                     controller.port_wechsel_behandeln(port);
                 }
+                let reports = core::mem::take(&mut controller.hid_warteschlange);
+                for (slot, dci) in reports {
+                    controller.hid_report_verarbeiten(slot, dci);
+                }
+                controller.hid_wiederholungen();
             }
         });
-        zeit::warte_ms(100).await;
+        zeit::warte_ms(8).await;
     }
 }

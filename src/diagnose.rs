@@ -96,6 +96,43 @@ pub fn hardware_zusammenfassung() {
     schritt(format_args!(""));
     schritt(format_args!("=== Erkannte Hardware ==="));
 
+    // USB — AUF ECHTER HARDWARE DIE WICHTIGSTE ZEILE DIESES SCHIRMS.
+    //
+    // Auf dem Blech gibt es keine serielle Ausgabe; wenn die Tastatur
+    // tot bleibt, ist DAS hier die einzige Stelle, an der man sieht,
+    // wie weit es gekommen ist. Deshalb steht sie GANZ OBEN und
+    // unterscheidet drei Faelle, die von aussen gleich aussehen:
+    // kein Controller / Controller ohne Geraet / Geraet ohne
+    // Boot-Protokoll.
+    if crate::usb::xhci::vorhanden() {
+        let anzahl = crate::usb::geraet::anzahl();
+        schritt(format_args!("USB (xHCI): Controller laeuft, {anzahl} Geraet(e)"));
+        crate::usb::geraet::mit_geraeten(|liste| {
+            for g in liste {
+                let (k, u, pr) = g.klasse_finden();
+                schritt(format_args!(
+                    "  Slot {} Port {}: {} [{:02x}/{:02x}/{:02x}] {}",
+                    g.slot,
+                    g.port,
+                    g.anzeigename(),
+                    k,
+                    u,
+                    pr,
+                    g.klassen_text()
+                ));
+            }
+        });
+        if crate::usb::eingabe_vorhanden() {
+            schritt(format_args!("  -> USB-Eingabe AKTIV"));
+        } else {
+            schritt(format_args!(
+                "  -> KEIN HID-Boot-Geraet (Hub dazwischen? Nur Boot Protocol!)"
+            ));
+        }
+    } else {
+        schritt(format_args!("USB (xHCI): KEIN Controller gefunden"));
+    }
+
     // Bildschirm/Framebuffer:
     match crate::framebuffer::mit_framebuffer(|fb| fb.info()) {
         Some(info) => schritt(format_args!(

@@ -175,3 +175,64 @@ es ist eine Unwahrheit im Kern, und sie gehört gemessen statt vermutet.
 > [Desktop](screenshots/live-desktop.png) ·
 > [Diagnose](screenshots/live-diagnose.png) ·
 > [keine PS/2-Eingabe](screenshots/live-keine-ps2.png).
+
+---
+
+## Serie 9, Teil 5 — der Hardware-Tag: NOCH NICHT DURCHGEFÜHRT
+
+**Stand: offen.** Der USB-Eingabepfad ist gebaut und in QEMU bewiesen
+(mit `i8042=off` ist der Desktop rein über USB bedienbar), aber auf
+echter Hardware ist er **ungetestet**. Dieser Abschnitt ist die
+vorbereitete Befundliste, nicht ihr Ergebnis.
+
+Ehrliche Erwartung, damit sie nicht als Scheitern verbucht wird: Der
+erste Anlauf auf echtem Blech findet typischerweise Dinge, die in QEMU
+nie auftreten — Timing, mehrere Controller, **Hubs** (interne
+Notebook-Geräte hängen oft an einem internen Hub, und Hubs können wir
+noch nicht), Firmware-Handoff. Das ist der Normalfall.
+
+### Vorgehen
+
+```bash
+cargo image
+```
+
+Dann `tools/usb_schreiben.ps1` als Administrator (schreibt
+`speedos-live.img` roh auf den Stick — der Stick ist danach im
+Explorer unsichtbar, das ist normal).
+
+Beim Bootscreen **Taste D** drücken: Der Diagnose-Modus ist auf dem
+Blech die einzige Informationsquelle, weil es dort keine serielle
+Ausgabe gibt. Er zeigt seit diesem Teil **ganz oben** die USB-Lage und
+unterscheidet drei Fälle, die von außen gleich aussehen.
+
+### Befundliste (auszufüllen)
+
+| Frage | Befund |
+|---|---|
+| Bootet das Image? | |
+| Zeigt die Diagnose einen xHCI-Controller? | |
+| Wie viele USB-Geräte werden gelistet? | |
+| Steht dort „USB-Eingabe AKTIV"? | |
+| Funktioniert die **eingebaute Tastatur**? | |
+| Funktioniert das **Touchpad**? | |
+| Funktioniert eine **externe** USB-Tastatur? | |
+| Ist der Desktop bedienbar (tippen, klicken, ziehen)? | |
+| Läuft der Browser? | |
+
+### Wenn nichts kommt — in dieser Reihenfolge nachsehen
+
+1. **„KEIN Controller gefunden"** → Der xHCI liegt nicht auf Bus 0.
+   Wir rekursieren nicht über PCI-Bridges (CLAUDE.md).
+2. **Controller läuft, 0 Geräte** → Wahrscheinlich ein interner **Hub**.
+   Das ist die wahrscheinlichste Ursache überhaupt.
+3. **Geräte da, aber „KEIN HID-Boot-Geraet"** → Das Gerät hat keine
+   Boot-Subclass; es bräuchte den Report-Descriptor-Parser.
+4. **Geräte da, „AKTIV", aber nichts passiert** → Transfer-Problem
+   (Stall, falsches Intervall). Kein `Reset Endpoint` vorhanden.
+5. **Hängt beim Booten** → BIOS-Handoff (USBLEGSUP). Er ist gebaut,
+   aber von QEMU nie angefordert und damit ungetestet.
+
+### Fotos
+
+(hierher: Bootscreen, Diagnose-Schirm, Desktop)

@@ -240,16 +240,23 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
                 break;
             }
         }
-    } else if !speed_os::diagnose::tastatur_vorhanden() {
+    } else if !speed_os::diagnose::tastatur_vorhanden()
+        && !speed_os::usb::eingabe_vorhanden()
+    {
         // Keine PS/2-Tastatur erkannt: eine KLARE Meldung auf den
         // Bildschirm (auf echter Hardware gibt es keine serielle
         // Ausgabe!), statt still zu hängen. Der Desktop startet danach
         // trotzdem — mit Maus (falls vorhanden) bleibt er bedienbar.
+        // DIE MELDUNG AUS SERIE 4 — aber jetzt erst, wenn WEDER PS/2
+        // NOCH USB etwas liefert. Vorher stand sie auf jedem Rechner
+        // ohne 8042, auch auf einem, dessen USB-Tastatur einwandfrei
+        // laeuft; das waere ab jetzt schlicht falsch.
         speed_os::framebuffer::meldung_zeigen(
             &[
-                "SpeedOS Live: keine PS/2-Eingabe gefunden",
-                "USB-Eingabe kommt in einer kuenftigen Version.",
+                "SpeedOS Live: keine Eingabe gefunden",
+                "Weder PS/2 noch eine USB-Tastatur oder -Maus.",
                 "",
+                "Taste D auf dem Bootscreen zeigt die Diagnose.",
                 "Der Desktop startet trotzdem.",
             ],
             6000,

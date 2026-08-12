@@ -104,6 +104,18 @@ pub struct SlotRessourcen {
     pub antwort_phys: PhysAddr,
     /// Alle Seiten, die zu diesem Slot gehoeren — die Freigabeliste.
     pub seiten: Vec<VirtAddr>,
+
+    /// Was fuer ein HID-Geraet das ist (falls es eins ist).
+    pub hid_art: Option<crate::usb::hid::HidArt>,
+    /// Der DCI des Interrupt-IN-Endpunkts, auf dem die Reports kommen.
+    pub hid_dci: u8,
+    /// Der Puffer, in den der Controller die Reports schreibt.
+    pub hid_puffer: VirtAddr,
+    pub hid_puffer_phys: PhysAddr,
+    /// Wie viele Byte ein Report hat.
+    pub hid_bytes: u16,
+    /// Der Tastatur-Zustand (Dauerfeuer, letzte Tasten).
+    pub tastatur: crate::usb::hid::TastaturZustand,
 }
 
 // ---------------------------------------------------------------------------
@@ -390,6 +402,12 @@ impl Controller {
             antwort,
             antwort_phys,
             seiten,
+            hid_art: None,
+            hid_dci: 0,
+            hid_puffer: VirtAddr::new(0),
+            hid_puffer_phys: PhysAddr::new(0),
+            hid_bytes: 0,
+            tastatur: crate::usb::hid::TastaturZustand::default(),
         })
     }
 
@@ -526,6 +544,13 @@ impl Controller {
 
         // --- 7. Endpunkte konfigurieren ------------------------------
         self.endpunkte_konfigurieren(res, &konfiguration)?;
+
+        // --- 8. HID: Boot Protocol setzen und lauschen ---------------
+        //
+        // ERST JETZT, nachdem die Endpunkte stehen — ein `Set Protocol`
+        // vor `Configure Endpoint` waere an einem Geraet gerichtet, das
+        // noch keinen Endpunkt hat.
+        self.hid_einrichten(res, &konfiguration);
 
         Ok(crate::usb::geraet::GeraeteEintrag {
             slot: res.slot,
@@ -938,5 +963,222 @@ fn standard_paket0(tempo: Tempo) -> u16 {
         Tempo::Hoch => 64,
         Tempo::Super | Tempo::SuperPlus => 512,
         Tempo::Unbekannt => 64,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// HID: LAUSCHEN AUF DEM INTERRUPT-ENDPUNKT
+// ---------------------------------------------------------------------------
+
+/// Der TRB-Typ „Normal" — ein gewoehnlicher Datentransfer.
+const TRB_NORMAL: u32 = 1;
+
+impl Controller {
+    /// Ein HID-Geraet in Betrieb nehmen: Boot Protocol setzen und den
+    /// ersten Transfer einstellen.
+    ///
+    /// **Ein Fehlschlag ist hier KEIN Grund, die Aufzaehlung
+    /// abzubrechen.** Das Geraet ist erkannt und steht im Verzeichnis;
+    /// dass wir seine Eingaben nicht lesen koennen, macht es nicht
+    /// ungueltig. Ein Massenspeicher zum Beispiel hat gar kein
+    /// Boot-Protokoll.
+    fn hid_einrichten(
+        &mut self,
+        res: &mut SlotRessourcen,
+        konfiguration: &deskriptor::Konfiguration,
+    ) {
+        use crate::usb::hid;
+        // Das erste Interface, das wir bedienen koennen.
+        let Some((schnittstelle, art)) = konfiguration
+            .schnittstellen
+            .iter()
+            .find_map(|s| hid::art_von(s.klasse, s.unterklasse, s.protokoll).map(|a| (s, a)))
+        else {
+            return;
+        };
+        let Some(endpunkt) = schnittstelle
+            .endpunkte
+            .iter()
+            .find(|e| e.art == Uebertragung::Interrupt && e.ist_eingang())
+        else {
+            return;
+        };
+
+        // SET PROTOCOL (BOOT). Anfrage 0x0B, Wert 0 = Boot, an das
+        // Interface (Empfaenger 1 im bmRequestType).
+        //
+        // Manche Geraete melden `STALL` darauf und sind trotzdem im
+        // Boot-Modus (sie koennen nichts anderes). Deshalb wird der
+        // Fehler nur PROTOKOLLIERT und nicht weitergereicht.
+        if self
+            .control_schreiben(res, 0x21, 0x0B, 0, schnittstelle.nummer as u16)
+            .is_err()
+        {
+            serial_println!(
+                "[xhci]   Set Protocol(Boot) abgelehnt — viele Geraete koennen ohnehin nur Boot."
+            );
+        }
+
+        let puffer = match seiten_holen(1) {
+            Some(p) => p,
+            None => return,
+        };
+        let puffer_phys = match phys_von(puffer) {
+            Some(p) => p,
+            None => return,
+        };
+        res.seiten.push(puffer);
+        res.hid_art = Some(art);
+        res.hid_dci = endpunkt.dci();
+        res.hid_puffer = puffer;
+        res.hid_puffer_phys = puffer_phys;
+        res.hid_bytes = endpunkt.max_paket.min(64);
+
+        serial_println!(
+            "[xhci]   HID {:?}: lausche auf DCI {} ({} Byte je Report).",
+            art,
+            res.hid_dci,
+            res.hid_bytes
+        );
+        self.hid_transfer_einstellen(res);
+    }
+
+    /// Einen Normal-TRB auf dem Interrupt-Endpunkt einstellen.
+    ///
+    /// ===================================================================
+    /// EIN TRANSFER JE REPORT — UND DER NAECHSTE WIRD SOFORT NACHGELEGT
+    ///
+    /// Ein Interrupt-Endpunkt liefert nicht von selbst: Der Controller
+    /// fragt das Geraet nur ab, solange ein TRB im Ring steht. Ist er
+    /// abgearbeitet, ist Ruhe — bis wir den naechsten einstellen.
+    ///
+    /// Das ist der Unterschied zu einem IRQ-Geraet, und es ist die
+    /// Stelle, an der eine Tastatur nach dem ersten Tastendruck
+    /// verstummt, wenn man es vergisst.
+    pub(super) fn hid_transfer_einstellen(&mut self, res: &mut SlotRessourcen) {
+        if res.hid_dci == 0 {
+            return;
+        }
+        let Some((_, ring, ring_phys, stand)) = res
+            .endpunkt_ringe
+            .iter_mut()
+            .find(|(dci, _, _, _)| *dci == res.hid_dci)
+        else {
+            return;
+        };
+        let index = stand.index;
+        let cycle = stand.cycle;
+        let ziel = res.hid_puffer_phys.as_u64();
+        // SAFETY: index < nutzbare Ringgroesse, der Ring ist eine Seite.
+        unsafe {
+            let z = (ring.as_u64() + index as u64 * TRB_BYTES as u64) as *mut u32;
+            core::ptr::write_volatile(z, ziel as u32);
+            core::ptr::write_volatile(z.add(1), (ziel >> 32) as u32);
+            // Wort 2: Transferlaenge.
+            core::ptr::write_volatile(z.add(2), res.hid_bytes as u32);
+            // IOC (Bit 5) — wir wollen ein Event, wenn der Report da ist.
+            core::ptr::write_volatile(
+                z.add(3),
+                (TRB_NORMAL << 10) | (1 << 5) | if cycle { 1 } else { 0 },
+            );
+        }
+        stand.weiter();
+        // Link-TRB beim Umlauf — dieselbe Mechanik wie beim EP0-Ring.
+        if stand.index == 0 {
+            let alter_cycle = !stand.cycle;
+            let ringanfang = ring_phys.as_u64();
+            // SAFETY: der letzte Eintrag liegt innerhalb der Seite.
+            unsafe {
+                let z = (ring.as_u64() + (TRANSFER_RING_TRBS as u64 - 1) * TRB_BYTES as u64)
+                    as *mut u32;
+                core::ptr::write_volatile(z, ringanfang as u32);
+                core::ptr::write_volatile(z.add(1), (ringanfang >> 32) as u32);
+                core::ptr::write_volatile(z.add(2), 0);
+                core::ptr::write_volatile(
+                    z.add(3),
+                    (TRB_LINK << 10) | (1 << 1) | if alter_cycle { 1 } else { 0 },
+                );
+            }
+        }
+        let slot = res.slot;
+        let dci = res.hid_dci as u32;
+        self.doorbell_laeuten(slot, dci);
+    }
+
+    /// Ein fertiger HID-Transfer: Report auswerten und neu einstellen.
+    ///
+    /// **HIER ENDET DER USB-WEG UND BEGINNT DER GEWOEHNLICHE.** Die
+    /// Bytes gehen in dieselben lock-freien Queues, die der
+    /// PS/2-Interrupt speist — danach ist nicht mehr zu erkennen,
+    /// woher sie kamen.
+    pub fn hid_report_verarbeiten(&mut self, slot: u8, dci: u8) {
+        use crate::usb::hid;
+        let Some(pos) = self.slots.iter().position(|s| s.slot == slot) else {
+            return;
+        };
+        if self.slots[pos].hid_dci != dci {
+            return;
+        }
+        let jetzt = crate::zeit::ms_seit_boot();
+        let bytes = self.slots[pos].hid_bytes as usize;
+        let puffer = self.slots[pos].hid_puffer;
+        // SAFETY: `puffer` ist eine von uns allozierte Seite,
+        // `bytes` <= 64.
+        let daten: Vec<u8> = (0..bytes)
+            .map(|i| unsafe { core::ptr::read_volatile((puffer.as_u64() as *const u8).add(i)) })
+            .collect();
+
+        match self.slots[pos].hid_art {
+            Some(hid::HidArt::Tastatur) => {
+                let codes = self.slots[pos].tastatur.report(&daten, jetzt);
+                for code in codes {
+                    scancode_einspeisen(code);
+                }
+            }
+            Some(hid::HidArt::Maus) => {
+                if let Some(b) = hid::maus_bytes(&daten) {
+                    // Vier Bytes wie ein IntelliMouse-Paket.
+                    for byte in b {
+                        crate::maus::byte_hinzufuegen(byte);
+                    }
+                }
+            }
+            None => {}
+        }
+
+        // DEN NAECHSTEN TRANSFER NACHLEGEN — sonst verstummt das Geraet.
+        let mut res = self.slots.swap_remove(pos);
+        self.hid_transfer_einstellen(&mut res);
+        self.slots.push(res);
+    }
+
+    /// Faelliges Dauerfeuer aller Tastaturen erzeugen.
+    ///
+    /// Laeuft im Poll-Task, nicht im Report-Pfad: Solange eine Taste
+    /// GEHALTEN wird, meldet das Geraet denselben Zustand — es gibt
+    /// also kein Ereignis, an das man die Wiederholung haengen koennte.
+    pub fn hid_wiederholungen(&mut self) {
+        use crate::usb::hid;
+        let jetzt = crate::zeit::ms_seit_boot();
+        for res in self.slots.iter_mut() {
+            if res.hid_art != Some(hid::HidArt::Tastatur) {
+                continue;
+            }
+            if let Some(code) = res.tastatur.wiederholung(jetzt) {
+                scancode_einspeisen(code);
+            }
+        }
+    }
+}
+
+/// Einen Scancode in die GEMEINSAME Tastatur-Queue legen.
+///
+/// Dieselbe Funktion, die der PS/2-Interrupt-Handler benutzt. Genau
+/// deshalb gibt es hier keine Layout-Logik: Was danach passiert
+/// (QWERTZ, Modifier, Strg+C), ist fuer beide Wege identisch.
+fn scancode_einspeisen(code: crate::usb::hid::Scancode) {
+    let (bytes, anzahl) = code.bytes();
+    for byte in bytes.iter().take(anzahl) {
+        crate::task::keyboard::add_scancode(*byte);
     }
 }

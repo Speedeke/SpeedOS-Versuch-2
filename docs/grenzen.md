@@ -592,6 +592,41 @@ wuerde aber jedem User-Programm fehlen. Es ist also eine ABI-Erweiterung
 (zwei Syscalls ueber copy_in/copy_out auf einen Blatt-Lock) und keine
 Browser-Funktion.
 
+## USB: Tastatur und Maus laufen — mit Boot Protocol (Serie 9, Teil 5)
+
+Eingaben kommen an. Ein HID-Boot-Geraet speist DIESELBEN lock-freien
+Queues wie PS/2 (`task::keyboard::add_scancode`,
+`maus::byte_hinzufuegen`); der Rest des Systems kann nicht
+unterscheiden, woher eine Taste kam. In QEMU mit `i8042=off` ist der
+Desktop rein ueber USB bedienbar.
+
+**WAS DAMIT NICHT GEHT:**
+
+* **Nur BOOT PROTOCOL.** Geraete ohne `bInterfaceSubClass == 1`
+  liefern nichts: viele Gaming-Tastaturen, Grafiktabletts,
+  Multimedia-Tasten, Joysticks. Sie braeuchten einen
+  HID-Report-Descriptor-Parser — bewusst nicht gebaut (Begruendung im
+  Kopf von `src/usb/hid.rs`).
+* **Hoechstens sechs Tasten gleichzeitig** (Boot-Protokoll-Grenze).
+  Mehr meldet das Geraet als Rollover; wir verwerfen es dann, statt
+  Geistertasten zu erzeugen.
+* **Maus: drei Tasten, zwei Achsen, ein Rad.** Zusatztasten und
+  horizontales Rad fallen weg.
+* **Kein Touchpad-Gestenerkennung** — ein Touchpad meldet sich als
+  Boot-Maus und verhaelt sich auch so (Zeigen und Klicken, kein
+  Zwei-Finger-Scrollen).
+* **Keine Hubs.** Geraete hinter einem Hub werden nicht gefunden, weil
+  nur die Wurzelports abgefragt werden. **Auf echter Hardware ist das
+  der wahrscheinlichste Grund, warum etwas fehlt** — interne
+  Notebook-Geraete haengen oft an einem internen Hub.
+* **Gepollt, nicht per Interrupt** (8 ms). Ausreichend fuers Tippen,
+  aber es kostet dauernd CPU-Zeit; MSI-X waere der richtige Weg.
+* Kein `Reset Endpoint` nach einem Stall: Ein Endpunkt, der haengt,
+  bleibt haengen — das Geraet muss neu gesteckt werden.
+* **Auf echter Hardware UNGETESTET** (siehe docs/hardware-log.md).
+
+(Frueherer Stand, Teil 4:)
+
 ## USB: Geraete werden erkannt, aber nicht BENUTZT (Serie 9, Teil 4)
 
 Stand nach Teil 4: Der Controller laeuft, Geraete werden vollstaendig
