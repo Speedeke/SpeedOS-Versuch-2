@@ -64,6 +64,7 @@ pub mod taskmanager;
 pub mod theme;
 pub mod ui;
 pub mod virtio;
+pub mod audio;
 pub mod usb;
 pub mod zeit;
 pub mod zufall;

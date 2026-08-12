@@ -181,6 +181,10 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // Heap-Erweiterung (die Ringe allozieren). Kein Controller ->
     // stille Rueckkehr, wie bei virtio.
     speed_os::usb::xhci::init();
+    // Audio (Serie 10): HDA-Controller suchen. NACH pci::init und NACH
+    // der Heap-Erweiterung (Ringpuffer und BDL allozieren). Kein
+    // Controller -> stille Rueckkehr, wie bei virtio und xHCI.
+    speed_os::audio::init();
     // DHCP: sich beim Boot automatisch eine IP holen (IP/Maske/Gateway/DNS).
     // Timeout 3 s -> Fallback auf statische Konfiguration per 'netz-ip'.
     // Pumpt den Empfang synchron; auf QEMU-slirp antwortet der Server sofort.

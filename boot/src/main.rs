@@ -292,6 +292,18 @@ fn main() {
     // Standard-Klassenkennung 0x0C/0x03/0x30, die der Treiber sucht.
     qemu.arg("-device").arg("qemu-xhci,id=xhci");
 
+    // Intel HDA (Serie 10): der Standard-Audiocontroller. `hda-duplex`
+    // haengt einen Codec mit Aus- UND Eingang daran — wir benutzen nur
+    // den Ausgang, aber ein Codec ohne Ausgabepfad waere zum Testen
+    // wertlos.
+    //
+    // QEMU schickt den Ton an das Host-Audio; ob man ihn HOERT, haengt
+    // am Host. Fuer den Testlauf zaehlt, dass der Stream laeuft und die
+    // Positionsanzeige vorankommt — das ist im Protokoll nachpruefbar
+    // und braucht keine Lautsprecher.
+    qemu.arg("-device").arg("intel-hda,id=hda");
+    qemu.arg("-device").arg("hda-duplex,bus=hda.0");
+
     // DIE USB-EINGABEGERAETE SIND STANDARDMAESSIG AUS — und das ist ein
     // MESSERGEBNIS, keine Vorsicht.
     //

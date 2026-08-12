@@ -86,6 +86,8 @@ pub fn alle_befehle() -> Vec<Box<dyn Befehl>> {
         // Hardware-Befehle:
         Box::new(Pci),
         Box::new(Usb),
+        Box::new(Ton),
+        Box::new(AudioBefehl),
         // Massenspeicher-Befehle (ATA-Treiber):
         Box::new(Platten),
         Box::new(Blocktest),
@@ -676,6 +678,127 @@ fn baum_zeichnen(pfad: &str, einrueckung: &str) {
     }
 }
 
+
+
+// ---------------------------------------------------------------------------
+
+/// ton — ein Sinuston. **Der Meilenstein: der erste Ton aus SpeedOS.**
+struct Ton;
+
+impl Befehl for Ton {
+    fn name(&self) -> &'static str {
+        "ton"
+    }
+    fn beschreibung(&self) -> &'static str {
+        "Spielt einen Sinuston: ton [hz] [ms]"
+    }
+    fn ausfuehren(&self, argumente: &str, _kontext: &mut ShellKontext, _registry: &[Box<dyn Befehl>]) {
+        use crate::audio::{mixer, AudioGeraet};
+
+        let mut teile = argumente.split_whitespace();
+        let hz: u32 = teile.next().and_then(|w| w.parse().ok()).unwrap_or(440);
+        let ms: u64 = teile.next().and_then(|w| w.parse().ok()).unwrap_or(500);
+        // GRENZEN. 20..20000 Hz ist der hoerbare Bereich; darueber
+        // hinaus waere es nur eine Aliasing-Uebung. Die Dauer wird
+        // gedeckelt, damit ein Tippfehler nicht die Shell blockiert.
+        let hz = hz.clamp(20, 20_000);
+        let ms = ms.clamp(10, 10_000);
+
+        if !crate::audio::vorhanden() {
+            println!("Kein Audio-Geraet. (QEMU: -device intel-hda; sonst 'audio' zeigt Details.)");
+            return;
+        }
+
+        let frames_gesamt = (crate::audio::ABTASTRATE as u64 * ms / 1000) as usize;
+        println!("Ton: {} Hz, {} ms ({} Frames)", hz, ms, frames_gesamt);
+
+        crate::audio::hda::mit_hda(|h| {
+            let Some(hda) = h else {
+                println!("Audio-Geraet nicht verfuegbar.");
+                return;
+            };
+            hda.leeren();
+            if hda.starten().is_err() {
+                println!("Wiedergabe liess sich nicht starten.");
+                return;
+            }
+
+            // STUECKWEISE NACHFUELLEN, nicht alles auf einmal: Der
+            // Ringpuffer fasst ~85 ms. Wer mehr hineinschreibt, als
+            // hineinpasst, ueberschreibt Ungespieltes — deshalb wird
+            // nachgelegt, sobald der Lesezeiger Platz gemacht hat.
+            //
+            // Die Phase laeuft dabei DURCH: Jedes Stueck wird mit der
+            // Frame-Nummer als Startpunkt erzeugt, sonst gaebe es an
+            // jeder Stueckgrenze einen Knacks.
+            let mut geschrieben = 0usize;
+            let start_ms = crate::zeit::ms_seit_boot();
+            while geschrieben < frames_gesamt {
+                let rest = frames_gesamt - geschrieben;
+                let stueck = rest.min(1024);
+                let samples = mixer::sinus_erzeugen_ab(hz, stueck, mixer::VOLL, geschrieben as u64);
+                let genommen = hda.schreiben(&samples);
+                if genommen == 0 {
+                    // Puffer voll — warten, bis der Controller Platz
+                    // gemacht hat. Mit Frist, wie ueberall.
+                    if crate::zeit::ms_seit_boot() - start_ms > ms + 5_000 {
+                        println!("Wiedergabe haengt — abgebrochen.");
+                        break;
+                    }
+                    crate::zeit::warte_auf_interrupt();
+                    continue;
+                }
+                geschrieben += genommen;
+            }
+
+            // Auslaufen lassen: warten, bis der Controller alles
+            // gespielt hat, sonst schneidet `stoppen` den Ton ab.
+            let ziel = geschrieben as u64;
+            let frist = crate::zeit::ms_seit_boot() + ms + 2_000;
+            while hda.gespielte_frames() < ziel && crate::zeit::ms_seit_boot() < frist {
+                crate::zeit::warte_auf_interrupt();
+            }
+            hda.stoppen();
+            println!("Fertig ({} Frames gespielt).", hda.gespielte_frames().min(ziel));
+        });
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+/// audio — was die Tonausgabe gerade macht.
+struct AudioBefehl;
+
+impl Befehl for AudioBefehl {
+    fn name(&self) -> &'static str {
+        "audio"
+    }
+    fn beschreibung(&self) -> &'static str {
+        "Zeigt das Audio-Geraet und den Ausgabepfad"
+    }
+    fn ausfuehren(&self, _argumente: &str, _kontext: &mut ShellKontext, _registry: &[Box<dyn Befehl>]) {
+        use crate::audio::AudioGeraet;
+        if !crate::audio::vorhanden() {
+            println!("Kein HDA-Controller gefunden.");
+            println!("(QEMU: -device intel-hda -device hda-duplex; Details im");
+            println!(" seriellen Protokoll, Zeilen mit [hda].)");
+            return;
+        }
+        crate::audio::hda::mit_hda(|h| {
+            let Some(hda) = h else { return };
+            konsole::set_color(Color::LightCyan, Color::Black);
+            println!("Audio");
+            konsole::set_color(Color::LightGray, Color::Black);
+            println!("  Geraet        {}", hda.name());
+            println!("  Abtastrate    {} Hz, {} Kanaele, 16 Bit", crate::audio::ABTASTRATE, crate::audio::KANAELE);
+            println!("  Ringpuffer    {} Frames", hda.puffer_frames());
+            println!("  Zustand       {}", if hda.laeuft() { "spielt" } else { "still" });
+            println!("  Position      {} Frames", hda.gespielte_frames());
+            println!("");
+            println!("Grenzen: nur Ausgabe, nur 48 kHz (docs/grenzen.md).");
+        });
+    }
+}
 
 // ---------------------------------------------------------------------------
 

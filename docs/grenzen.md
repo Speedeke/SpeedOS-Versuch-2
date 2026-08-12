@@ -690,3 +690,35 @@ TESTAUFBAU-EIGENHEIT, gemessen: `usb-kbd` in QEMU STIEHLT die
 PS/2-Tastatur (QEMU leitet an die zuletzt angemeldete Tastatur). Die
 USB-Eingabegeraete haengen deshalb nur mit `SPEEDOS_USB_GERAETE=1`
 dran; sonst waere die Maschine nicht mehr bedienbar.
+
+## Audio: Ton ja, Positionsanzeige noch falsch (Serie 10, Teil 1)
+
+Der HDA-Controller laeuft, ein Ausgabepfad (Pin -> DAC) wird gefunden
+und scharf geschaltet, `ton [hz] [ms]` ist HOERBAR (am Lautsprecher
+bestaetigt).
+
+**OFFENER FEHLER, nicht weggeredet:** Die Zahl der gespielten Frames
+stimmt nicht. Ein 2-Sekunden-Ton (96 000 Frames) meldet am Ende „1814
+Frames gespielt". Der Ton kommt, die Schreibschleife laeuft durch, und
+der frueher beobachtete Haenger (Abbruch nach weniger als einem
+Ringpuffer) ist behoben — aber die Umlauf-Buchhaltung von `SD_LPIB`
+ist noch nicht richtig. Das betrifft heute nur die ANZEIGE; sobald
+eine Fortschrittsanzeige (`spielen`) daran haengt, ist es ein echtes
+Problem.
+
+Ausserdem fehlt:
+
+* **Kein Audio-Syscall** — Ring-3-Programme koennen keinen Ton
+  ausgeben. Der Mixer ist gebaut und getestet, aber noch nicht
+  angeschlossen.
+* **Keine Lautstaerkeregelung** in Einstellungen oder Systray; das
+  Platzhalter-Icon aus Serie 2 ist weiter ein Platzhalter.
+* **Kein `userland/spielen`** — WAV-Parser und Mixer sind da, das
+  Programm fehlt.
+* **Nur 48 kHz.** Eine 44,1-kHz-Datei spielt rund 9 % zu schnell; ein
+  Resampler ohne Fliesskomma ist ein eigenes Vorhaben.
+* Nur AUSGABE (kein Mikrofon), nur ein Stream, keine
+  Kopfhoerer-Erkennung, kein CORB/RIRB.
+* **Auf echter Hardware UNGETESTET.** Erwartete Befunde stehen in
+  docs/audio.md §6 — allen voran: mehrere Codecs (der erste ist oft
+  HDMI) und stumme Amps.
