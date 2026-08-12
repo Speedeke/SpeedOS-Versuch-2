@@ -246,6 +246,10 @@ fn maus_antwort() -> Option<u8> {
 /// Handler dazwischenfunken. Gibt false zurück, wenn keine Maus da
 /// ist (alle Warteschleifen haben Timeouts — der Boot hängt nie).
 pub fn initialisieren() -> bool {
+    // Wer hier mit `true` herausgeht, hat eine PS/2-Maus gefunden und
+    // meldet sie an (siehe `ZEIGER_DA`). Das passiert am Ende der
+    // Funktion, nicht hier — hier steht nur der Hinweis darauf.
+
     // 1. Zweiten PS/2-Port (die Maus) einschalten.
     if !controller_kommando(0xA8) {
         return false;
@@ -294,18 +298,59 @@ pub fn initialisieren() -> bool {
     let _ = maus_kommando(0xF3) && maus_kommando(200);
 
     // 6. Daten-Meldungen einschalten — ab jetzt feuert IRQ 12.
-    maus_kommando(0xF4)
+    let erfolg = maus_kommando(0xF4);
+    // DIE MAUS ANMELDEN, wenn sie wirklich antwortet. Erst dadurch
+    // erscheint ueberhaupt ein Zeiger (siehe `ZEIGER_DA`) — ohne
+    // Geraet bleibt der Bildschirm zeigerfrei.
+    if erfolg {
+        zeiger_melden();
+    }
+    erfolg
 }
 
 // ---------------------------------------------------------------------------
 // Byte-Queue (Interrupt -> Task), wie bei der Tastatur
 // ---------------------------------------------------------------------------
 
+/// Gibt es ueberhaupt ein Zeigegeraet?
+///
+/// ===================================================================
+/// WARUM DAS EIN EIGENES FLAG BRAUCHT — Befund vom Laptop
+///
+/// Auf dem Acer stand ein Mauszeiger mitten auf dem Bildschirm, obwohl
+/// weder PS/2-Maus noch USB-Maus da waren. Er liess sich nicht bewegen
+/// und sah aus wie ein haengendes System — dabei war er nur ein
+/// gezeichnetes Bild ohne Geraet dahinter.
+///
+/// **Gesetzt wird es an EINER Stelle, die BEIDE Wege abdeckt:** in
+/// `byte_hinzufuegen`. Dort landen die Pakete des PS/2-Interrupts UND
+/// die des USB-HID-Treibers (Serie 9, Teil 5 — er speist dieselbe
+/// Queue). Ein Flag je Weg waere zwei Stellen, an denen man eine
+/// vergessen kann; so kann es gar nicht auseinanderlaufen.
+///
+/// Die PS/2-Initialisierung meldet sich zusaetzlich an, damit der
+/// Zeiger schon VOR der ersten Bewegung da ist — eine erkannte Maus,
+/// die man erst bewegen muss, damit man sie sieht, waere auch falsch.
+static ZEIGER_DA: AtomicBool = AtomicBool::new(false);
+
+/// Ist ein Zeigegeraet vorhanden (PS/2 ODER USB)?
+pub fn zeiger_vorhanden() -> bool {
+    ZEIGER_DA.load(Ordering::Relaxed)
+}
+
+/// Melden, dass es ein Zeigegeraet gibt.
+pub fn zeiger_melden() {
+    ZEIGER_DA.store(true, Ordering::Relaxed);
+}
+
 static MAUS_QUEUE: OnceCell<ArrayQueue<u8>> = OnceCell::uninit();
 static MAUS_WAKER: AtomicWaker = AtomicWaker::new();
 
 /// Wird vom IRQ-12-Handler gerufen (interrupts.rs): nie blockieren!
 pub(crate) fn byte_hinzufuegen(byte: u8) {
+    // JEDES Byte beweist, dass ein Zeigegeraet existiert — egal ob es
+    // vom PS/2-Interrupt oder vom USB-HID-Treiber kommt.
+    ZEIGER_DA.store(true, Ordering::Relaxed);
     if let Ok(queue) = MAUS_QUEUE.try_get() {
         // Volle Queue: Byte verwerfen — der Parser resynchronisiert
         // sich über das Sync-Bit im nächsten Paket-Kopf.
@@ -502,6 +547,12 @@ pub fn cursor_form_setzen(form: u8) {
 /// Malt den Cursor als Overlay in den FRONT-Buffer — Pfeil oder,
 /// je nach eingestellter Form, einen Resize-Doppelpfeil.
 fn cursor_zeichnen(x: i32, y: i32) {
+    // OHNE ZEIGEGERAET KEIN ZEIGER. Ein Pfeil, der sich nicht bewegen
+    // laesst, sieht aus wie ein abgestuerztes System — auf dem Laptop
+    // war genau das der erste Eindruck.
+    if !zeiger_vorhanden() {
+        return;
+    }
     let form = CURSOR_FORM.load(Ordering::Relaxed);
     framebuffer::mit_framebuffer(|fb| {
         if form == FORM_PFEIL {

@@ -223,7 +223,29 @@ pub async fn audio_task() {
         STUECK_FRAMES
     );
     loop {
-        pumpen_global();
-        zeit::warte_ms(4).await;
+        // ===============================================================
+        // IM LEERLAUF SELTEN, BEIM SPIELEN OFT — Befund vom Laptop
+        //
+        // Die erste Fassung weckte ALLE 4 ms, also bei PIT-Takt 250 Hz
+        // in JEDEM Tick, und zwar auch dann, wenn gar kein Ton lief. In
+        // QEMU faellt das nicht auf; auf dem Acer kam es zu der
+        // Scheduler-Last dazu, die den Desktop zaeh gemacht hat.
+        //
+        // Ein Audio-Task, der nichts zu tun hat, muss nicht im
+        // Millisekundentakt nachsehen: Ein neuer Ton entsteht durch
+        // einen Syscall oder einen Shell-Befehl, und 100 ms
+        // Anlaufverzoegerung hoert niemand. Waehrend etwas laeuft,
+        // bleibt es bei 4 ms — dort zaehlt jede Millisekunde, weil der
+        // Ringpuffer nur ~85 ms fasst.
+        let beschaeftigt = mit_mixer(|m| m.anzahl()) > 0;
+        if beschaeftigt {
+            pumpen_global();
+            zeit::warte_ms(4).await;
+        } else {
+            // Einmal pumpen, damit ein laufender Stream sauber
+            // angehalten wird — danach lange schlafen.
+            pumpen_global();
+            zeit::warte_ms(100).await;
+        }
     }
 }
