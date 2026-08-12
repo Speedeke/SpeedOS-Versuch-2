@@ -18,6 +18,7 @@ use bootloader_api::info::{FrameBuffer, FrameBufferInfo, PixelFormat};
 use core::fmt;
 use noto_sans_mono_bitmap::{get_raster, get_raster_width, FontWeight, RasterHeight};
 use spin::Mutex;
+use x86_64::VirtAddr;
 
 /// Eine RGB-Farbe (8 Bit pro Kanal).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -374,12 +375,62 @@ pub fn init(framebuffer: FrameBuffer) {
         unsafe { core::slice::from_raw_parts_mut(hinten_start.as_mut_ptr::<u8>(), info.byte_len) };
     hinten.fill(0);
 
+    let vorne = framebuffer.into_buffer();
+
+    // ===================================================================
+    // DEN ECHTEN FRAMEBUFFER AUF WRITE-COMBINING UMSTELLEN
+    //
+    // Der Bootloader mappt ihn mit den Cache-Eigenschaften der Firmware
+    // — auf echter Hardware heisst das meist UNGECACHT, und dann ist
+    // jeder einzelne Schreibzugriff eine eigene PCIe-Transaktion. Bei
+    // 1080p sind das 8,3 MB je Vollbild; uncached kostet das leicht
+    // 50 ms, und zwar bei JEDEM `present()`.
+    //
+    // In QEMU faellt das nicht auf (dort ist es Host-RAM), auf dem
+    // Laptop fror dadurch das Tippen ein. Siehe
+    // `memory::write_combining_einrichten` fuer die Mechanik und die
+    // ehrliche Grenze (MTRRs koennen es verhindern).
+    //
+    // NUR DER VORDERE Puffer wird umgestellt. Der Back-Buffer ist
+    // normales RAM und soll gecacht bleiben — dort wird gezeichnet, und
+    // Lesen aus WC-Speicher waere langsam.
+    let umgestellt = memory::bereich_write_combining(
+        VirtAddr::new(vorne.as_ptr() as u64),
+        info.byte_len,
+    );
+    crate::serial_println!(
+        "[FB] {} Seiten des Framebuffers auf Write-Combining umgestellt ({} KiB).",
+        umgestellt,
+        info.byte_len / 1024
+    );
+
     *FRAMEBUFFER.lock() = Some(DoppelPuffer {
-        vorne: framebuffer.into_buffer(),
+        vorne,
         hinten,
         hintergrund: None,
         info,
     });
+}
+
+/// Misst, wie lange ein VOLLBILD-`present()` dauert.
+///
+/// ===================================================================
+/// DIE ZAHL, DIE DEN UNTERSCHIED ZWISCHEN QEMU UND BLECH ZEIGT
+///
+/// Sie beantwortet die Frage, die man auf echter Hardware sonst nicht
+/// beantworten kann, weil es dort keine serielle Ausgabe gibt: **Wie
+/// teuer ist der Weg zum Bildschirm?**
+///
+/// Erwartungswerte bei 1080p:
+///
+/// * unter 2 ms — gecacht oder write-combining, alles in Ordnung
+/// * 5–15 ms — write-combining auf langsamem Bus, brauchbar
+/// * ueber 30 ms — UNGECACHT. Das ist die Ursache, wenn das System beim
+///   Tippen einfriert.
+pub fn present_messen() -> u64 {
+    let start = crate::zeit::us_seit_boot();
+    mit_framebuffer(|fb| fb.present());
+    crate::zeit::us_seit_boot().saturating_sub(start)
 }
 
 /// Ist der Framebuffer initialisiert? (Tests ohne Grafik: nein.)

@@ -104,6 +104,36 @@ pub fn hardware_zusammenfassung() {
     // unterscheidet drei Faelle, die von aussen gleich aussehen:
     // kein Controller / Controller ohne Geraet / Geraet ohne
     // Boot-Protokoll.
+    // WIE TEUER IST DER WEG ZUM BILDSCHIRM?
+    //
+    // Auf echter Hardware ist das die wichtigste Leistungszahl
+    // ueberhaupt — und ohne serielle Ausgabe die einzige Stelle, an der
+    // man sie sehen kann. Ein `present()` bei 1080p bewegt 8,3 MB; ist
+    // der Framebuffer ungecacht, kostet das zehnmal so viel wie mit
+    // Write-Combining, und DAS ist der Unterschied zwischen fluessig
+    // und „friert beim Tippen ein".
+    //
+    // Zweimal gemessen: Der erste Durchgang faellt oft aus dem Rahmen
+    // (kalte Caches, TLB), der zweite ist der ehrliche Wert.
+    let _ = crate::framebuffer::present_messen();
+    let present_us = crate::framebuffer::present_messen();
+    schritt(format_args!(
+        "Bildschirm: Vollbild-present {} us{} (WC {})",
+        present_us,
+        if present_us > 30_000 {
+            "  <-- ZU LANGSAM, ungecacht!"
+        } else if present_us > 15_000 {
+            "  <-- langsam"
+        } else {
+            ""
+        },
+        if crate::memory::write_combining_verfuegbar() {
+            "verfuegbar"
+        } else {
+            "NICHT verfuegbar"
+        }
+    ));
+
     if crate::usb::xhci::vorhanden() {
         let anzahl = crate::usb::geraet::anzahl();
         schritt(format_args!("USB (xHCI): Controller laeuft, {anzahl} Geraet(e)"));

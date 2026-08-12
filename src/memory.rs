@@ -112,6 +112,134 @@ pub fn phys_offset() -> VirtAddr {
 /// Ist EFER.NXE eingeschaltet (und das NX-Bit damit benutzbar)?
 static NX_NUTZBAR: AtomicBool = AtomicBool::new(false);
 
+/// Ist WRITE-COMBINING über die PAT verfügbar?
+static WC_NUTZBAR: AtomicBool = AtomicBool::new(false);
+
+/// Schaltet WRITE-COMBINING für den Framebuffer frei (PAT-Eintrag 1).
+///
+/// ===================================================================
+/// DER UNTERSCHIED ZWISCHEN QEMU UND ECHTER HARDWARE
+///
+/// In QEMU ist der „Framebuffer" ganz normaler Host-Arbeitsspeicher —
+/// ihn zu beschreiben kostet nichts Besonderes. **Auf einem echten
+/// Laptop ist er VRAM auf der anderen Seite des PCIe-Busses**, und die
+/// Firmware mappt ihn üblicherweise UNGECACHT (UC). Dort wird JEDER
+/// einzelne Schreibzugriff zu einer eigenen Bus-Transaktion.
+///
+/// Bei 1080p sind das 1920 × 1080 × 4 = **8,3 MB je Vollbild**. Uncached
+/// kostet das leicht 50 ms — und zwar bei jedem `present()`, also bei
+/// jeder Konsolenzeile, die scrollt. Genau das war auf dem Acer zu
+/// sehen: In QEMU lief alles, auf dem Blech fror es beim Tippen ein.
+/// Es war nie zu wenig Rechenleistung; es war der Weg zum Bildschirm.
+///
+/// **WRITE-COMBINING ist die Standardlösung dafür.** Die CPU sammelt
+/// benachbarte Schreibzugriffe in einem Puffer und schickt sie als
+/// 64-Byte-Burst über den Bus — für einen Block-Kopierer wie unser
+/// `present()` typisch zehn- bis zwanzigmal schneller. Jedes ernsthafte
+/// Betriebssystem tut das für seinen Framebuffer.
+///
+/// ===================================================================
+/// WIE ES EINGESCHALTET WIRD
+///
+/// Der Speichertyp einer Seite ergibt sich aus einem Index in die
+/// **PAT** (Page Attribute Table, MSR 0x277). Der Index steht in drei
+/// Bits des Seiteneintrags: PAT, PCD, PWT.
+///
+/// Die Voreinstellung nach dem Einschalten ist
+/// `WB, WT, UC-, UC, WB, WT, UC-, UC` — **kein einziger WC-Eintrag**.
+/// Deshalb wird Eintrag 1 (bisher WT, erreichbar über PWT=1) auf WC
+/// umgestellt. Danach heisst „PWT gesetzt, PCD nicht" = Write-Combining.
+///
+/// WT (Write-Through) benutzen wir sonst nirgends allein; `map_mmio`
+/// setzt PCD **und** PWT, landet also bei Eintrag 3 (UC) und bleibt von
+/// dieser Änderung unberührt. Das ist wichtig — Geräteregister MÜSSEN
+/// ungecacht bleiben.
+///
+/// ===================================================================
+/// DIE EHRLICHE GRENZE
+///
+/// Die PAT kann einen Bereich nicht besser machen, als die **MTRRs**
+/// ihn erlauben: Steht der Bereich dort auf UC, bleibt es bei UC, egal
+/// was die PAT sagt (Intel SDM, „Effective Memory Type"). Viele
+/// UEFI-Firmwares setzen den GOP-Framebuffer aber auf WB oder WC — dann
+/// greift es. Ob es auf DIESER Maschine greift, sagt die Messung im
+/// Diagnose-Schirm, nicht diese Erklärung.
+pub fn write_combining_einrichten() {
+    use x86_64::registers::model_specific::Msr;
+
+    // CPUID-Blatt 1, EDX Bit 16 = PAT vorhanden. Ohne das MSR gäbe es
+    // eine General Protection Fault.
+    let hat_pat = {
+        let ergebnis = core::arch::x86_64::__cpuid(1);
+        ergebnis.edx & (1 << 16) != 0
+    };
+    if !hat_pat {
+        crate::serial_println!("[MEM] Keine PAT — Write-Combining nicht moeglich.");
+        return;
+    }
+
+    const IA32_PAT: u32 = 0x277;
+    let mut pat = Msr::new(IA32_PAT);
+    // SAFETY: IA32_PAT existiert (gerade per CPUID geprueft). Wir aendern
+    // AUSSCHLIESSLICH Eintrag 1 und lassen die uebrigen sieben, wie sie
+    // sind — insbesondere Eintrag 0 (WB, der Normalfall fuer RAM) und
+    // Eintrag 3 (UC, den `map_mmio` benutzt).
+    unsafe {
+        let alt = pat.read();
+        // Eintrag 1 liegt in den Bits 8..15. 0x01 = Write-Combining.
+        let neu = (alt & !(0xFFu64 << 8)) | (0x01u64 << 8);
+        if alt != neu {
+            pat.write(neu);
+        }
+        crate::serial_println!(
+            "[MEM] PAT: 0x{:016x} -> 0x{:016x} (Eintrag 1 = Write-Combining)",
+            alt,
+            neu
+        );
+    }
+    WC_NUTZBAR.store(true, Ordering::SeqCst);
+}
+
+/// Steht Write-Combining zur Verfügung?
+pub fn write_combining_verfuegbar() -> bool {
+    WC_NUTZBAR.load(Ordering::Relaxed)
+}
+
+/// Schaltet einen SCHON GEMAPPTEN Bereich auf Write-Combining um.
+///
+/// Für den Framebuffer: Der Bootloader hat ihn bereits gemappt, wir
+/// ändern nur die Cache-Bits der bestehenden Einträge (`update_flags`),
+/// statt ihn neu zu mappen — ein zweites Mapping desselben VRAM wäre
+/// genau das Aliasing, das man mit verschiedenen Speichertypen nicht
+/// haben darf.
+///
+/// Liefert die Zahl der umgestellten Seiten.
+pub fn bereich_write_combining(start: VirtAddr, bytes: usize) -> usize {
+    if !write_combining_verfuegbar() || bytes == 0 {
+        return 0;
+    }
+    let erste = Page::<Size4KiB>::containing_address(start);
+    let letzte = Page::<Size4KiB>::containing_address(start + (bytes as u64 - 1));
+    let mut umgestellt = 0usize;
+    mit_speicher(|mapper, _| {
+        for page in Page::range_inclusive(erste, letzte) {
+            // WRITE_THROUGH (PWT) setzen, NO_CACHE (PCD) löschen —
+            // das ist PAT-Index 1, den wir gerade auf WC gestellt haben.
+            let flags = PageTableFlags::PRESENT
+                | PageTableFlags::WRITABLE
+                | PageTableFlags::WRITE_THROUGH;
+            // SAFETY: Wir ändern nur die Cache-Bits einer bestehenden
+            // Übersetzung. Die Adresse bleibt dieselbe, es entsteht kein
+            // neues Aliasing.
+            if let Ok(flush) = unsafe { mapper.update_flags(page, flags) } {
+                flush.flush();
+                umgestellt += 1;
+            }
+        }
+    });
+    umgestellt
+}
+
 /// Schaltet EFER.NXE ein. Idempotent und gefahrlos: Solange kein einziger
 /// Page-Table-Eintrag Bit 63 gesetzt hat (und das hat vor diesem Aufruf
 /// keiner, sonst liefe die Maschine schon nicht mehr), ändert das Einschalten

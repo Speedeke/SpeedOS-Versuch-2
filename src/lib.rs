@@ -101,6 +101,11 @@ pub fn init() {
     // W^X-Regel, die der ELF-Loader durchsetzt. Muss VOR dem ersten
     // User-Mapping laufen; siehe memory::nx_aktivieren.
     memory::nx_aktivieren();
+    // Write-Combining freischalten (PAT-Eintrag 1). Muss VOR
+    // `framebuffer::init` laufen, denn dort wird der Framebuffer darauf
+    // umgestellt — und das ist auf echter Hardware der Unterschied
+    // zwischen „flüssig" und „friert beim Tippen ein".
+    memory::write_combining_einrichten();
     // UEFI-Erbe wegräumen: LAPIC aus, sonst erreichen die PIC-
     // Interrupts die CPU nicht (siehe Kommentar an der Funktion).
     interrupts::lapic_deaktivieren();

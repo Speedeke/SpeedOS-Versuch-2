@@ -330,3 +330,46 @@ Richtig behoben:
 
 Das ist der Punkt, an dem das Problem gar nicht erst entsteht: nicht
 eine kürzere Pause, sondern keine Wiederholung.
+
+### Befund 4: der Framebuffer war ungecacht (Write-Combining)
+
+**Das ist der Unterschied zwischen QEMU und echtem Blech.**
+
+In QEMU ist der „Framebuffer" ganz normaler Host-Arbeitsspeicher — ihn
+zu beschreiben kostet nichts Besonderes. Auf einem echten Laptop ist er
+**VRAM auf der anderen Seite des PCIe-Busses**, und die Firmware mappt
+ihn üblicherweise ungecacht (UC). Dort wird *jeder einzelne*
+Schreibzugriff zu einer eigenen Bus-Transaktion.
+
+Bei 1080p sind das 8,3 MB je Vollbild. Uncached kostet das leicht 50 ms
+— bei **jedem** `present()`, also bei jeder Konsolenzeile, die scrollt.
+Genau das passt auf den Befund: In QEMU läuft alles, auf dem Blech
+friert es beim Tippen ein. Es war nie zu wenig Rechenleistung; es war
+der Weg zum Bildschirm.
+
+Behoben: `memory::write_combining_einrichten()` stellt PAT-Eintrag 1
+(bisher WT, erreichbar über PWT) auf **Write-Combining**, und
+`framebuffer::init` schaltet die Seiten des vorderen Puffers darauf um
+(`update_flags`, kein zweites Mapping — Aliasing mit verschiedenen
+Speichertypen ist verboten). Die CPU sammelt benachbarte Schreibzugriffe
+dann in 64-Byte-Bursts.
+
+Der Back-Buffer bleibt gecachtes RAM: Dort wird *gezeichnet*, und Lesen
+aus WC-Speicher wäre langsam.
+
+`map_mmio` ist nicht betroffen — es setzt PCD **und** PWT, landet also
+bei Eintrag 3 (UC). Geräteregister müssen ungecacht bleiben.
+
+**Ehrliche Grenze:** Die PAT kann einen Bereich nicht besser machen, als
+die MTRRs erlauben. Steht er dort auf UC, bleibt es bei UC. Ob es auf
+dieser Maschine greift, sagt die Messung.
+
+**Die Messung steht jetzt im Diagnose-Schirm** (Taste D):
+
+```
+Bildschirm: Vollbild-present 168 us (WC verfuegbar)
+```
+
+In QEMU 168 µs — dort war es erwartungsgemäß nie das Problem. Auf dem
+Laptop ist diese Zahl die Antwort: unter 2 ms = in Ordnung, über 30 ms =
+ungecacht und die Ursache des Einfrierens.
