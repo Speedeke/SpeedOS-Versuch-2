@@ -26,7 +26,31 @@ use pc_keyboard::{layouts, DecodedKey, HandleControl, Keyboard, ScancodeSet1};
 /// Initialisierung (die allokiert!) GARANTIERT nicht heimlich beim
 /// ersten Zugriff im Interrupt-Handler passiert, sondern explizit
 /// in ScancodeStream::new().
+use core::sync::atomic::{AtomicU64, Ordering};
+
 static SCANCODE_QUEUE: OnceCell<ArrayQueue<u8>> = OnceCell::uninit();
+
+/// Wie viele Tasten verlorengingen, weil die Queue voll war.
+///
+/// Wird NUR gezaehlt, nie gedruckt — siehe `add_scancode`.
+static VERLORENE: AtomicU64 = AtomicU64::new(0);
+
+/// Wie viele Scancodes noch unverarbeitet warten.
+///
+/// ===================================================================
+/// DIE ZAHL, DIE RUECKSTAU SICHTBAR MACHT
+///
+/// Sie ist die Grundlage fuer den Gegendruck bei der Tastatur-
+/// wiederholung (`usb::xhci::hid_wiederholungen`): Wer noch nicht
+/// verarbeitet hat, was er schon bekommen hat, braucht nicht mehr.
+pub fn wartende_scancodes() -> usize {
+    SCANCODE_QUEUE.try_get().map(|q| q.len()).unwrap_or(0)
+}
+
+/// Wie viele Tasten wegen voller Queue verlorengingen (Diagnose).
+pub fn verlorene_tasten() -> u64 {
+    VERLORENE.load(Ordering::Relaxed)
+}
 
 /// Der Aufbewahrungsort für den Waker des Tastatur-Tasks.
 /// AtomicWaker ist die interrupt-sichere Variante: registrieren und
@@ -42,7 +66,18 @@ static WAKER: AtomicWaker = AtomicWaker::new();
 pub(crate) fn add_scancode(scancode: u8) {
     if let Ok(queue) = SCANCODE_QUEUE.try_get() {
         if queue.push(scancode).is_err() {
-            println!("WARNUNG: Scancode-Queue voll, Taste verloren");
+            // KEIN `println!` HIER. Es war eines von zwei Dingen, die
+            // auf dem Laptop eine Rueckkopplung erzeugt haben: Die
+            // Queue laeuft genau dann ueber, wenn das System schon
+            // ueberlastet ist — und `println!` rendert auf den
+            // Framebuffer, kostet also ausgerechnet in diesem Moment am
+            // meisten. Jede verlorene Taste erzeugte so noch mehr Last,
+            // wodurch die naechste erst recht verlorenging.
+            //
+            // Gezaehlt wird trotzdem: `verlorene_tasten()` sagt es dem,
+            // der danach fragt (Diagnose), ohne selbst Last zu
+            // erzeugen.
+            VERLORENE.fetch_add(1, Ordering::Relaxed);
         } else {
             // Dem Tastatur-Task Bescheid geben: Es gibt was zu tun!
             WAKER.wake();

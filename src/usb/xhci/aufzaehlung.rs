@@ -1208,11 +1208,14 @@ impl Controller {
     pub fn hid_wiederholungen(&mut self) {
         use crate::usb::hid;
         let jetzt = crate::zeit::ms_seit_boot();
+        // DER RUECKSTAU. Steht noch unverarbeitete Eingabe an, wird
+        // nichts nachgelegt — siehe `TastaturZustand::wiederholung`.
+        let stau = crate::task::keyboard::wartende_scancodes();
         for res in self.slots.iter_mut() {
             if res.hid_art != Some(hid::HidArt::Tastatur) {
                 continue;
             }
-            if let Some(code) = res.tastatur.wiederholung(jetzt) {
+            if let Some(code) = res.tastatur.wiederholung(jetzt, stau) {
                 scancode_einspeisen(code);
             }
         }

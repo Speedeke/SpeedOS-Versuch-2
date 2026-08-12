@@ -375,8 +375,48 @@ impl TastaturZustand {
     /// Faelliges Dauerfeuer erzeugen. Wird unabhaengig von Reports
     /// gerufen — sonst wiederholte sich nichts, solange das Geraet
     /// (korrekt) denselben Zustand meldet.
-    pub fn wiederholung(&mut self, jetzt_ms: u64) -> Option<Scancode> {
+    /// Faelliges Dauerfeuer erzeugen — **nur, wenn der Verbraucher
+    /// hinterherkommt**.
+    ///
+    /// ===================================================================
+    /// DIE RUECKKOPPLUNG, DIE DEN LAPTOP AUFGEHAENGT HAT
+    ///
+    /// Die erste Fassung schaute nur auf die Uhr. Das erzeugte eine
+    /// Schleife, die sich selbst am Leben hielt:
+    ///
+    ///   1. Taste gedrueckt -> Wiederholung scharf.
+    ///   2. Die Shell verarbeitet den Anschlag SYNCHRON — der
+    ///      kooperative Executor ist blockiert.
+    ///   3. Der USB-Task laeuft nicht, also wird das LOSLASS-Signal
+    ///      nicht verarbeitet; `wiederhol_taste` bleibt stehen.
+    ///   4. Kommt der Task endlich dran, ist die Frist laengst
+    ///      ueberschritten -> er erzeugt sofort eine Wiederholung.
+    ///   5. Die Shell verarbeitet sie -> zurueck zu 3.
+    ///
+    /// **Jeder erzeugte Anschlag garantierte den naechsten.** Die Maus
+    /// war nicht betroffen, weil sie keine Wiederholung hat — genau
+    /// deshalb lief sie, waehrend Tippen den Rechner anhielt.
+    ///
+    /// Der Fehler war nicht die Frist, sondern dass ein Erzeuger
+    /// Eingaben nachlegt, ohne zu pruefen, ob der Verbraucher sie
+    /// ueberhaupt abholt. Deshalb steht hier jetzt GEGENDRUCK: Liegt
+    /// noch unverarbeitete Eingabe in der Queue, wird NICHTS
+    /// nachgelegt. Wiederholung ist eine Bequemlichkeit fuer jemanden,
+    /// der mitkommt; wer im Rueckstand ist, braucht sie per Definition
+    /// nicht.
+    ///
+    /// `stau` ist die Zahl der wartenden Scancodes
+    /// (`task::keyboard::wartende_scancodes`). Sie wird uebergeben und
+    /// nicht hier geholt, damit diese Funktion rein bleibt und
+    /// testbar ist.
+    pub fn wiederholung(&mut self, jetzt_ms: u64, stau: usize) -> Option<Scancode> {
         if self.wiederhol_taste < 4 || jetzt_ms < self.wiederhol_faellig_ms {
+            return None;
+        }
+        // GEGENDRUCK: Der Verbraucher haengt noch. Nichts nachlegen —
+        // und die Frist NICHT verschieben, damit es sofort weitergeht,
+        // sobald er aufgeholt hat.
+        if stau > 0 {
             return None;
         }
         self.wiederhol_faellig_ms = jetzt_ms + WIEDERHOLUNG_MS;
@@ -589,15 +629,37 @@ mod tests {
         let mut z = TastaturZustand::default();
         z.report(&[0, 0, 0x04, 0, 0, 0, 0, 0], 1000);
         // Zu frueh.
-        assert!(z.wiederholung(1100).is_none());
-        assert!(z.wiederholung(1399).is_none());
+        assert!(z.wiederholung(1100, 0).is_none());
+        assert!(z.wiederholung(1399, 0).is_none());
         // Faellig.
-        let w = z.wiederholung(1400).expect("jetzt muss es feuern");
+        let w = z.wiederholung(1400, 0).expect("jetzt muss es feuern");
         assert_eq!(w.code, 0x1E);
         assert!(!w.los, "Dauerfeuer sind DRUECKE, keine Loslass-Codes");
         // Danach im kurzen Takt.
-        assert!(z.wiederholung(1420).is_none());
-        assert!(z.wiederholung(1440).is_some());
+        assert!(z.wiederholung(1420, 0).is_none());
+        assert!(z.wiederholung(1440, 0).is_some());
+    }
+
+    /// **DER GEGENDRUCK — der Fehler, der den Laptop aufhaengte.**
+    ///
+    /// Liegt noch unverarbeitete Eingabe in der Queue, darf KEINE
+    /// Wiederholung dazukommen. Sonst erzeugt jeder Anschlag Arbeit,
+    /// die den naechsten Anschlag ausloest.
+    #[test_case]
+    fn test_wiederholung_haelt_bei_rueckstau_an() {
+        let mut z = TastaturZustand::default();
+        z.report(&[0, 0, 0x04, 0, 0, 0, 0, 0], 1000);
+        // Faellig waere es — aber es stauen sich noch 5 Scancodes.
+        assert!(
+            z.wiederholung(1400, 5).is_none(),
+            "bei Rueckstau darf nichts nachgelegt werden"
+        );
+        // Und die Frist wurde NICHT verschoben: Sobald der Verbraucher
+        // aufgeholt hat, geht es sofort weiter.
+        assert!(
+            z.wiederholung(1400, 0).is_some(),
+            "ohne Stau muss es sofort feuern, nicht erst 40 ms spaeter"
+        );
     }
 
     #[test_case]
@@ -605,7 +667,7 @@ mod tests {
         let mut z = TastaturZustand::default();
         z.report(&[0, 0, 0x04, 0, 0, 0, 0, 0], 0);
         z.report(&[0, 0, 0, 0, 0, 0, 0, 0], 10);
-        assert!(z.wiederholung(10_000).is_none(), "losgelassen = kein Feuer");
+        assert!(z.wiederholung(10_000, 0).is_none(), "losgelassen = kein Feuer");
     }
 
     // -------------------------------------------------------------------
