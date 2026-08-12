@@ -346,8 +346,22 @@ impl Chrome {
     /// Verweis unter dem Cursor liegt oder eine Meldung ansteht. Eine
     /// Zeile, die immer da ist, kostet bei jeder Seite Platz fuer eine
     /// Auskunft, die man meistens nicht braucht.
-    pub fn status_zeichnen(&self, leinwand: &mut dyn Leinwand, k: &UiKontext, hoehe: i32) {
-        let Some(text) = self.status_text() else {
+    /// Die Statuszeile. `vorrang` gewinnt ueber alles andere.
+    ///
+    /// DIE SUCHLEISTE IST KEIN EIGENES WIDGET, sondern nutzt diese
+    /// Zeile. Das ist keine Sparmassnahme: Die Zeile liegt schon unten,
+    /// sie waechst mit dem Text, und ein zusaetzlicher Balken haette den
+    /// Seiteninhalt bei jedem Oeffnen und Schliessen neu layouten
+    /// muessen (die Sichthoehe aendert sich). So kostet die Suche KEIN
+    /// Layout — genau die Zusage aus Serie 8, Teil 7.
+    pub fn status_zeichnen(
+        &self,
+        leinwand: &mut dyn Leinwand,
+        k: &UiKontext,
+        hoehe: i32,
+        vorrang: Option<String>,
+    ) {
+        let Some(text) = vorrang.or_else(|| self.status_text()) else {
             return;
         };
         let mut m = Maler::neu(leinwand, *k);

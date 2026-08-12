@@ -38,6 +38,7 @@ mod merkliste;
 mod ort;
 mod seiten;
 mod stil;
+mod suche;
 mod tab;
 
 use alloc::string::String;
@@ -51,6 +52,7 @@ use libspeed::{println, Argumente};
 use ort::{Intern, Ort};
 use speedpaint::maler::Auftrag;
 use speedpaint::{malen, Anlass, Massnahme, Scrollschritt, Sicht};
+use libspeed::leinwand::RasterMetrik;
 use speedui::{Farbe, Rechteck, Taste, UiKontext};
 use tab::{Tab, TabZustand};
 
@@ -64,6 +66,12 @@ const START_BREITE: usize = 1000;
 const START_HOEHE: usize = 680;
 const BALKEN_BREITE: i32 = 12;
 const SEITE_HINTERGRUND: Farbe = Farbe::neu(255, 255, 255);
+/// Ein gefundener Treffer. Halbdurchsichtig, damit der Text darunter
+/// LESBAR bleibt — ein deckender Kasten macht aus dem Fund ein Loch.
+const TREFFER_FARBE: Farbe = Farbe::mit_alpha(255, 230, 0, 110);
+/// Der Treffer, auf dem man gerade steht — kraeftiger, sonst sieht man
+/// bei zwanzig Kaesten nicht, wohin „weiter" gesprungen ist.
+const TREFFER_AKTIV: Farbe = Farbe::mit_alpha(255, 150, 0, 160);
 const BALKEN_SPUR: Farbe = Farbe::mit_alpha(0, 0, 0, 30);
 const BALKEN_GREIFER: Farbe = Farbe::neu(150, 150, 160);
 /// Wie viel der Cache einer Sitzung halten darf.
@@ -86,6 +94,10 @@ struct Browser {
     /// Der Verweis unter dem Cursor (fuer die Statuszeile).
     unter_cursor: Option<String>,
     balken_gefasst: bool,
+    /// Die Suchleiste (Strg+F). Sie gehoert dem BROWSER und nicht dem
+    /// Tab: Ein Tabwechsel soll die Suche nicht mitschleppen, und der
+    /// Begriff im Feld ist das, was der Benutzer gerade tippt.
+    suche: suche::Suche,
 }
 
 impl Browser {
@@ -431,6 +443,7 @@ impl Browser {
                 bilder,
             );
         }
+        self.treffer_zeichnen(streifen);
         self.balken_zeichnen();
     }
 
@@ -454,13 +467,20 @@ impl Browser {
         let kann_vor = self.tab().kann_vor();
         let gemerkt = self.merkliste.kennt(&self.tab().ort.als_text());
         let hoehe = self.fenster.hoehe() as i32;
+        // Die Suchleiste hat Vorrang vor Verweis-Ziel und Meldung: Wer
+        // gerade tippt, will sehen, was er tippt.
+        let such_zeile = if self.suche.offen {
+            Some(self.suche.beschriftung())
+        } else {
+            None
+        };
         // Der Chrome braucht `&self.tabs` UND `&mut self.fenster` — die
         // Leinwand wird deshalb in einem eigenen Block gehalten.
         let chrome = &self.chrome;
         let tabs = &self.tabs;
         let mut leinwand = FensterLeinwand::neu(&mut self.fenster);
         chrome.zeichnen(&mut leinwand, &k, tabs, aktiv, kann_zurueck, kann_vor, gemerkt);
-        chrome.status_zeichnen(&mut leinwand, &k, hoehe);
+        chrome.status_zeichnen(&mut leinwand, &k, hoehe, such_zeile);
     }
 
     /// Eine Massnahme aus `speedpaint::invalidierung` umsetzen.
@@ -490,6 +510,98 @@ impl Browser {
     }
 
     /// Nach einem Scroll-Schritt: verschieben und den Streifen malen.
+    // -----------------------------------------------------------------
+    // SUCHEN (Strg+F)
+    // -----------------------------------------------------------------
+
+    /// Die Textkarte des aktiven Tabs bauen.
+    ///
+    /// SIE WIRD NICHT AUFBEWAHRT. Bei jedem Auffrischen neu zu bauen
+    /// kostet einen Lauf ueber die Anzeigeliste; sie festzuhalten hiesse,
+    /// den gesamten Seitentext ein zweites Mal im Speicher zu halten (bei
+    /// Wikipedia rund 300 KiB je Tab, mal acht Tabs) UND ihn bei jedem
+    /// Layout ungueltig zu machen. Gebaut wird nur, wenn wirklich gesucht
+    /// wird — also nicht im Normalbetrieb.
+    fn textkarte(&self) -> speedlayout::Textkarte {
+        speedlayout::Textkarte::neu(&self.tabs[self.aktiv].liste, &RasterMetrik)
+    }
+
+    fn suche_auffrischen(&mut self) {
+        if !self.suche.offen {
+            return;
+        }
+        let karte = self.textkarte();
+        self.suche.auffrischen(&karte);
+    }
+
+    /// Den aktuellen Treffer in die Sicht holen.
+    ///
+    /// **NUR, WENN ER NICHT SCHON ZU SEHEN IST.** Bei jedem Tastendruck
+    /// zu springen waere unruhig: Wer „Rust" tippt, steht nach „R"
+    /// vielleicht schon auf dem richtigen Treffer, und das Bild soll
+    /// dann stehenbleiben.
+    ///
+    /// Gescrollt wird so, dass der Treffer im oberen DRITTEL landet —
+    /// nicht an den obersten Rand. Ein Treffer, der genau an der
+    /// Oberkante klebt, ist ohne seinen Zusammenhang schwer zu lesen.
+    fn zum_treffer_springen(&mut self) {
+        let Some(treffer) = self.suche.aktueller() else {
+            return;
+        };
+        let karte = self.textkarte();
+        let rechtecke = karte.rechtecke(treffer.von, treffer.bis, &RasterMetrik);
+        let Some(erstes) = rechtecke.first() else {
+            return;
+        };
+        let sicht = &self.tabs[self.aktiv].sicht;
+        let oben = sicht.versatz();
+        let hoehe = sicht.bereich.hoehe;
+        let unten = oben + hoehe;
+        if erstes.y >= oben && erstes.unten() <= unten {
+            return; // schon sichtbar
+        }
+        let ziel = erstes.y - hoehe / 3;
+        let folge = self.tabs[self.aktiv].sicht.versatz_setzen(ziel);
+        let _ = folge;
+    }
+
+    /// Die Treffer hervorheben. Laeuft NACH `malen`, damit die Kaesten
+    /// ueber dem Text liegen — sie werden mit Alpha gefuellt, der Text
+    /// bleibt also lesbar.
+    fn treffer_zeichnen(&mut self, streifen: Rechteck) {
+        if !self.suche.offen || self.suche.anzahl() == 0 {
+            return;
+        }
+        let karte = self.textkarte();
+        let kaesten = self.suche.rechtecke(&karte, &RasterMetrik);
+        let sicht = self.tabs[self.aktiv].sicht;
+        use speedui::Leinwand;
+        let mut leinwand = FensterLeinwand::neu(&mut self.fenster);
+        for (r, ist_aktuell) in kaesten {
+            // Seiten- in Fensterkoordinaten.
+            let auf_schirm = Rechteck::neu(
+                r.x + sicht.bereich.x,
+                r.y - sicht.versatz() + sicht.bereich.y,
+                r.breite,
+                r.hoehe,
+            );
+            // Ausserhalb des gerade gemalten Streifens hat es nichts zu
+            // suchen — sonst uebermalt eine Hervorhebung den Chrome.
+            // `speedui::Rechteck` hat kein `unten()` — von Hand.
+            if auf_schirm.y + auf_schirm.hoehe <= streifen.y
+                || auf_schirm.y >= streifen.y + streifen.hoehe
+            {
+                continue;
+            }
+            let farbe = if ist_aktuell {
+                TREFFER_AKTIV
+            } else {
+                TREFFER_FARBE
+            };
+            leinwand.fuellen(auf_schirm, farbe);
+        }
+    }
+
     fn scrollen(&mut self, schritt: Scrollschritt) {
         let folge = self.tabs[self.aktiv].sicht.scrollen(schritt);
         let anlass = Anlass::Scrollen {
@@ -541,6 +653,7 @@ fn haupt(argumente: &Argumente) -> i32 {
     let mut pruefen = false;
     let mut zyklus = false;
     let mut phasen = false;
+    let mut suchbegriff: Option<String> = None;
     let mut fenstergroesse = (START_BREITE, START_HOEHE);
     for i in 1..argumente.anzahl() {
         let Some(wort) = argumente.get(i) else { continue };
@@ -560,6 +673,13 @@ fn haupt(argumente: &Argumente) -> i32 {
             }
             if wort == "--phasen" {
                 phasen = true;
+            }
+            // `--suche=WORT` macht Strg+F pruefbar, ohne dass jemand
+            // tippen muss. Ohne diesen Schalter liesse sich die Suche nur
+            // fotografieren — dieselbe Ueberlegung wie bei `--pruefen`
+            // ueberhaupt (Serie 8, Teil 8).
+            if let Some(wort_text) = wort.strip_prefix("--suche=") {
+                suchbegriff = Some(String::from(wort_text));
             }
             if let Some(masse) = wort.strip_prefix("--fenster=") {
                 if let Some(gelesen) = masse_lesen(masse) {
@@ -596,6 +716,7 @@ fn haupt(argumente: &Argumente) -> i32 {
         merkliste,
         unter_cursor: None,
         balken_gefasst: false,
+        suche: suche::Suche::default(),
     };
     browser.tabs[0].sicht = Sicht::neu(browser.seiten_bereich(), 0);
 
@@ -614,6 +735,15 @@ fn haupt(argumente: &Argumente) -> i32 {
         zyklusmodus(&mut browser);
         let _ = browser.fenster.schliessen();
         return OK;
+    }
+
+    if let Some(begriff) = &suchbegriff {
+        browser.suche.oeffnen();
+        for c in begriff.chars() {
+            browser.suche.tippen(c);
+        }
+        browser.suche_auffrischen();
+        browser.zum_treffer_springen();
     }
 
     if pruefen {
@@ -951,6 +1081,20 @@ fn pruefmodus(b: &Browser) {
     // GETRENNT AUSGEWIESEN, nicht in die Rangliste gemischt: CSS-
     // Variablen sind EIN fehlendes Feature (`var()`), und Praefixe sind
     // Dubletten der Standard-Eigenschaft daneben.
+    // DIE SUCHE (Strg+F). `SUCHE_TEXT` ist der Text des aktuellen
+    // Treffers und nicht nur seine Nummer: Eine Zahl allein bewiese
+    // nicht, dass die richtige Stelle gefunden wurde.
+    if b.suche.offen {
+        println!("SUCHE_BEGRIFF={}", b.suche.beschriftung());
+        println!("SUCHE_TREFFER={}", b.suche.anzahl());
+        let karte = b.textkarte();
+        let text = match b.suche.aktueller() {
+            Some(t) => karte.text_zwischen(t.von, t.bis),
+            None => String::from("-"),
+        };
+        println!("SUCHE_TEXT={}", text);
+        println!("SUCHE_VERSATZ={}", tab.sicht.versatz());
+    }
     println!("STIL_VARIABLEN={}", tab.stil_befund.variablen);
     println!("STIL_PRAEFIXE={}", tab.stil_befund.praefixe);
     // WAS WIRKLICH DASTEHT. Die Zahl `BEFEHLE` sagt, wie VIEL gezeichnet
@@ -1408,6 +1552,49 @@ fn zeichen_taste(b: &mut Browser, zeichen: char, k: &UiKontext) -> bool {
     let code = zeichen as u32;
 
     // ===================================================================
+    // DIE SUCHLEISTE FAENGT ZUERST AB — aber nur, wenn nicht die
+    // Adressleiste den Fokus hat.
+    //
+    // Die Reihenfolge ist dieselbe Ueberlegung wie bei Strg+H weiter
+    // unten: Zwei Eingabefelder, eine Tastatur ohne Modifikatoren. Wer
+    // in der Adresszeile steht, tippt eine Adresse — auch dann, wenn
+    // die Suchleiste noch offen ist.
+    if b.suche.offen && !b.chrome.adresse_hat_fokus() {
+        match code {
+            8 => {
+                b.suche.ruecktaste();
+                b.suche_auffrischen();
+                b.alles_zeichnen();
+                return true;
+            }
+            13 => {
+                // Enter = naechster Treffer. Die Leiste bleibt offen —
+                // „weiter" ist der haeufigste Wunsch nach dem Tippen.
+                b.suche.weiter();
+                b.zum_treffer_springen();
+                b.alles_zeichnen();
+                return true;
+            }
+            27 => {
+                b.suche.schliessen();
+                b.alles_zeichnen();
+                return true;
+            }
+            // Steuerzeichen gehen NICHT ins Suchfeld — sonst landete
+            // Strg+F beim zweiten Druck als unsichtbares Zeichen im
+            // Begriff und die Suche faende ploetzlich nichts mehr.
+            c if c < 32 => {}
+            _ => {
+                b.suche.tippen(zeichen);
+                b.suche_auffrischen();
+                b.zum_treffer_springen();
+                b.alles_zeichnen();
+                return true;
+            }
+        }
+    }
+
+    // ===================================================================
     // DIE KOLLISION, DIE ES WIRKLICH GIBT: STRG+H **IST** BACKSPACE
     //
     // Beide sind U+0008. Das ist keine Eigenart von SpeedOS, sondern
@@ -1456,6 +1643,14 @@ fn zeichen_taste(b: &mut Browser, zeichen: char, k: &UiKontext) -> bool {
         2 => {
             // Strg+B = Lesezeichen-Seite.
             b.navigieren(Ort::Intern(Intern::Lesezeichen), true, None);
+            return true;
+        }
+        // Strg+F = 6 — die Suchleiste. Sie kollidiert mit nichts:
+        // U+0006 ist kein druckbares Zeichen und keine Sondertaste
+        // (anders als 8/9/13/27, siehe oben).
+        6 => {
+            b.suche.oeffnen();
+            b.alles_zeichnen();
             return true;
         }
         _ => {}

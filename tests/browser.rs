@@ -86,12 +86,26 @@ fn programme_vorhanden() -> bool {
 
 /// `browser --pruefen <adresse>` laufen lassen und die Ausgabe holen.
 fn pruefen(adresse: &str) -> String {
+    pruefen_mit(adresse, None)
+}
+
+/// Wie `pruefen`, mit einem zusaetzlichen Schalter.
+fn pruefen_mit(adresse: &str, extra: Option<&str>) -> String {
     let leitung = pipe::anlegen().expect("Pipe");
     let pfad = programme::pfad("browser");
     pipe::ende_uebernehmen(leitung, pipe::Ende::Schreiben);
     let pid = prozess::prozess_starten_mit(
         &pfad,
-        &["browser", adresse, "--pruefen", "--fenster=800x600"],
+        &match extra {
+            Some(zusatz) => alloc::vec![
+                "browser",
+                adresse,
+                "--pruefen",
+                "--fenster=800x600",
+                zusatz
+            ],
+            None => alloc::vec!["browser", adresse, "--pruefen", "--fenster=800x600"],
+        },
         None,
         None,
         Some(KernelObjekt::PipeSchreiben(leitung)),
@@ -655,4 +669,47 @@ fn test_browser_leckt_keine_frames() {
         nachher.saturating_sub(vorher),
         log_frames
     );
+}
+
+/// **IM DOKUMENT SUCHEN (Strg+F).** Der Beweis, dass die Textkarte aus
+/// `speedlayout` im laufenden Browser dasselbe tut wie im Host-Test.
+///
+/// Gesucht wird ein Ausdruck ueber eine WORTGRENZE hinweg — genau der
+/// Fall, an dem eine Suche je Anzeige-Befehl scheitern wuerde, denn
+/// speedlayout gibt jedes Wort einzeln aus.
+#[test_case]
+fn test_im_dokument_suchen() {
+    if !programme_vorhanden() {
+        return;
+    }
+    let pfad = programme::seite_pfad_von("stiltest.html");
+    let ausgabe = pruefen_mit(&pfad, Some("--suche=ENDE DES PRUEFSTANDS"));
+    serial_println!("--- browser --suche ---\n{}", ausgabe);
+
+    assert_eq!(feld(&ausgabe, "ZUSTAND="), "fertig");
+    assert_eq!(
+        feld(&ausgabe, "SUCHE_TREFFER="),
+        "1",
+        "der Ausdruck steht genau einmal auf der Seite"
+    );
+    assert_eq!(
+        feld(&ausgabe, "SUCHE_TEXT="),
+        "ENDE DES PRUEFSTANDS",
+        "gefunden wurde genau der gesuchte Text, nicht irgendeine Stelle"
+    );
+
+    // Gross/Klein wird ignoriert — dieselbe Seite, andere Schreibweise.
+    let klein = pruefen_mit(&pfad, Some("--suche=ende des pruefstands"));
+    assert_eq!(
+        feld(&klein, "SUCHE_TREFFER="),
+        "1",
+        "kleingeschrieben muss denselben Treffer finden"
+    );
+
+    // Was es nicht gibt, wird nicht gefunden — und der Browser lebt.
+    let nichts = pruefen_mit(&pfad, Some("--suche=GIBTESNICHTXYZ"));
+    assert_eq!(feld(&nichts, "SUCHE_TREFFER="), "0");
+    assert_eq!(feld(&nichts, "ZUSTAND="), "fertig", "die Seite steht weiter");
+
+    serial_println!("[BROWSER] Suche: Treffer gefunden, Gross/Klein egal, Fehlschlag folgenlos.");
 }
