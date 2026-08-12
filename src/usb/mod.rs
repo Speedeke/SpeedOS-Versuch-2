@@ -6,4 +6,6 @@
 // xHCI (Begruendung in docs/xhci.md §0: Auf Rechnern der letzten zehn
 // Jahre ist es der einzige Controller, der ueberhaupt vorhanden ist).
 
+pub mod deskriptor;
+pub mod geraet;
 pub mod xhci;
