@@ -249,6 +249,42 @@ pub unsafe fn map_page_zu(page: Page, frame: PhysFrame) -> Result<(), MapToError
     })
 }
 
+/// Gibt Seiten zurück, die `allocate_pages` geliefert hat.
+///
+/// ===================================================================
+/// WARUM ES DAS BIS SERIE 9 NICHT GAB — UND JETZT SCHON
+///
+/// Bis hierher war jeder `allocate_pages`-Aufruf eine Anschaffung FÜR
+/// IMMER: Virtqueues, Framebuffer, Ringpuffer leben, solange das System
+/// läuft. Ein Gegenstück wäre toter Code gewesen.
+///
+/// USB ändert das. Ein Gerät wird ein- und ausgesteckt, und jedes Mal
+/// entstehen Kontexte und Transfer-Ringe. Ohne Freigabe wäre jedes
+/// Umstecken ein Leck — nach zwanzig Mal wäre der Speicher weg, und
+/// zwar so langsam, dass es niemandem auffällt.
+///
+/// EHRLICHE GRENZE, dieselbe wie bei `allocate_virt_bereich`: Die
+/// FRAMES kommen zurück (der Bitmap-Allocator kann das), der VIRTUELLE
+/// Bereich nicht — der Zähler läuft monoton weiter. Bei einer Handvoll
+/// Seiten je Steckvorgang ist das folgenlos; die Frame-Bilanz, auf die
+/// es beim Leck-Test ankommt, stimmt exakt.
+pub fn seiten_freigeben(start: VirtAddr, anzahl: usize) {
+    for i in 0..anzahl {
+        let page = Page::<Size4KiB>::containing_address(start + (i * 4096) as u64);
+        match unmap_page(page) {
+            // SAFETY: Der Frame kommt gerade aus `unmap_page`, ist
+            // also nicht mehr gemappt und gehoerte uns — genau die
+            // Bedingung, die `frame_freigeben` verlangt.
+            Ok(frame) => unsafe { frame_freigeben(frame) },
+            Err(_) => {
+                // Nicht gemappt: Das ist kein Grund für eine Panik —
+                // eine doppelte Freigabe soll folgenlos bleiben, nicht
+                // den Kernel anhalten.
+            }
+        }
+    }
+}
+
 /// Reserviert einen zusammenhängenden VIRTUELLEN Bereich — ohne ihn zu
 /// mappen.
 ///

@@ -480,7 +480,7 @@ pub fn string_parsen(daten: &[u8]) -> Result<String, DeskriptorFehler> {
     for i in 0..paare.min(MAX_STRING_ZEICHEN) {
         worte.push(u16::from_le_bytes([nutz[i * 2], nutz[i * 2 + 1]]));
     }
-    Ok(char::decode_utf16(worte.into_iter())
+    Ok(char::decode_utf16(worte)
         .map(|r| r.unwrap_or(char::REPLACEMENT_CHARACTER))
         .collect())
 }

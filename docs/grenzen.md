@@ -592,6 +592,38 @@ wuerde aber jedem User-Programm fehlen. Es ist also eine ABI-Erweiterung
 (zwei Syscalls ueber copy_in/copy_out auf einen Blatt-Lock) und keine
 Browser-Funktion.
 
+## USB: Geraete werden erkannt, aber nicht BENUTZT (Serie 9, Teil 4)
+
+Stand nach Teil 4: Der Controller laeuft, Geraete werden vollstaendig
+aufgezaehlt (Port-Reset, Enable Slot, Address Device, Deskriptoren,
+Set Configuration, Interrupt-IN-Endpunkte konfiguriert), stehen im
+Verzeichnis `usb::geraet` und werden bei Hotplug sauber wieder
+abgeraeumt (Frame-Bilanz ueber 10 Runden byte-exakt stabil).
+
+**WAS WEITERHIN FEHLT — und es ist das Entscheidende:**
+
+* **KEINE UEBERTRAGUNG AUF DEN INTERRUPT-ENDPUNKTEN.** Die Ringe sind
+  angelegt und dem Controller gemeldet, aber es wird nie ein TRB
+  eingestellt und nie eine Doorbell dafuer gelaeutet. Tastendruecke und
+  Mausbewegungen kommen also NICHT an.
+* **Damit gilt die Aussage der Bestandsaufnahme unveraendert weiter:**
+  Auf echter Hardware ohne PS/2 ist SpeedOS NICHT BEDIENBAR. Ein
+  erkanntes Geraet ist noch kein benutzbares.
+* Kein HID-Report-Parser, keine Anbindung an `tastatur.rs`/`maus.rs`.
+* Nur die ERSTE Konfiguration wird gesetzt, nur Alternate Setting 0.
+* Kein Hub-Support: Geraete an einem Hub werden nicht gefunden, weil
+  nur die Wurzelports abgefragt werden.
+* Keine Interrupts — der Event Ring wird gepollt (100 ms). Fuer
+  Steckvorgaenge genug, fuer eine Tastatur zu langsam.
+* Kein `Reset Endpoint` / `Set TR Dequeue` nach einem Stall: Ein
+  Endpunkt, der einmal haengt, bleibt haengen.
+* Der Kommando-Ring hat **kein Link-TRB** (die Transfer-Ringe haben
+  eins). Bei 64 Eintraegen und einer Handvoll Kommandos je Geraet
+  reicht das; ein Umlauf wird LAUT gemeldet, statt still falsch zu
+  werden.
+
+(Frueherer Stand, Teil 3:)
+
 ## USB: der Controller laeuft, Geraete werden nicht bedient (Serie 9, Teil 3)
 
 Stand nach Teil 3 (docs/xhci.md): Der xHCI-Controller wird gefunden,

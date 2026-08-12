@@ -475,3 +475,70 @@ Event an Port 7, beide kommen an und werden aufgelöst.
   bestehenden Eingabepfade (`tastatur.rs`, `maus.rs`) einhängen.
 
 Erst danach ist die Aussage aus der Bestandsaufnahme eingelöst.
+
+---
+
+## 11. Teil 4: die Aufzaehlung — was dabei schiefging
+
+Umgesetzt ist der volle Ablauf (Port-Reset, Enable Slot, Device
+Context, Address Device, Deskriptoren, Set Configuration,
+Interrupt-IN-Endpunkte). Zwei Fehler haben ihn zuerst verhindert, und
+beide sind lehrreich.
+
+### Der Transfer-Ring braucht ein Link-TRB
+
+Ein Transfer Ring ist ein Array; der Controller laeuft stumpf
+vorwaerts. Was ihn an den Anfang zurueckschickt, ist ein **Link-TRB im
+letzten Eintrag** — mit gesetztem *Toggle Cycle*-Bit, an dem der
+Controller seinen eigenen Cycle-Zustand kippt.
+
+Die erste Fassung hatte keins, und der Ring hatte 16 Eintraege. Ein
+Control-Transfer kostet drei TRBs, die Aufzaehlung braucht sechs
+Transfers — nach dem fuenften lief der Ring ueber sein Ende hinaus.
+Symptom: Die ersten Deskriptoren kamen sauber an (Geraet, Konfiguration,
+sogar der String "QEMU"), und dann blieb der naechste Transfer einfach
+aus. Kein Fehlercode, nur eine abgelaufene Frist.
+
+Wichtig dabei: Das Cycle-Bit des Link-TRBs muss bei JEDEM Umlauf neu
+geschrieben werden — mit dem Zustand, den der Controller erwartet, wenn
+er dort ankommt (also dem alten). Ein einmal gesetztes Link-TRB stimmt
+nur beim ersten Umlauf.
+
+### Slot-Kontext: Block 0 im Device Context, Block 1 im Input Context
+
+`Address Device` lief durch, aber die ausgelesene USB-Adresse war **0**.
+Der Grund ist die Verwechslung, vor der der Kopfkommentar von
+`aufzaehlung.rs` warnt — und die dann trotzdem passiert ist:
+
+* Im **Input Context** liegt bei Block 0 der Control-Kopf (Add/Drop
+  Flags), der Slot-Kontext also bei Block 1.
+* Im **Device Context** gibt es diesen Kopf nicht: Dort ist der
+  Slot-Kontext **Block 0**.
+
+Gelesen wurde Block 1 — das ist im Device Context der EP0-Kontext, und
+dessen Wort 3 ist zufaellig 0. Ein Fehler, der wie "das Kommando hat
+nicht gewirkt" aussieht, obwohl das Kommando einwandfrei lief.
+
+### Das Ergebnis
+
+```
+[xhci]   Slot 1 zugeteilt.
+[xhci]   Address Device ok, USB-Adresse 1.
+[xhci]   Geraet 0627:0001, USB 2.00, Klasse 0, EP0-Paket 64
+[xhci]   Konfiguration 1: 1 Interface(s), 34 Byte, 1 uebersprungen
+[xhci]   "QEMU" / "QEMU USB Keyboard"
+[xhci]   1 Interrupt-IN-Endpunkt(e) konfiguriert (hoechste DCI 3).
+```
+
+### Der Leck-Test
+
+Zehn Runden Ein- und Ausstecken (`tools/usb_leck_test.py`): Die Zahl
+der freien Frames steht nach jeder Runde auf **12877/32768** —
+byte-exakt derselbe Wert. Je Geraet werden fuenf Seiten angelegt und
+fuenf zurueckgegeben; der Slot wird wiederverwendet, was zugleich
+beweist, dass `Disable Slot` wirkt.
+
+Moeglich ist das, weil `SlotRessourcen::seiten` **jede** Seite fuehrt
+und die Freigabe genau **eine** Schleife darueber ist. Waeren es
+mehrere Stellen, wuerde eine davon vergessen — und ein USB-Leck faellt
+erst nach dem zwanzigsten Umstecken auf.

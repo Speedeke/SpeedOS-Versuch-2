@@ -35,6 +35,7 @@
 // „haengt beim Booten" der teuerste aller Fehler, weil er keine Meldung
 // hinterlaesst — dieselbe Regel wie im ATA-Treiber.
 
+pub mod aufzaehlung;
 pub mod register;
 
 use crate::{pci, serial_println, zeit};
@@ -92,6 +93,16 @@ pub enum XhciFehler {
     LaeuftNicht,
     /// Speicher fuer die Ringe/Tabellen liess sich nicht anlegen.
     KeinSpeicher,
+    /// Ein Warteschritt lief in seine Frist.
+    Zeitueberschreitung,
+    /// Der Port war nach dem Reset nicht aktiviert.
+    PortNichtBereit,
+    /// Ein Kommando kam mit einem Completion Code != 1 zurueck.
+    KommandoFehlgeschlagen,
+    /// Ein Control-Transfer schlug fehl.
+    TransferFehlgeschlagen,
+    /// Das Geraet hat unbrauchbare Deskriptoren geliefert.
+    DeskriptorKaputt,
 }
 
 impl XhciFehler {
@@ -104,6 +115,11 @@ impl XhciFehler {
             XhciFehler::ZeitueberschreitungReset => "Reset nicht fertig geworden",
             XhciFehler::LaeuftNicht => "Controller laeuft nach RS nicht",
             XhciFehler::KeinSpeicher => "kein Speicher fuer Ringe/Tabellen",
+            XhciFehler::Zeitueberschreitung => "Frist abgelaufen",
+            XhciFehler::PortNichtBereit => "Port nach Reset nicht aktiviert",
+            XhciFehler::KommandoFehlgeschlagen => "Kommando fehlgeschlagen",
+            XhciFehler::TransferFehlgeschlagen => "Transfer fehlgeschlagen",
+            XhciFehler::DeskriptorKaputt => "Deskriptoren unbrauchbar",
         }
     }
 }
@@ -212,6 +228,27 @@ pub struct Controller {
     event_stand: RingStand,
     event_virt: VirtAddr,
     event_phys: PhysAddr,
+
+    /// Der Kommando-Ring.
+    cmd_virt: VirtAddr,
+    cmd_phys: PhysAddr,
+    cmd_stand: RingStand,
+    /// Die DCBAA — hier traegt jeder Slot seinen Device Context ein.
+    dcbaa_virt: VirtAddr,
+
+    /// Die Ressourcen der belegten Slots. **Die Freigabeliste.**
+    slots: Vec<aufzaehlung::SlotRessourcen>,
+
+    /// Ergebnisse, die die Event-Pumpe eingesammelt hat.
+    ///
+    /// WARUM ALS FELDER UND NICHT ALS RUECKGABEWERT: Waehrend wir auf
+    /// ein Kommando warten, koennen ANDERE Events eintreffen — ein
+    /// Steckvorgang zum Beispiel. Die Pumpe leert den Ring immer ganz;
+    /// was gerade niemand erwartet, wird hier abgelegt statt verworfen.
+    /// Ein verworfenes Port-Event waere ein Geraet, das nie erkannt wird.
+    letztes_kommando: Option<aufzaehlung::KommandoErgebnis>,
+    letzter_transfer: Option<u8>,
+    port_warteschlange: Vec<u8>,
 
     /// Die zuletzt gesehenen Port-Zustaende — fuer `usb` und um
     /// Aenderungen zu erkennen.
@@ -609,10 +646,51 @@ fn starten() -> Result<(), XhciFehler> {
         event_stand: RingStand::neu(RING_EINTRAEGE),
         event_virt,
         event_phys,
+        cmd_virt,
+        cmd_phys,
+        cmd_stand: RingStand::neu(RING_EINTRAEGE),
+        dcbaa_virt,
+        slots: Vec::new(),
+        letztes_kommando: None,
+        letzter_transfer: None,
+        port_warteschlange: Vec::new(),
         ports,
         speicher,
     };
     *CONTROLLER.lock() = Some(controller);
+
+    // DIE SCHON STECKENDEN GERAETE AUFZAEHLEN.
+    //
+    // Sie erzeugen KEIN Port-Event (ihr CSC-Bit stand, bevor wir
+    // liefen — siehe docs/xhci.md §9a). Ohne diesen Durchgang wuerde
+    // eine beim Boot angesteckte Tastatur nie erkannt, und genau die
+    // ist der Anwendungsfall.
+    {
+        let mut gesperrt = CONTROLLER.lock();
+        if let Some(c) = gesperrt.as_mut() {
+            for port in 1..=c.max_ports {
+                let belegt = c
+                    .ports
+                    .get((port - 1) as usize)
+                    .map(|z| z.angeschlossen)
+                    .unwrap_or(false);
+                if belegt {
+                    match c.geraet_aufzaehlen(port) {
+                        Ok(slot) => serial_println!(
+                            "[xhci] Startgeraet an Port {} erkannt (Slot {}).",
+                            port,
+                            slot
+                        ),
+                        Err(fehler) => serial_println!(
+                            "[xhci] Port {}: Aufzaehlung fehlgeschlagen — {}",
+                            port,
+                            fehler.text()
+                        ),
+                    }
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -723,19 +801,27 @@ impl Controller {
         ]
     }
 
-    /// Alle anstehenden Events abholen und protokollieren.
+    /// **DIE EVENT-PUMPE.** Leert den Event Ring vollstaendig.
     ///
-    /// Liefert die Zahl der verarbeiteten Events. Wird vom
-    /// `usb_task` gepollt (docs/xhci.md §7).
+    /// ===================================================================
+    /// SIE LEERT IMMER GANZ, UND SIE VERWIRFT NIE
+    ///
+    /// Waehrend die Aufzaehlung auf ein Kommando wartet, koennen andere
+    /// Events eintreffen — ein zweites Geraet wird eingesteckt, ein
+    /// Transfer wird fertig. Eine Pumpe, die beim gesuchten Event
+    /// aufhoert, liesse den Rest im Ring liegen; eine, die Unerwartetes
+    /// wegwirft, verloere Steckvorgaenge.
+    ///
+    /// Deshalb: Der Ring wird IMMER bis zum Ende gelesen, und was
+    /// gerade niemand erwartet, landet in einem Feld
+    /// (`letztes_kommando`, `letzter_transfer`, `port_warteschlange`).
     pub fn events_abholen(&mut self) -> usize {
         let mut anzahl = 0usize;
         loop {
-            // SAFETY: event_stand.index ist immer < RING_EINTRAEGE
-            // (RingStand::weiter klemmt).
+            // SAFETY: event_stand.index ist immer < RING_EINTRAEGE.
             let trb = unsafe { self.event_trb(self.event_stand.index) };
             let cycle = trb_cycle(trb[3]);
-            // DAS IST DER GANZE TEST: Stimmt das Cycle-Bit nicht mit
-            // unserem Zustand ueberein, ist der Ring LEER — kein
+            // Stimmt das Cycle-Bit nicht, ist der Ring LEER — kein
             // Fehlerfall, sondern der Normalzustand.
             if !self.event_stand.gehoert_uns(cycle) {
                 break;
@@ -745,11 +831,24 @@ impl Controller {
                 TRB_TYP_PORT_STATUS_CHANGE => {
                     let port = port_aus_event(trb[0]);
                     serial_println!("[xhci] EVENT: Port-Status-Aenderung an Port {}", port);
-                    self.port_behandeln(port);
+                    if !self.port_warteschlange.contains(&port) {
+                        self.port_warteschlange.push(port);
+                    }
+                }
+                TRB_TYP_COMMAND_COMPLETION => {
+                    // Der Completion Code steht in Wort 2, Bits 24..31;
+                    // die Slot-ID in Wort 3, Bits 24..31.
+                    self.letztes_kommando = Some(aufzaehlung::KommandoErgebnis {
+                        code: (trb[2] >> 24) as u8,
+                        slot: (trb[3] >> 24) as u8,
+                    });
+                }
+                TRB_TYP_TRANSFER_EVENT => {
+                    self.letzter_transfer = Some((trb[2] >> 24) as u8);
                 }
                 _ => {
                     serial_println!(
-                        "[xhci] EVENT: {} (Typ {}) — in diesem Schritt nicht behandelt.",
+                        "[xhci] EVENT: {} (Typ {}) — nicht behandelt.",
                         trb_typ_text(typ),
                         typ
                     );
@@ -757,9 +856,6 @@ impl Controller {
             }
             self.event_stand.weiter();
             anzahl += 1;
-            // Schutz gegen einen Ring, der aus irgendeinem Grund nur
-            // noch gueltige TRBs liefert: Wir verarbeiten hoechstens
-            // einen ganzen Umlauf je Durchgang.
             if anzahl > RING_EINTRAEGE as usize {
                 serial_println!("[xhci] WARNUNG: Event Ring liefert ohne Ende — abgebrochen.");
                 break;
@@ -769,6 +865,33 @@ impl Controller {
             self.erdp_schreiben();
         }
         anzahl
+    }
+
+    /// Die Pumpe laufen lassen und ein Kommando-Ergebnis abholen.
+    ///
+    /// `_erwartet` ist die TRB-Adresse des abgesetzten Kommandos. Sie
+    /// wird heute NICHT zur Zuordnung benutzt, weil immer nur EIN
+    /// Kommando offen ist (siehe `kommando`) — sie steht im Aufruf,
+    /// damit die Stelle sichtbar bleibt, an der eine Zuordnung
+    /// hingehoerte, sobald mehrere Kommandos gleichzeitig laufen.
+    pub(super) fn events_durchsehen(
+        &mut self,
+        _erwartet: Option<u64>,
+    ) -> Result<Option<aufzaehlung::KommandoErgebnis>, XhciFehler> {
+        self.events_abholen();
+        Ok(self.letztes_kommando.take())
+    }
+
+    /// Die Pumpe laufen lassen und einen Transfer-Code abholen.
+    pub(super) fn transfer_event_suchen(&mut self) -> Result<Option<u8>, XhciFehler> {
+        self.events_abholen();
+        Ok(self.letzter_transfer.take())
+    }
+
+    /// Die Ports, an denen sich etwas geaendert hat — und die Liste
+    /// dabei leeren.
+    pub fn ports_mit_aenderung(&mut self) -> Vec<u8> {
+        core::mem::take(&mut self.port_warteschlange)
     }
 
     /// Dem Controller sagen, wie weit wir gelesen haben.
@@ -786,38 +909,33 @@ impl Controller {
         }
     }
 
-    /// Einen Port nach einer gemeldeten Aenderung neu einlesen,
-    /// protokollieren und die Aenderungs-Bits quittieren.
-    fn port_behandeln(&mut self, port_eins_basiert: u8) {
-        if port_eins_basiert == 0 || port_eins_basiert > self.max_ports {
+    /// Auf eine Port-Aenderung reagieren: aufzaehlen oder abraeumen.
+    ///
+    /// ===================================================================
+    /// DIE AENDERUNGS-BITS WERDEN ZUERST QUITTIERT
+    ///
+    /// Erst quittieren, dann handeln — nicht umgekehrt. Die Aufzaehlung
+    /// dauert Millisekunden und macht selbst einen Port-Reset, der
+    /// weitere Aenderungs-Bits setzt. Wer HINTERHER quittiert, loescht
+    /// dabei die Meldung, die waehrenddessen entstanden ist.
+    ///
+    /// Quittiert wird ausserdem NUR mit den Aenderungs-Bits — der ganze
+    /// gelesene Wert zurueckgeschrieben wuerde ueber `PED` den Port
+    /// abschalten (siehe `portsc_quittierung`).
+    pub fn port_wechsel_behandeln(&mut self, port: u8) {
+        if port == 0 || port > self.max_ports {
             serial_println!(
                 "[xhci] EVENT nennt Port {}, es gibt aber nur {} — ignoriert.",
-                port_eins_basiert,
+                port,
                 self.max_ports
             );
             return;
         }
-        let index = (port_eins_basiert - 1) as u64;
+        let index = (port - 1) as u64;
         let versatz = OP_PORTSC_BASIS + index * OP_PORT_ABSTAND;
         // SAFETY: index < max_ports, siehe Pruefung oben.
         let roh = unsafe { self.op.lese32(versatz) };
         let zustand = portsc_lesen(roh);
-        serial_println!(
-            "[xhci]   Port {}: {}{}, Tempo {} (PORTSC=0x{:08x})",
-            port_eins_basiert,
-            if zustand.angeschlossen {
-                "angeschlossen"
-            } else {
-                "frei"
-            },
-            if zustand.aktiviert { ", aktiviert" } else { "" },
-            zustand.tempo.text(),
-            roh
-        );
-        // QUITTIEREN — aber NUR die Aenderungs-Bits. Wer den ganzen
-        // gelesenen Wert zurueckschreibt, loescht dabei jede andere
-        // anstehende Meldung UND deaktiviert ueber PED den Port
-        // (siehe `portsc_quittierung`).
         let zu_quittieren = roh & PORTSC_NICHT_ANFASSEN & !(1 << 1);
         if zu_quittieren != 0 {
             // SAFETY: wie oben.
@@ -828,6 +946,44 @@ impl Controller {
         }
         if let Some(eintrag) = self.ports.get_mut(index as usize) {
             *eintrag = zustand;
+        }
+        serial_println!(
+            "[xhci]   Port {}: {}{}, Tempo {} (PORTSC=0x{:08x})",
+            port,
+            if zustand.angeschlossen { "angeschlossen" } else { "frei" },
+            if zustand.aktiviert { ", aktiviert" } else { "" },
+            zustand.tempo.text(),
+            roh
+        );
+
+        // Steckt schon ein Geraet an diesem Port bei uns im Verzeichnis?
+        let bekannte = crate::usb::geraet::slots_an_port(port);
+
+        if zustand.angeschlossen && bekannte.is_empty() {
+            // NEU EINGESTECKT.
+            match self.geraet_aufzaehlen(port) {
+                Ok(slot) => serial_println!(
+                    "[xhci] Geraet an Port {} erkannt (Slot {}). Jetzt {} USB-Geraet(e).",
+                    port,
+                    slot,
+                    crate::usb::geraet::anzahl()
+                ),
+                Err(fehler) => serial_println!(
+                    "[xhci] Port {}: Aufzaehlung fehlgeschlagen — {}",
+                    port,
+                    fehler.text()
+                ),
+            }
+        } else if !zustand.angeschlossen && !bekannte.is_empty() {
+            // ABGEZOGEN — jeder Slot dieses Ports wird abgeraeumt.
+            for slot in bekannte {
+                self.geraet_entfernen(slot);
+            }
+            serial_println!(
+                "[xhci] Port {} ist frei. Noch {} USB-Geraet(e).",
+                port,
+                crate::usb::geraet::anzahl()
+            );
         }
     }
 
@@ -1170,6 +1326,13 @@ pub async fn usb_task() {
         mit_controller(|c| {
             if let Some(controller) = c {
                 controller.events_abholen();
+                // DIE PORTS ERST NACH DER PUMPE BEHANDELN. Waehrend
+                // einer Aufzaehlung laufen weitere Kommandos, die
+                // ihrerseits Events erzeugen — die Pumpe darf dabei
+                // nicht rekursiv aus sich selbst heraus laufen.
+                for port in controller.ports_mit_aenderung() {
+                    controller.port_wechsel_behandeln(port);
+                }
             }
         });
         zeit::warte_ms(100).await;

@@ -770,6 +770,69 @@ impl Befehl for Usb {
                 );
             }
             konsole::set_color(Color::LightGray, Color::Black);
+
+            // ---- DIE GERAETE ----
+            println!("");
+            konsole::set_color(Color::LightCyan, Color::Black);
+            println!("Geraete ({})", crate::usb::geraet::anzahl());
+            konsole::set_color(Color::LightGray, Color::Black);
+            crate::usb::geraet::mit_geraeten(|liste| {
+                if liste.is_empty() {
+                    konsole::set_color(Color::DarkGray, Color::Black);
+                    println!("  (keins erkannt)");
+                    konsole::set_color(Color::LightGray, Color::Black);
+                    return;
+                }
+                for g in liste {
+                    let (kl, uk, pr) = g.klasse_finden();
+                    konsole::set_color(Color::LightGreen, Color::Black);
+                    println!(
+                        "  Slot {:>2}  Port {:>2}  Adr {:>3}  {}",
+                        g.slot,
+                        g.port,
+                        g.adresse,
+                        g.anzeigename()
+                    );
+                    konsole::set_color(Color::LightGray, Color::Black);
+                    if !g.hersteller.is_empty() {
+                        println!("           Hersteller: {}", g.hersteller);
+                    }
+                    println!(
+                        "           {:04x}:{:04x}  {}  (Klasse {:02x}/{:02x}/{:02x})  {}",
+                        g.geraet.hersteller_id,
+                        g.geraet.produkt_id,
+                        g.klassen_text(),
+                        kl,
+                        uk,
+                        pr,
+                        g.tempo
+                    );
+                    // Die Endpunkte — das, woran ein Treiber andockt.
+                    konsole::set_color(Color::DarkGray, Color::Black);
+                    for e in g.endpunkte() {
+                        println!(
+                            "           EP {:#04x}  {:<9} {:>4} B  Intervall {:>3}  DCI {}",
+                            e.adresse,
+                            e.art.text(),
+                            e.max_paket,
+                            e.intervall,
+                            e.dci()
+                        );
+                    }
+                    if g.konfiguration.befund.abgebrochen
+                        || g.konfiguration.befund.endpunkte_gekuerzt > 0
+                    {
+                        konsole::set_color(Color::Yellow, Color::Black);
+                        println!(
+                            "           ACHTUNG: Deskriptor gekuerzt ({} EP, {}abgebrochen)",
+                            g.konfiguration.befund.endpunkte_gekuerzt,
+                            if g.konfiguration.befund.abgebrochen { "" } else { "nicht " }
+                        );
+                    }
+                    konsole::set_color(Color::LightGray, Color::Black);
+                }
+            });
+
             println!("");
             if roh {
                 // Der Auszug aus den Interrupter-Registern und dem Event
