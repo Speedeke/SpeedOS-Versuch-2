@@ -648,7 +648,50 @@ use core::task::{Context, Poll};
 use futures_util::task::AtomicWaker;
 
 /// Wie viele Tasks GLEICHZEITIG auf Ticks warten können.
-const MAX_TICK_WARTER: usize = 8;
+///
+/// ===================================================================
+/// WARUM DIESE ZAHL GROSSZÜGIG SEIN MUSS — der Befund vom Laptop
+///
+/// Hier stand **8**, und das war die Ursache dafür, dass SpeedOS auf
+/// echter Hardware zäh wurde und sich aufhängte.
+///
+/// Der Grund steht unten im `None`-Zweig von `poll`: Wer keinen Slot
+/// bekommt, reiht sich SOFORT wieder ein (`wake_by_ref`). Das ist kein
+/// Warten, sondern ein **Busy-Spin mit voller Executor-Geschwindigkeit**
+/// — ein einziger solcher Task frisst die CPU und lässt alle anderen
+/// verhungern. Der alte Kommentar nannte das „busy, aber korrekt";
+/// korrekt war nur, dass niemand ewig schläft.
+///
+/// Bis Serie 8 warteten ungefähr sechs Tasks gleichzeitig auf Ticks,
+/// also blieb es unbemerkt. Serie 9 und 10 haben zwei weitere
+/// hinzugefügt (USB-Events, Audio-Mixer) — und damit lief die Liste
+/// über. In QEMU fiel es nicht auf, weil dort selten alle Tasks
+/// gleichzeitig warten; auf dem Laptop sofort.
+///
+/// 32 ist reichlich für alles, was der Kernel heute startet (14 Tasks
+/// plus Terminal-Sitzungen), und kostet 32 Zeiger. Wer neue Tasks
+/// ergänzt, hat damit Luft — und falls es doch je eng wird, MELDET es
+/// sich jetzt (siehe `SLOT_UEBERLAUF`), statt still die Maschine
+/// lahmzulegen.
+const MAX_TICK_WARTER: usize = 32;
+
+/// Wie oft kein Slot mehr frei war.
+///
+/// **Diese Zahl darf im Betrieb NIE wachsen.** Tut sie es, spinnt
+/// mindestens ein Task und die Maschine wird zäh — genau der Fehler,
+/// den es einmal gab. Sie wird deshalb gezählt und einmalig gemeldet,
+/// statt still zu bleiben.
+pub static SLOT_UEBERLAUF: AtomicU64 = AtomicU64::new(0);
+
+/// Wie viele Slots gerade belegt sind — für `meminfo`/Diagnose.
+pub fn tick_warter_belegt() -> usize {
+    SLOT_BELEGT.iter().filter(|b| b.load(Ordering::Relaxed)).count()
+}
+
+/// Wie oft die Slots nicht reichten (0 ist der Sollwert).
+pub fn tick_warter_ueberlauf() -> u64 {
+    SLOT_UEBERLAUF.load(Ordering::Relaxed)
+}
 
 /// Die Waker-Slots samt Belegt-Markierung.
 static TICK_WARTER: [AtomicWaker; MAX_TICK_WARTER] =
@@ -717,9 +760,30 @@ impl Future for NaechsterTick {
                 }
             }
             None => {
-                // Alle Slots voll (mehr als 8 Warter): Notfall-Modus —
-                // sich selbst sofort wieder einreihen (busy, aber
-                // korrekt; besser als ewig zu schlafen).
+                // ALLE SLOTS VOLL. Das ist der Pfad, der SpeedOS auf dem
+                // Laptop lahmgelegt hat: `wake_by_ref` reiht die Future
+                // sofort wieder ein, sie wird sofort wieder gepollt,
+                // findet wieder keinen Slot — ein Busy-Spin mit voller
+                // Executor-Geschwindigkeit, der alle anderen Tasks
+                // aushungert.
+                //
+                // Der Spin BLEIBT, weil es keine korrekte Alternative
+                // gibt (ohne Slot gibt es niemanden, der weckt — ewig
+                // schlafen wäre schlimmer). Was sich ändert: Es fällt
+                // jetzt AUF. Die Zahl wird gezählt und beim ERSTEN Mal
+                // gemeldet — ein Fehler, der sich meldet, ist ein
+                // Fehler, den man findet.
+                //
+                // Mit MAX_TICK_WARTER = 32 darf dieser Zweig im Betrieb
+                // gar nicht mehr vorkommen.
+                let vorher = SLOT_UEBERLAUF.fetch_add(1, Ordering::Relaxed);
+                if vorher == 0 {
+                    crate::serial_println!(
+                        "[zeit] WARNUNG: mehr als {} Tick-Warter — ein Task spinnt jetzt \
+                         und macht das System zaeh. MAX_TICK_WARTER erhoehen!",
+                        MAX_TICK_WARTER
+                    );
+                }
                 cx.waker().wake_by_ref();
                 Poll::Pending
             }
@@ -857,5 +921,128 @@ mod tests {
             x86_64::instructions::hlt();
         }
         assert!(ms_seit_boot() > vorher);
+    }
+}
+
+// ===========================================================================
+// TICK-WARTER-SLOTS — der Fehler, der SpeedOS auf dem Laptop lahmlegte
+// ===========================================================================
+
+#[cfg(test)]
+mod slot_tests {
+    use super::*;
+    use crate::task::{executor::Executor, Task};
+    use alloc::sync::Arc;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    /// **DIE ZAHL MUSS ZU DEN TASKS PASSEN, DIE main.rs STARTET.**
+    ///
+    /// Genau daran ist es gescheitert: `MAX_TICK_WARTER` stand auf 8,
+    /// und Serie 9/10 haben zwei weitere Tick-Warter hinzugefuegt
+    /// (USB-Events, Audio-Mixer). Der Ueberlauf spinnt — er haengt
+    /// nicht, er FRISST die CPU, und deshalb sah es wie ein zaehes
+    /// System aus statt wie ein Fehler.
+    ///
+    /// Dieser Test ist die Bremse dagegen: Wer kuenftig Tasks
+    /// hinzufuegt, ohne die Slots zu erhoehen, faellt hier auf.
+    #[test_case]
+    fn test_genug_slots_fuer_alle_kernel_tasks() {
+        // Stand Serie 10: 14 Tasks in main.rs, dazu Terminal-Sitzungen.
+        // Nicht alle warten gleichzeitig auf Ticks — aber die Grenze
+        // muss ueber der Gesamtzahl liegen, nicht knapp darunter.
+        assert!(
+            MAX_TICK_WARTER >= 24,
+            "MAX_TICK_WARTER ist {} — zu knapp. Der Ueberlauf-Zweig \
+             spinnt und macht das System zaeh (siehe Kommentar dort).",
+            MAX_TICK_WARTER
+        );
+    }
+
+    /// **KEIN UEBERLAUF IM BETRIEB.** Diese Zahl ist im laufenden
+    /// System der Beweis, dass kein Task spinnt.
+    #[test_case]
+    fn test_kein_slot_ueberlauf_im_betrieb() {
+        assert_eq!(
+            tick_warter_ueberlauf(),
+            0,
+            "Es gab {} Slot-Ueberlaeufe — mindestens ein Task spinnt \
+             und hungert die anderen aus.",
+            tick_warter_ueberlauf()
+        );
+    }
+
+    /// Slots werden beim Fallenlassen ZURUECKGEGEBEN.
+    ///
+    /// Ohne das waeren sie nach ein paar Dutzend `warte_ms`-Aufrufen
+    /// alle belegt — und dann spinnt wieder alles. Der Test laesst
+    /// viele Futures entstehen und vergehen und prueft danach, dass
+    /// nichts liegengeblieben ist.
+    #[test_case]
+    fn test_slots_werden_zurueckgegeben() {
+        let vorher = tick_warter_belegt();
+        for _ in 0..(MAX_TICK_WARTER * 4) {
+            // Eine Future ANLEGEN und sofort fallenlassen — sie belegt
+            // erst beim Pollen einen Slot, aber `Drop` muss auch dann
+            // sauber sein.
+            let f = warte_ms(1000);
+            drop(f);
+        }
+        assert_eq!(
+            tick_warter_belegt(),
+            vorher,
+            "Slots sind nach dem Fallenlassen belegt geblieben"
+        );
+    }
+
+    /// **DER EIGENTLICHE BEWEIS: mehr gleichzeitige Warter als frueher
+    /// Slots da waren — und ALLE kommen durch.**
+    ///
+    /// Zwoelf Tasks warten gleichzeitig; mit den alten 8 Slots haetten
+    /// vier davon gespinnt. Der Test laeuft nur dann in vertretbarer
+    /// Zeit durch, wenn keiner spinnt: Ein spinnender Task wuerde den
+    /// kooperativen Executor so beschaeftigen, dass die uebrigen
+    /// deutlich spaeter fertig werden.
+    #[test_case]
+    fn test_viele_gleichzeitige_warter_kommen_alle_durch() {
+        const WARTER: usize = 12;
+        let fertig = Arc::new(AtomicUsize::new(0));
+        let mut executor = Executor::mit_kapazitaet(64);
+
+        for _ in 0..WARTER {
+            let zaehler = fertig.clone();
+            executor.spawn(Task::new("slot-test", async move {
+                // Zwei Runden, damit der Slot wirklich belegt UND
+                // wieder freigegeben wird.
+                warte_ms(8).await;
+                warte_ms(8).await;
+                zaehler.fetch_add(1, Ordering::Relaxed);
+            }));
+        }
+
+        // Laufen lassen, bis alle fertig sind — mit Frist, damit ein
+        // echter Haenger den Test rot macht statt ihn haengen zu lassen.
+        let frist = ms_seit_boot() + 5_000;
+        while fertig.load(Ordering::Relaxed) < WARTER {
+            executor.run_ready_tasks();
+            if ms_seit_boot() > frist {
+                break;
+            }
+            warte_auf_interrupt();
+        }
+
+        assert_eq!(
+            fertig.load(Ordering::Relaxed),
+            WARTER,
+            "nur {} von {} Wartern sind fertig geworden — \
+             es gibt zu wenige Slots, und der Rest spinnt",
+            fertig.load(Ordering::Relaxed),
+            WARTER
+        );
+        assert_eq!(
+            tick_warter_ueberlauf(),
+            0,
+            "waehrend des Tests gab es {} Slot-Ueberlaeufe",
+            tick_warter_ueberlauf()
+        );
     }
 }

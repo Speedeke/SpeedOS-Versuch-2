@@ -236,3 +236,48 @@ unterscheidet drei Fälle, die von außen gleich aussehen.
 ### Fotos
 
 (hierher: Bootscreen, Diagnose-Schirm, Desktop)
+
+### Befund 1 (behoben): zu wenige Tick-Waker-Slots — DIE Ursache der Zähigkeit
+
+`zeit::MAX_TICK_WARTER` stand auf **8**. Wer keinen Slot bekam, lief in
+diesen Zweig:
+
+```rust
+None => {
+    cx.waker().wake_by_ref();   // sofort wieder einreihen
+    Poll::Pending
+}
+```
+
+Das ist **kein Warten, sondern ein Busy-Spin mit voller
+Executor-Geschwindigkeit**. Ein einziger solcher Task frisst die CPU
+und lässt alle anderen verhungern — Maus, Tastatur und Compositor
+werden zäh, und das System wirkt aufgehängt.
+
+Bis Serie 8 warteten ungefähr sechs Tasks gleichzeitig auf Ticks, also
+blieb es unbemerkt. **Serie 9 und 10 haben zwei weitere hinzugefügt**
+(USB-Events alle 8 ms, Audio-Mixer alle 4 ms) — damit lief die Liste
+über. In QEMU fiel es nicht auf, weil dort selten alle Tasks
+gleichzeitig warten; auf dem Laptop sofort.
+
+Behoben: 32 Slots, ein Überlauf-Zähler (`tick_warter_ueberlauf()`, im
+Betrieb 0) und eine einmalige serielle Meldung. **Der Spin bleibt** —
+ohne Slot gibt es niemanden, der weckt, und ewig zu schlafen wäre
+schlimmer. Was sich ändert: Er fällt auf.
+
+Vier Regressionstests in `zeit::slot_tests`, darunter zwölf
+gleichzeitige Warter (mit den alten 8 Slots hätten vier gespinnt).
+Gegengeprüft: Auf 8 zurückgestellt wird der Test rot.
+
+### Befund 2 (behoben): Mauszeiger ohne Maus
+
+Ein Pfeil mitten im Bild, obwohl weder PS/2- noch USB-Maus da war —
+unbeweglich, und damit vom Aussehen her nicht von einem abgestürzten
+System zu unterscheiden. `ZEIGER_DA` wird jetzt an einer Stelle
+gesetzt, die beide Wege abdeckt.
+
+### Offen
+
+Ob die Zähigkeit damit ganz weg ist, muss der nächste Lauf auf dem
+Laptop zeigen. Der Slot-Überlauf war messbar die größte Einzelursache,
+aber ob er die EINZIGE war, ist damit nicht bewiesen.

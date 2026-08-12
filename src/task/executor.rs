@@ -134,7 +134,10 @@ impl Executor {
     }
 
     /// Arbeitet alle aktuell anstehenden Aufgaben genau einmal ab.
-    fn run_ready_tasks(&mut self) {
+    /// `pub(crate)`, damit Tests den Executor SCHRITTWEISE laufen
+    /// lassen koennen (statt `run()`, das nie zurueckkehrt). Genau das
+    /// braucht der Slot-Test in `zeit.rs`.
+    pub(crate) fn run_ready_tasks(&mut self) {
         // 0. Beenden-Anforderungen aus dem Task-Manager: Der Task
         //    wird FALLEN GELASSEN (Drop der Future) — kooperativ
         //    heißt: Er endet an seinem aktuellen await-Punkt, nie
