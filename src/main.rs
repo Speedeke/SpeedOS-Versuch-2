@@ -176,6 +176,11 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // NetzGeraet in der Netz-Schicht REGISTRIEREN (Ethernet/ARP/IPv4/UDP
     // reden ab jetzt nur mit dem Trait). Kein Gerät -> stille Rückkehr.
     speed_os::virtio::net::init();
+    // xHCI (Serie 9, Teil 3): USB-Hostcontroller suchen und hochfahren.
+    // NACH pci::init (er muss enumeriert sein) und NACH der
+    // Heap-Erweiterung (die Ringe allozieren). Kein Controller ->
+    // stille Rueckkehr, wie bei virtio.
+    speed_os::usb::xhci::init();
     // DHCP: sich beim Boot automatisch eine IP holen (IP/Maske/Gateway/DNS).
     // Timeout 3 s -> Fallback auf statische Konfiguration per 'netz-ip'.
     // Pumpt den Empfang synchron; auf QEMU-slirp antwortet der Server sofort.
@@ -299,6 +304,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     executor.spawn(Task::new("Log-Schreiber", speed_os::protokoll::log_task()));
     executor.spawn(Task::new("PS/2-Maus", speed_os::maus::maus_task()));
     executor.spawn(Task::new("Netz-Dispatch", speed_os::netz::netz_task()));
+    executor.spawn(Task::new("USB-Events", speed_os::usb::xhci::usb_task()));
     // Der Socket-Takt: tickt TCP-Timer (Retransmits) auch dann, wenn gerade
     // nichts empfangen wird — sonst haengen Verbindungen bei Paketverlust.
     executor.spawn(Task::new(

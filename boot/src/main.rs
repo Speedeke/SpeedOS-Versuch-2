@@ -195,6 +195,29 @@ fn main() {
     // unser PIC/PIT von QEMU emuliert werden soll (WHPX-Eigenheit).
     qemu.arg("-accel").arg("whpx,kernel-irqchip=off");
     qemu.arg("-accel").arg("tcg");
+
+    // SPEEDOS_OHNE_PS2=1 — den 8042 abschalten (`i8042=off`).
+    //
+    // DAS IST DIE LAGE AUF ECHTER HARDWARE. Ein Notebook von 2017 hat
+    // keinen PS/2-Controller mehr; Tastatur und Touchpad haengen am
+    // xHCI. Solange der USB-Pfad keine Eingaben liefert, ist ein so
+    // gestarteter Rechner NICHT BEDIENBAR — genau deshalb gibt es den
+    // Schalter: Er ist der einzige Weg, den USB-Pfad isoliert zu
+    // pruefen, statt sich von einer stillschweigend weiterlaufenden
+    // PS/2-Tastatur taeuschen zu lassen.
+    //
+    // Standardmaessig AUS, aus demselben Grund wie oben.
+    let ohne_ps2 = std::env::var("SPEEDOS_OHNE_PS2")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    if ohne_ps2 {
+        qemu.arg("-machine").arg("pc,i8042=off");
+        if !test_modus {
+            eprintln!(
+                "[Runner] SPEEDOS_OHNE_PS2=1 — kein PS/2. Tastatur und Maus                  gibt es nur ueber USB; bis der xHCI-Treiber Eingaben                  liefert, ist die Maschine NICHT bedienbar (das ist der Zweck)."
+            );
+        }
+    }
     // CPU-MODELL — wählbar per SPEEDOS_CPU (Serie 7, Teil 1).
     //
     // GEMESSEN (docs/zufall.md §2): Unter WHPX sind RDSEED und RDRAND
@@ -255,6 +278,46 @@ fn main() {
     // pcap-Mitschnitt fuer die Wireshark-Gegenpruefung.
     qemu.arg("-netdev").arg("user,id=net0");
     qemu.arg("-device").arg("virtio-net-pci,netdev=net0");
+
+    // xHCI-Hostcontroller + zwei USB-Testgeraete (Serie 9, Teil 3).
+    //
+    // ZUSAETZLICH zu PS/2, nicht statt dessen: Solange der USB-Pfad noch
+    // keine Eingaben liefert, ist PS/2 die einzige Bedienung — ein
+    // Testlauf, der das Bedienen unmoeglich macht, waere ein Rueckschritt.
+    // QEMU laesst beides nebeneinander laufen, und der Kernel sieht dann
+    // dieselbe Lage wie ein aelterer PC: PS/2 UND USB.
+    //
+    // `qemu-xhci` ist QEMUs eigener Controller (nicht `nec-usb-xhci`) —
+    // er ist der besser gepflegte und meldet sich mit der
+    // Standard-Klassenkennung 0x0C/0x03/0x30, die der Treiber sucht.
+    qemu.arg("-device").arg("qemu-xhci,id=xhci");
+
+    // DIE USB-EINGABEGERAETE SIND STANDARDMAESSIG AUS — und das ist ein
+    // MESSERGEBNIS, keine Vorsicht.
+    //
+    // Erwartet war: `usb-kbd` haengt zusaetzlich zu PS/2 dran, und
+    // solange der Treiber sie nicht liest, bedient man die Maschine
+    // weiter ueber PS/2. GEMESSEN wurde das Gegenteil: QEMU leitet
+    // Tastendruecke an die ZULETZT angemeldete Tastatur, also an die
+    // USB-Tastatur. Die PS/2-Tastatur bekommt dann NICHTS mehr — und
+    // weil SpeedOS USB-HID noch nicht liest (das ist Teil 3), ist die
+    // Maschine schlicht nicht mehr bedienbar.
+    //
+    // Genau der Rueckschritt, der nicht passieren sollte. Der
+    // Controller selbst bleibt immer dran (er stiehlt nichts und wird
+    // fuer den Treiber gebraucht); die Geraete kommen nur auf Wunsch.
+    //
+    // SPEEDOS_USB_GERAETE=1 haengt sie an — fuer den Port-Event-Test
+    // und spaeter fuer den HID-Treiber.
+    if std::env::var("SPEEDOS_USB_GERAETE").map(|v| v == "1").unwrap_or(false) {
+        qemu.arg("-device").arg("usb-kbd,bus=xhci.0");
+        qemu.arg("-device").arg("usb-mouse,bus=xhci.0");
+        if !test_modus {
+            eprintln!(
+                "[Runner] SPEEDOS_USB_GERAETE=1 — USB-Tastatur und -Maus haengen dran.                  ACHTUNG: QEMU leitet die Tastatur dann DORTHIN, und bis der                  HID-Treiber steht (Serie 9, Teil 3+) ist die Maschine ueber                  die Tastatur nicht bedienbar."
+            );
+        }
+    }
     // SPEEDOS_NET_DELAY=<mikrosekunden>: QEMUs eingebauter filter-buffer
     // sammelt Pakete und laesst sie erst im gewaehlten Takt los — das ergibt
     // Verzoegerung UND Bursts (die Netem-Ersatzloesung fuer Windows-Hosts,

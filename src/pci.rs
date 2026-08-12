@@ -250,6 +250,43 @@ pub fn mit_geraeten<R>(f: impl FnOnce(&[PciGeraet]) -> R) -> R {
     f(&GERAETE.lock())
 }
 
+/// Findet das erste Gerät einer KLASSE (Basisklasse/Unterklasse/Prog-IF).
+///
+/// ===================================================================
+/// WARUM NICHT NACH VENDOR/DEVICE
+///
+/// `finde` sucht nach Hersteller und Modell — richtig für virtio, wo
+/// es genau ein bekanntes Gerät gibt. Für einen xHCI-Controller wäre
+/// es falsch: Es gibt Dutzende Hersteller (Intel, AMD, Renesas, VIA,
+/// ASMedia …), und eine Liste davon wäre ab dem nächsten Notebook
+/// unvollständig.
+///
+/// Genau dafür gibt es die Klassenkennung: `0x0C` (Serial Bus) /
+/// `0x03` (USB) / Prog-IF `0x30` (xHCI) bezeichnet JEDEN xHCI-
+/// Controller, unabhängig vom Hersteller. Das ist der Sinn der
+/// Kennung, und sie zu benutzen ist der Unterschied zwischen einem
+/// Treiber für unsere Testmaschine und einem Treiber für PCs.
+pub fn finde_klasse(klasse: u8, unterklasse: u8, prog_if: u8) -> Option<PciGeraet> {
+    GERAETE
+        .lock()
+        .iter()
+        .find(|g| {
+            g.klasse == klasse
+                && g.unterklasse == unterklasse
+                && lese_prog_if(g.bus, g.geraet, g.funktion) == prog_if
+        })
+        .cloned()
+}
+
+/// Das Prog-IF-Byte (Config-Offset 0x08, Bits 8..15).
+///
+/// Es wird nicht in `PciGeraet` mitgeführt, weil es nur für diese eine
+/// Unterscheidung gebraucht wird — bei USB trennt es UHCI (0x00),
+/// OHCI (0x10), EHCI (0x20) und xHCI (0x30) voneinander.
+pub fn lese_prog_if(bus: u8, geraet: u8, funktion: u8) -> u8 {
+    (lese_config(bus, geraet, funktion, 0x08) >> 8) as u8
+}
+
 /// Findet das erste Gerät mit passendem Vendor/Device (für Treiber).
 /// Liefert eine KOPIE (die Adresse reicht für alle Config-Zugriffe).
 pub fn finde(vendor_id: u16, device_ids: &[u16]) -> Option<PciGeraet> {

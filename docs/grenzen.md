@@ -591,3 +591,35 @@ in die Ablage legen und nichts daraus holen — das betrifft den Browser,
 wuerde aber jedem User-Programm fehlen. Es ist also eine ABI-Erweiterung
 (zwei Syscalls ueber copy_in/copy_out auf einen Blatt-Lock) und keine
 Browser-Funktion.
+
+## USB: der Controller laeuft, Geraete werden nicht bedient (Serie 9, Teil 3)
+
+Stand nach Teil 3 (docs/xhci.md): Der xHCI-Controller wird gefunden,
+ungecacht gemappt, zurueckgesetzt, mit DCBAA/Scratchpad/Command
+Ring/Event Ring eingerichtet und laeuft. Port-Status-Aenderungen kommen
+als Events an. **Mehr nicht.**
+
+Es fehlen also weiterhin:
+
+* **Geraete werden nicht angesprochen** — kein Slot aktiviert, keine
+  Adresse vergeben, kein Deskriptor gelesen, keine Uebertragung.
+* **KEINE USB-TASTATUR UND KEINE USB-MAUS.** Damit bleibt die Aussage
+  der Serie-9-Bestandsaufnahme unveraendert gueltig: Auf echter
+  Hardware ohne PS/2 ist SpeedOS nach wie vor NICHT BEDIENBAR. Der
+  Controller zu starten ist die Voraussetzung dafuer, nicht die
+  Loesung.
+* **Keine Interrupts** — der Event Ring wird gepollt (100 ms).
+  Ausreichend fuer Steckvorgaenge, zu langsam fuer eine Tastatur.
+* **Kein Hub-Support**, keine isochronen Uebertragungen, keine
+  USB-3-Streams.
+* **BIOS-Handoff und Scratchpad sind ungetestet.** Beides ist gebaut
+  und protokolliert, aber QEMU verlangt weder das eine (keine
+  Extended Capabilities) noch das andere (0 Puffer). Sie werden sich
+  erst auf echter Hardware beweisen — und das ist genau die Sorte
+  Code, die man dort am schlechtesten debuggt.
+* **Nur EIN Controller** wird benutzt (der erste gefundene).
+
+TESTAUFBAU-EIGENHEIT, gemessen: `usb-kbd` in QEMU STIEHLT die
+PS/2-Tastatur (QEMU leitet an die zuletzt angemeldete Tastatur). Die
+USB-Eingabegeraete haengen deshalb nur mit `SPEEDOS_USB_GERAETE=1`
+dran; sonst waere die Maschine nicht mehr bedienbar.

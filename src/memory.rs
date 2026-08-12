@@ -249,6 +249,69 @@ pub unsafe fn map_page_zu(page: Page, frame: PhysFrame) -> Result<(), MapToError
     })
 }
 
+/// Reserviert einen zusammenhängenden VIRTUELLEN Bereich — ohne ihn zu
+/// mappen.
+///
+/// Für MMIO gebraucht: Dort steht die PHYSISCHE Adresse schon fest (sie
+/// kommt aus einem PCI-BAR), und was fehlt, ist ein Stück virtueller
+/// Adressraum, auf das man sie legen kann. `allocate_pages` taugt dafür
+/// nicht — es alloziert auch Frames, und die wären hier reine
+/// Verschwendung (der Bereich wird sofort überschrieben).
+///
+/// Benutzt denselben monotonen Zähler wie `allocate_pages`, also gilt
+/// auch dieselbe bekannte Unschärfe: Virtueller Raum wird nie
+/// wiederverwendet (siehe CLAUDE.md, Serie-6-Abschluss). Bei einer
+/// Handvoll MMIO-Bereichen je Boot ist das folgenlos.
+pub fn allocate_virt_bereich(anzahl: usize) -> Option<VirtAddr> {
+    if anzahl == 0 {
+        return None;
+    }
+    let start = NAECHSTE_VIRT_ADRESSE.fetch_add(anzahl * 4096, Ordering::Relaxed);
+    Some(VirtAddr::new(start as u64))
+}
+
+/// Mappt eine Page auf einen Frame — **UNGECACHT**, für Geräteregister.
+///
+/// ===================================================================
+/// WARUM ES DAFÜR EINE ZWEITE FUNKTION GIBT
+///
+/// `map_page_zu` mappt mit `PRESENT | WRITABLE`. Für den Framebuffer
+/// reicht das: Er wird nur geschrieben, und ein Schreib-Cache schadet
+/// dort nicht.
+///
+/// **Für Geräteregister ist es falsch.** Ein Treiber wartet ständig
+/// darauf, dass die Hardware ein Bit umlegt (xHCI: `USBSTS.CNR`,
+/// `USBCMD.HCRST`, `PORTSC.CSC`). Liegt die Adresse im Cache, sieht die
+/// CPU den alten Wert — für immer. Der Treiber läuft dann in JEDEN
+/// Timeout, und zwar zuverlässig, nicht sporadisch.
+///
+/// `NO_CACHE` schaltet den Cache für diese Seite ab, `WRITE_THROUGH`
+/// sorgt dafür, dass Schreibzugriffe nicht gesammelt werden. Beides
+/// zusammen ist die übliche Kombination für MMIO.
+///
+/// DAS ALLEIN GENÜGT NICHT: Jeder einzelne Registerzugriff muss
+/// zusätzlich `read_volatile`/`write_volatile` benutzen, sonst darf der
+/// Compiler eine Warteschleife über ein Statusregister zu einem
+/// einzigen Lesen zusammenfassen. Das Paging schützt vor dem Cache,
+/// `volatile` vor dem Optimierer — zwei verschiedene Gegner.
+///
+/// # Safety
+///
+/// Wie `map_page_zu`: Der Aufrufer verantwortet, dass das Mapping kein
+/// verbotenes Aliasing erzeugt. `frame` soll auf einen MMIO-Bereich
+/// zeigen (aus einem PCI-BAR), NICHT auf normalen RAM.
+pub unsafe fn map_mmio(page: Page, frame: PhysFrame) -> Result<(), MapToError<Size4KiB>> {
+    mit_speicher(|mapper, frame_allocator| {
+        let flags = PageTableFlags::PRESENT
+            | PageTableFlags::WRITABLE
+            | PageTableFlags::NO_CACHE
+            | PageTableFlags::WRITE_THROUGH;
+        // unsafe: Verantwortung liegt laut # Safety beim Aufrufer.
+        mapper.map_to(page, frame, flags, frame_allocator)?.flush();
+        Ok(())
+    })
+}
+
 /// Löst das Mapping einer Page und gibt den Frame ZURÜCK — der
 /// Aufrufer entscheidet, ob er ihn freigibt (frame_freigeben) oder
 /// nicht (bei MMIO-Frames: NICHT freigeben, das ist kein RAM!).

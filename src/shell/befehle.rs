@@ -85,6 +85,7 @@ pub fn alle_befehle() -> Vec<Box<dyn Befehl>> {
         Box::new(Tree),
         // Hardware-Befehle:
         Box::new(Pci),
+        Box::new(Usb),
         // Massenspeicher-Befehle (ATA-Treiber):
         Box::new(Platten),
         Box::new(Blocktest),
@@ -672,6 +673,120 @@ fn baum_zeichnen(pfad: &str, einrueckung: &str) {
                 println!("{}{}{}", einrueckung, ast, eintrag.name);
             }
         }
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+
+/// usb — Eckdaten des xHCI-Controllers und die Port-Liste.
+///
+/// Das Gegenstueck zu `pci` und `platten`: eine Stelle, an der man
+/// nachsieht, was die Hardware sagt. Bei xHCI ist das mehr als
+/// Bequemlichkeit — der Controller hat keinen sichtbaren Zustand
+/// ausser seinen Registern (docs/xhci.md §6).
+struct Usb;
+
+impl Befehl for Usb {
+    fn name(&self) -> &'static str {
+        "usb"
+    }
+    fn beschreibung(&self) -> &'static str {
+        "Zeigt den xHCI-Controller und den Zustand seiner Ports"
+    }
+    fn ausfuehren(&self, argumente: &str, _kontext: &mut ShellKontext, _registry: &[Box<dyn Befehl>]) {
+        use crate::usb::xhci;
+        let roh = argumente.trim() == "--roh";
+        if !xhci::vorhanden() {
+            println!("Kein xHCI-Controller aktiv.");
+            println!("(In QEMU: der Runner haengt 'qemu-xhci' an. Auf echter");
+            println!(" Hardware: siehe serielles Protokoll, Zeilen mit [xhci].)");
+            return;
+        }
+        xhci::mit_controller(|c| {
+            let Some(controller) = c else {
+                println!("Kein xHCI-Controller aktiv.");
+                return;
+            };
+            // Frisch einlesen — die Anzeige soll den JETZIGEN Zustand
+            // zeigen und nicht den letzten, den ein Event gemeldet hat.
+            controller.ports_lesen();
+
+            konsole::set_color(Color::LightCyan, Color::Black);
+            println!("xHCI-Controller");
+            konsole::set_color(Color::LightGray, Color::Black);
+            println!(
+                "  Version      {:x}.{:02x}",
+                controller.hci_version >> 8,
+                controller.hci_version & 0xFF
+            );
+            println!(
+                "  Zustand      {}",
+                if controller.laeuft() {
+                    "laeuft"
+                } else {
+                    "angehalten"
+                }
+            );
+            println!("  USBSTS       0x{:08x}", controller.usbsts());
+            println!("  Slots        {}", controller.max_slots);
+            println!("  Ports        {}", controller.max_ports);
+            println!("  Interrupter  {}", controller.max_interrupter);
+            // Die Kontextgroesse steht hier, weil sie die Zahl ist, die
+            // beim ersten Geraet ueber Erfolg und Misserfolg entscheidet
+            // (docs/xhci.md, Fallgrube 2).
+            println!(
+                "  Kontext      {} Byte",
+                if controller.kontext_64byte { 64 } else { 32 }
+            );
+            println!("  64-Bit-DMA   {}", controller.adressen_64bit);
+            println!("  Scratchpad   {} Puffer", controller.scratchpad_puffer);
+
+            println!("");
+            konsole::set_color(Color::LightCyan, Color::Black);
+            println!("Ports");
+            konsole::set_color(Color::LightGray, Color::Black);
+            for i in 0..controller.max_ports {
+                let Some(z) = controller.ports.get(i as usize) else {
+                    continue;
+                };
+                let roh = controller.portsc_roh(i);
+                if z.angeschlossen {
+                    konsole::set_color(Color::LightGreen, Color::Black);
+                } else {
+                    konsole::set_color(Color::DarkGray, Color::Black);
+                }
+                println!(
+                    "  Port {:>2}  {:<14} {:<10} {:<18} PORTSC=0x{:08x}",
+                    i + 1,
+                    if z.angeschlossen {
+                        "angeschlossen"
+                    } else {
+                        "frei"
+                    },
+                    if z.aktiviert { "aktiviert" } else { "-" },
+                    z.tempo.text(),
+                    roh
+                );
+            }
+            konsole::set_color(Color::LightGray, Color::Black);
+            println!("");
+            if roh {
+                // Der Auszug aus den Interrupter-Registern und dem Event
+                // Ring. Er geht NUR seriell raus (serial_println) — er
+                // ist ein Werkzeug fuer die Fehlersuche, kein Text fuer
+                // den Bildschirm.
+                println!("");
+                println!("Auszug ins serielle Protokoll geschrieben.");
+                controller.diagnose();
+            }
+            println!("");
+            println!("Hinweis: Dieser Schritt laesst den Controller nur LAUFEN.");
+            println!("Geraete werden noch nicht angesprochen (docs/xhci.md).");
+            if !roh {
+                println!("`usb --roh` schreibt Interrupter und Event Ring ins Protokoll.");
+            }
+        });
     }
 }
 
