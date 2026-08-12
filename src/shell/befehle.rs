@@ -758,8 +758,17 @@ impl Befehl for Ton {
             while hda.gespielte_frames() < ziel && crate::zeit::ms_seit_boot() < frist {
                 crate::zeit::warte_auf_interrupt();
             }
+            // VOR dem Anhalten ablesen. `stoppen()` fasst die Zaehler
+            // zwar nicht mehr an, aber die Hardware bleibt stehen —
+            // danach gaebe es nichts mehr zu messen.
+            let gespielt = hda.gespielte_frames();
             hda.stoppen();
-            println!("Fertig ({} Frames gespielt).", hda.gespielte_frames().min(ziel));
+            println!(
+                "Fertig: {} von {} Frames gespielt ({} ms).",
+                gespielt.min(ziel),
+                ziel,
+                gespielt.min(ziel) * 1000 / crate::audio::ABTASTRATE as u64
+            );
         });
     }
 }

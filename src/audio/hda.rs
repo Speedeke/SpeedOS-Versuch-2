@@ -221,6 +221,12 @@ pub struct Hda {
     letzte_position: u64,
     /// Wie viele VOLLE Umlaeufe der Controller schon hinter sich hat.
     umlaeufe: u64,
+    /// Wo der Lesezeiger beim Start dieser Wiedergabe stand.
+    ///
+    /// Er faengt NICHT bei 0 an: Nach dem Anhalten bleibt er stehen, wo
+    /// er war. Ohne diesen Bezugspunkt zaehlte jede Wiedergabe die
+    /// Position der vorigen mit.
+    start_position: u64,
     laeuft: bool,
     seiten: Vec<VirtAddr>,
 }
@@ -424,6 +430,7 @@ fn starten() -> Result<(), AudioFehler> {
         geschrieben: 0,
         letzte_position: 0,
         umlaeufe: 0,
+        start_position: 0,
         laeuft: false,
         seiten,
     });
@@ -550,7 +557,12 @@ impl AudioGeraet for Hda {
             self.umlaeufe += 1;
         }
         self.letzte_position = position;
-        self.umlaeufe * PUFFER_FRAMES as u64 + position
+        // AB DER STARTPOSITION rechnen, nicht ab 0: Der Lesezeiger steht
+        // beim Beginn einer Wiedergabe dort, wo die vorige aufgehoert
+        // hat. `saturating_sub`, damit ein Umlauf innerhalb der ersten
+        // Runde nicht negativ wird.
+        let roh = self.umlaeufe * PUFFER_FRAMES as u64 + position;
+        roh.saturating_sub(self.start_position)
     }
 
     fn schreiben(&mut self, frames: &[Sample]) -> usize {
@@ -598,6 +610,23 @@ impl AudioGeraet for Hda {
         Ok(())
     }
 
+    /// Wiedergabe anhalten.
+    ///
+    /// ===================================================================
+    /// ANHALTEN IST NICHT ZURUECKSETZEN — der Fehler der ersten Fassung
+    ///
+    /// Hier stand einmal `umlaeufe = 0; letzte_position = 0`. Das sah
+    /// aufgeraeumt aus und war falsch: Wer NACH dem Anhalten fragt, wie
+    /// viel gespielt wurde, bekam nur noch die rohe Position im
+    /// Ringpuffer. Ein 2-Sekunden-Ton (96 000 Frames) meldete „1814" —
+    /// naemlich genau da, wo der Lesezeiger im Puffer stehengeblieben
+    /// war.
+    ///
+    /// Der Zaehler ueberlebt das Anhalten jetzt. Zurueckgesetzt wird
+    /// ausschliesslich in `leeren()`, und das laeuft vor jeder neuen
+    /// Wiedergabe. Damit ist `gespielte_frames()` nach dem Stop
+    /// weiterhin eine sinnvolle Antwort — und genau das braucht eine
+    /// Fortschrittsanzeige.
     fn stoppen(&mut self) {
         // SAFETY: `sd` im gemappten Bereich.
         unsafe {
@@ -605,12 +634,6 @@ impl AudioGeraet for Hda {
             self.mmio.w32(self.sd + SD_CTL, ctl & !0x2);
         }
         self.laeuft = false;
-        self.geschrieben = 0;
-        // DIE UMLAUF-BUCHHALTUNG GEHOERT MIT ZURUECKGESETZT. Bliebe sie
-        // stehen, waere die Uhr beim naechsten Ton um alle bisherigen
-        // Umlaeufe voraus — und `frei` sofort wieder 0.
-        self.letzte_position = 0;
-        self.umlaeufe = 0;
     }
 
     fn laeuft(&self) -> bool {
@@ -625,11 +648,21 @@ impl Hda {
         unsafe {
             core::ptr::write_bytes(self.puffer.as_u64() as *mut u8, 0, PUFFER_BYTES);
         }
-        // Bei null anfangen — sowohl die Schreibposition als auch die
-        // Umlauf-Buchhaltung.
-        self.letzte_position = 0;
+        // HIER — und nur hier — wird zurueckgesetzt. `leeren()` laeuft
+        // vor jeder Wiedergabe; `stoppen()` fasst die Zaehler bewusst
+        // nicht mehr an (siehe dort).
+        //
+        // Die Reihenfolge ist wichtig: erst die Buchhaltung nullen,
+        // DANN die Position lesen. Andersherum zaehlte der erste
+        // Vergleich einen Umlauf zu viel, wenn der Lesezeiger noch
+        // hinten im Puffer stand.
         self.umlaeufe = 0;
-        self.geschrieben = self.gespielte_frames();
+        self.letzte_position = 0;
+        // SAFETY: `sd` liegt im gemappten Bereich.
+        let byte = unsafe { self.mmio.r32(self.sd + SD_LPIB) } as u64;
+        self.letzte_position = byte / (KANAELE as u64 * 2);
+        self.start_position = self.letzte_position;
+        self.geschrieben = 0;
     }
 
     pub fn codec(&self) -> u8 {

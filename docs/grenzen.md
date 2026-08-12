@@ -697,14 +697,10 @@ Der HDA-Controller laeuft, ein Ausgabepfad (Pin -> DAC) wird gefunden
 und scharf geschaltet, `ton [hz] [ms]` ist HOERBAR (am Lautsprecher
 bestaetigt).
 
-**OFFENER FEHLER, nicht weggeredet:** Die Zahl der gespielten Frames
-stimmt nicht. Ein 2-Sekunden-Ton (96 000 Frames) meldet am Ende „1814
-Frames gespielt". Der Ton kommt, die Schreibschleife laeuft durch, und
-der frueher beobachtete Haenger (Abbruch nach weniger als einem
-Ringpuffer) ist behoben — aber die Umlauf-Buchhaltung von `SD_LPIB`
-ist noch nicht richtig. Das betrifft heute nur die ANZEIGE; sobald
-eine Fortschrittsanzeige (`spielen`) daran haengt, ist es ein echtes
-Problem.
+Die Positionsanzeige ist seit Teil 1b RICHTIG: Ein 2-Sekunden-Ton
+meldet „96 000 von 96 000 Frames (2000 ms)", ein direkt folgender
+zweiter Ton faengt wieder bei null an. Damit taugt sie als Grundlage
+fuer eine Fortschrittsanzeige (`spielen`).
 
 Ausserdem fehlt:
 
