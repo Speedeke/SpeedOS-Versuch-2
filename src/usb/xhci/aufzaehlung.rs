@@ -64,11 +64,48 @@ const TRANSFER_RING_TRBS: u32 = 64;
 /// Der TRB-Typ „Link".
 const TRB_LINK: u32 = 6;
 
-/// Fristen. Grosszuegig — sie sollen einen HAENGER verhindern, nicht
-/// knapp sein.
-const FRIST_KOMMANDO_US: u64 = 1_000_000;
-const FRIST_TRANSFER_US: u64 = 1_000_000;
-const FRIST_PORT_RESET_US: u64 = 500_000;
+// ===========================================================================
+// DIE FRISTEN — und warum sie KURZ sein muessen
+//
+// Hier standen einmal 1 000 000 us (eine Sekunde) je Kommando. Das war
+// „grosszuegig gegen Haenger" gedacht und hat auf dem Laptop das
+// GEGENTEIL bewirkt: das Einfrieren des ganzen Systems.
+//
+// Der Grund ist der AUFRUFPFAD. `usb_task` ruft
+// `port_wechsel_behandeln` -> `geraet_aufzaehlen`, und zwar
+//
+//   * INNERHALB des Controller-Locks,
+//   * im kooperativen Executor (PID 0), also OHNE await dazwischen.
+//
+// Jede Sekunde, die hier gespinnt wird, ist eine Sekunde, in der KEIN
+// anderer Kernel-Task laeuft: kein Compositor, kein Eingabe-Router,
+// keine Maus. Eine Aufzaehlung setzt ein Dutzend Kommandos ab — bei
+// einem Geraet, das nicht antwortet, sind das zwölf Sekunden
+// Totalstillstand. In QEMU antwortet immer alles sofort, deshalb war es
+// dort unsichtbar; auf echter Hardware mit Hubs und Ports, die
+// Ereignisse melden, ohne dass ein brauchbares Geraet dranhaengt, friert
+// die Maschine ein.
+//
+// Die Werte orientieren sich jetzt an dem, was die Spezifikation
+// wirklich verlangt, nicht an „lieber zu viel":
+//   * Ein Kommando quittiert der Controller in Mikrosekunden.
+//   * Ein Control-Transfer ist nach wenigen Millisekunden durch.
+//   * Ein Port-Reset dauert laut Spezifikation rund 50 ms.
+//
+// LIEBER EINE AUFZAEHLUNG ABBRECHEN ALS DAS SYSTEM ANHALTEN: Ein
+// Geraet, das zu langsam antwortet, wird beim naechsten Steckereignis
+// erneut versucht. Ein eingefrorener Rechner nicht.
+const FRIST_KOMMANDO_US: u64 = 50_000;
+const FRIST_TRANSFER_US: u64 = 50_000;
+const FRIST_PORT_RESET_US: u64 = 120_000;
+
+/// Wie viele Aufzaehlungen HOECHSTENS je Poll-Durchgang laufen.
+///
+/// Auch mit kurzen Fristen darf ein Schwall von Port-Ereignissen nicht
+/// zu einer Kette von Aufzaehlungen in EINEM Durchgang werden — sonst
+/// summieren sich die Fristen wieder zu einer spuerbaren Pause. Der
+/// Rest wartet auf den naechsten Durchgang (8 ms spaeter).
+pub const MAX_AUFZAEHLUNGEN_JE_DURCHGANG: usize = 1;
 
 /// Groesse eines Puffers fuer Deskriptor-Antworten.
 ///

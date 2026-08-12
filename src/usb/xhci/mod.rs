@@ -913,6 +913,19 @@ impl Controller {
         Ok(self.letzter_transfer.take())
     }
 
+    /// Zurueckgestellte Port-Ereignisse wieder einreihen.
+    ///
+    /// Sie werden VORNE eingefuegt, damit die Reihenfolge stimmt: Ein
+    /// Ereignis, das schon einmal warten musste, soll nicht hinter
+    /// neueren landen.
+    pub fn ports_zuruecklegen(&mut self, mut ports: Vec<u8>) {
+        if ports.is_empty() {
+            return;
+        }
+        ports.append(&mut self.port_warteschlange);
+        self.port_warteschlange = ports;
+    }
+
     /// Die Ports, an denen sich etwas geaendert hat — und die Liste
     /// dabei leeren.
     pub fn ports_mit_aenderung(&mut self) -> Vec<u8> {
@@ -1355,8 +1368,19 @@ pub async fn usb_task() {
                 // einer Aufzaehlung laufen weitere Kommandos, die
                 // ihrerseits Events erzeugen — die Pumpe darf dabei
                 // nicht rekursiv aus sich selbst heraus laufen.
-                for port in controller.ports_mit_aenderung() {
+                // NUR EINE AUFZAEHLUNG JE DURCHGANG. Die Aufzaehlung
+                // laeuft synchron im Executor; mehrere hintereinander
+                // summieren ihre Fristen zu einer spuerbaren Pause, in
+                // der weder Maus noch Tastatur bedient werden. Was
+                // liegenbleibt, kommt 8 ms spaeter dran.
+                let mut offen = controller.ports_mit_aenderung();
+                if !offen.is_empty() {
+                    let port = offen.remove(0);
                     controller.port_wechsel_behandeln(port);
+                    // Den Rest zurueckstellen, NICHT verwerfen — ein
+                    // verworfenes Port-Ereignis waere ein Geraet, das
+                    // nie erkannt wird.
+                    controller.ports_zuruecklegen(offen);
                 }
                 let reports = core::mem::take(&mut controller.hid_warteschlange);
                 for (slot, dci) in reports {

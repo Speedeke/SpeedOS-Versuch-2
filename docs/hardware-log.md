@@ -281,3 +281,38 @@ gesetzt, die beide Wege abdeckt.
 Ob die Zähigkeit damit ganz weg ist, muss der nächste Lauf auf dem
 Laptop zeigen. Der Slot-Überlauf war messbar die größte Einzelursache,
 aber ob er die EINZIGE war, ist damit nicht bewiesen.
+
+### Befund 3 (behoben): die Aufzählung fror den ganzen Rechner ein
+
+**Das war die Ursache für „alles friert ein".**
+
+`usb_task` ruft `port_wechsel_behandeln` → `geraet_aufzaehlen`, und zwar
+
+* **innerhalb** des Controller-Locks,
+* im kooperativen Executor (PID 0), also **ohne `await` dazwischen**.
+
+Die Fristen dort standen auf **einer Sekunde je Kommando** — „großzügig
+gegen Hänger" gedacht, und genau deshalb tödlich: Jede Sekunde, die
+hier gespinnt wird, ist eine Sekunde, in der **kein** anderer
+Kernel-Task läuft. Kein Compositor, kein Eingabe-Router, keine Maus.
+
+Eine Aufzählung setzt rund ein Dutzend Kommandos ab. Bei einem Gerät,
+das nicht antwortet, sind das **zwölf Sekunden Totalstillstand** — und
+danach, beim nächsten Port-Ereignis, wieder. Das erklärt das Muster
+genau: kurz bedienbar, dann zäh, dann eingefroren.
+
+In QEMU antwortet alles sofort, deshalb war es dort unsichtbar. Auf
+echter Hardware gibt es Hubs und Ports, die Ereignisse melden, ohne
+dass ein brauchbares Gerät dranhängt.
+
+Behoben:
+
+* Fristen auf das, was die Spezifikation wirklich verlangt: Kommando
+  und Transfer 50 ms, Port-Reset 120 ms (statt 1000/1000/500).
+* **Höchstens eine Aufzählung je Poll-Durchgang.** Ein Schwall von
+  Port-Ereignissen darf sich nicht zu einer Kette summieren; der Rest
+  wird zurückgestellt (nicht verworfen) und kommt 8 ms später dran.
+
+Lieber eine Aufzählung abbrechen als das System anhalten: Ein Gerät,
+das zu langsam antwortet, wird beim nächsten Steckereignis erneut
+versucht. Ein eingefrorener Rechner nicht.
