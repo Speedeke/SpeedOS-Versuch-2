@@ -154,12 +154,73 @@ Clear-Disk -Number $ziel.Number -RemoveData -RemoveOEM -Confirm:$false
 # hier sind unkritisch:
 Set-Disk -Number $ziel.Number -IsReadOnly $false -ErrorAction SilentlyContinue
 
+# --- 4b. Warten bis Windows den Stick nach Clear-Disk fertig ---
+#         re-enumeriert hat (Plug&Play). Ohne diese Pause kann der
+#         PhysicalDrive-Handle ungueltig werden ("Ein nicht vorhandenes
+#         Geraet wurde angegeben").
+$diskNr      = $ziel.Number
+$maxWarte    = 15          # Sekunden Obergrenze
+$pruefPause  = 1           # Sekunden zwischen den Pruefungen
+$gewartet    = 0
+Write-Host "Warte auf Geraete-Stabilisierung ..." -NoNewline
+while ($gewartet -lt $maxWarte) {
+    Start-Sleep -Seconds $pruefPause
+    $gewartet += $pruefPause
+    try {
+        # Update-Disk zwingt Windows, den Datentraeger jetzt einzulesen.
+        Update-Disk -Number $diskNr -ErrorAction Stop
+        # Pruefe, ob der Datentraeger noch da ist und ansprechbar:
+        $check = Get-Disk -Number $diskNr -ErrorAction Stop
+        if ($check -and $check.BusType -eq 'USB') {
+            # Kurzer Test-Open, um sicherzugehen, dass der Handle klappt:
+            $testHnd = $null
+            try {
+                $testHnd = [System.IO.File]::Open(
+                    "\\.\PhysicalDrive$diskNr", 'Open', 'Write', 'ReadWrite')
+                # Handle laesst sich oeffnen -- Geraet ist stabil.
+                break
+            } catch {
+                # Noch nicht bereit, naechste Runde.
+            } finally {
+                if ($testHnd) { $testHnd.Close() }
+            }
+        }
+    } catch {
+        # Get-Disk / Update-Disk schlagen noch fehl -- weiter warten.
+    }
+    Write-Host "." -NoNewline
+}
+Write-Host ""
+if ($gewartet -ge $maxWarte) {
+    Write-Host "WARNUNG: Datentraeger reagiert nach ${maxWarte}s noch nicht sauber." -ForegroundColor Yellow
+    Write-Host "         Versuch wird trotzdem gestartet ..." -ForegroundColor Yellow
+}
+
 # --- 5. Image ROH auf die Platte schreiben (sektor-ausgerichtet) ---
 Write-Host "Schreibe Image ... (nicht abbrechen!)"
+
+# Hilfsfunktion: PhysicalDrive-Handle oeffnen mit Wiederholung.
+# Bei USB-Sticks kann der Handle direkt nach Clear-Disk noch kurz
+# scheitern, obwohl das Geraet schon wieder sichtbar ist.
+function Open-RawDisk {
+    param([int]$Nr, [int]$Versuche = 10, [int]$PauseSek = 2)
+    $pfad = "\\.\PhysicalDrive$Nr"
+    for ($v = 1; $v -le $Versuche; $v++) {
+        try {
+            $h = [System.IO.File]::Open($pfad, 'Open', 'Write', 'ReadWrite')
+            return $h
+        } catch [System.IO.IOException] {
+            if ($v -ge $Versuche) { throw }
+            Write-Host "  Geraet noch nicht bereit (Versuch $v/$Versuche), warte ${PauseSek}s ..." -ForegroundColor Yellow
+            Start-Sleep -Seconds $PauseSek
+        }
+    }
+}
+
 $dev = $null; $img = $null
 try {
     $img = [System.IO.File]::OpenRead($imgVoll)
-    $dev = [System.IO.File]::Open("\\.\PhysicalDrive$($ziel.Number)", 'Open', 'Write', 'ReadWrite')
+    $dev = Open-RawDisk -Nr $diskNr
     $buf = New-Object byte[] (4 * 1024 * 1024)
     $gesamt = 0L
     while (($n = $img.Read($buf, 0, $buf.Length)) -gt 0) {
@@ -170,7 +231,35 @@ try {
             [Array]::Clear($buf, $schreib, $rest)
             $schreib += $rest
         }
-        $dev.Write($buf, 0, $schreib)
+        # Schreiben mit Retry: Falls der Handle waehrend des Schreibens
+        # ungueltig wird (spaete Re-Enumeration), Handle neu oeffnen und
+        # an der richtigen Stelle fortsetzen.
+        $schreibOk = $false
+        for ($sv = 1; $sv -le 3; $sv++) {
+            try {
+                $dev.Write($buf, 0, $schreib)
+                $schreibOk = $true
+                break
+            } catch [System.IO.IOException] {
+                if ($sv -ge 3) { throw }
+                Write-Host ""
+                Write-Host "  Schreibfehler (Versuch $sv/3): $($_.Exception.Message)" -ForegroundColor Yellow
+                Write-Host "  Oeffne Geraet erneut und setze fort ..." -ForegroundColor Yellow
+                # Alten Handle schliessen (best-effort):
+                try { $dev.Close() } catch {}
+                Start-Sleep -Seconds 3
+                $dev = Open-RawDisk -Nr $diskNr
+                # Seek auf die aktuelle Schreibposition (sektorausgerichtet):
+                $seekPos = $gesamt
+                if ($seekPos % 512 -ne 0) {
+                    $seekPos = $gesamt - ($gesamt % 512)
+                }
+                $dev.Seek($seekPos, [System.IO.SeekOrigin]::Begin) | Out-Null
+            }
+        }
+        if (-not $schreibOk) {
+            throw "Schreiben auf den USB-Stick endgueltig fehlgeschlagen nach 3 Versuchen."
+        }
         $gesamt += $n
         Write-Progress -Activity "Schreibe SpeedOS auf USB" -Status "$([math]::Round($gesamt/1MB,1)) MiB" `
             -PercentComplete ([math]::Min(100, [int]($gesamt * 100 / $imgLen)))
