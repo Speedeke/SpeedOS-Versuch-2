@@ -693,7 +693,7 @@ impl Befehl for Ton {
         "Spielt einen Sinuston: ton [hz] [ms]"
     }
     fn ausfuehren(&self, argumente: &str, _kontext: &mut ShellKontext, _registry: &[Box<dyn Befehl>]) {
-        use crate::audio::{mixer, AudioGeraet};
+        use crate::audio::mixer;
 
         let mut teile = argumente.split_whitespace();
         let hz: u32 = teile.next().and_then(|w| w.parse().ok()).unwrap_or(440);
@@ -712,64 +712,74 @@ impl Befehl for Ton {
         let frames_gesamt = (crate::audio::ABTASTRATE as u64 * ms / 1000) as usize;
         println!("Ton: {} Hz, {} ms ({} Frames)", hz, ms, frames_gesamt);
 
-        crate::audio::hda::mit_hda(|h| {
-            let Some(hda) = h else {
-                println!("Audio-Geraet nicht verfuegbar.");
-                return;
-            };
-            hda.leeren();
-            if hda.starten().is_err() {
-                println!("Wiedergabe liess sich nicht starten.");
-                return;
-            }
+        // ===============================================================
+        // UEBER DEN MIXER, NICHT AN IHM VORBEI
+        //
+        // Die erste Fassung sprach die Hardware direkt an. Seit es den
+        // Mixer-Task gibt, waere das ein Kampf um dasselbe Geraet: Der
+        // Task haelt den Stream an, sobald KEINE Quelle angemeldet ist —
+        // und ein `ton`, der ihn daneben selbst startet, wuerde ihm
+        // dauernd widersprochen.
+        //
+        // Also meldet sich `ton` als ganz gewoehnliche Quelle an. Damit
+        // ist er zugleich der erste Beweis, dass der Mixer-Weg traegt —
+        // und man kann waehrend eines Tons einen zweiten starten und
+        // beide zusammen hoeren.
+        let Some(quelle) = crate::audio::dienst::quelle_anmelden(alloc::format!("ton {} Hz", hz))
+        else {
+            println!("Kein Platz mehr im Mixer (max. Quellen erreicht).");
+            return;
+        };
 
-            // STUECKWEISE NACHFUELLEN, nicht alles auf einmal: Der
-            // Ringpuffer fasst ~85 ms. Wer mehr hineinschreibt, als
-            // hineinpasst, ueberschreibt Ungespieltes — deshalb wird
-            // nachgelegt, sobald der Lesezeiger Platz gemacht hat.
-            //
-            // Die Phase laeuft dabei DURCH: Jedes Stueck wird mit der
-            // Frame-Nummer als Startpunkt erzeugt, sonst gaebe es an
-            // jeder Stueckgrenze einen Knacks.
-            let mut geschrieben = 0usize;
-            let start_ms = crate::zeit::ms_seit_boot();
-            while geschrieben < frames_gesamt {
-                let rest = frames_gesamt - geschrieben;
-                let stueck = rest.min(1024);
-                let samples = mixer::sinus_erzeugen_ab(hz, stueck, mixer::VOLL, geschrieben as u64);
-                let genommen = hda.schreiben(&samples);
-                if genommen == 0 {
-                    // Puffer voll — warten, bis der Controller Platz
-                    // gemacht hat. Mit Frist, wie ueberall.
-                    if crate::zeit::ms_seit_boot() - start_ms > ms + 5_000 {
-                        println!("Wiedergabe haengt — abgebrochen.");
-                        break;
-                    }
-                    crate::zeit::warte_auf_interrupt();
-                    continue;
-                }
-                geschrieben += genommen;
+        // STUECKWEISE NACHLEGEN. Der Kernel haelt hoechstens ein paar
+        // Sekunden Vorlauf; alles auf einmal hineinzuschieben waere
+        // Speicher, den niemand braucht. Die Phase laeuft dabei DURCH
+        // (`sinus_erzeugen_ab`), sonst gaebe es an jeder Stueckgrenze
+        // einen Knacks.
+        let mut geschickt = 0usize;
+        let frist = crate::zeit::ms_seit_boot() + ms + 10_000;
+        while geschickt < frames_gesamt {
+            if crate::zeit::ms_seit_boot() > frist {
+                println!("Wiedergabe haengt — abgebrochen.");
+                break;
             }
-
-            // Auslaufen lassen: warten, bis der Controller alles
-            // gespielt hat, sonst schneidet `stoppen` den Ton ab.
-            let ziel = geschrieben as u64;
-            let frist = crate::zeit::ms_seit_boot() + ms + 2_000;
-            while hda.gespielte_frames() < ziel && crate::zeit::ms_seit_boot() < frist {
+            // Nicht mehr vorlegen, als der Mixer noch schluckt.
+            let wartend = crate::audio::dienst::quelle_wartend(quelle).unwrap_or(0);
+            if wartend > 48_000 {
+                // SELBST PUMPEN — waehrend eines Shell-Befehls kommt der
+                // Mixer-Task nicht dran (siehe `dienst::pumpen`).
+                crate::audio::dienst::pumpen_global();
                 crate::zeit::warte_auf_interrupt();
+                continue;
             }
-            // VOR dem Anhalten ablesen. `stoppen()` fasst die Zaehler
-            // zwar nicht mehr an, aber die Hardware bleibt stehen —
-            // danach gaebe es nichts mehr zu messen.
-            let gespielt = hda.gespielte_frames();
-            hda.stoppen();
-            println!(
-                "Fertig: {} von {} Frames gespielt ({} ms).",
-                gespielt.min(ziel),
-                ziel,
-                gespielt.min(ziel) * 1000 / crate::audio::ABTASTRATE as u64
-            );
-        });
+            let rest = frames_gesamt - geschickt;
+            let stueck = rest.min(4096);
+            let samples =
+                mixer::sinus_erzeugen_ab(hz, stueck, mixer::VOLL, geschickt as u64);
+            if !crate::audio::dienst::quelle_anhaengen(quelle, &samples) {
+                break;
+            }
+            geschickt += stueck;
+        }
+
+        // AUSLAUFEN LASSEN: warten, bis der Mixer alles verbraucht hat.
+        // Wer hier sofort abmeldet, schneidet den Ton ab.
+        let frist = crate::zeit::ms_seit_boot() + ms + 5_000;
+        loop {
+            let wartend = crate::audio::dienst::quelle_wartend(quelle).unwrap_or(0);
+            if wartend == 0 || crate::zeit::ms_seit_boot() > frist {
+                break;
+            }
+            crate::audio::dienst::pumpen_global();
+            crate::zeit::warte_auf_interrupt();
+        }
+        crate::audio::dienst::quelle_abmelden(quelle);
+        println!(
+            "Fertig: {} von {} Frames ({} ms).",
+            geschickt,
+            frames_gesamt,
+            geschickt as u64 * 1000 / crate::audio::ABTASTRATE as u64
+        );
     }
 }
 

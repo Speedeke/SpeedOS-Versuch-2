@@ -100,6 +100,13 @@ pub enum KernelObjekt {
     /// und der `Drop` dieser Tabelle räumt es beim Prozess-Ende
     /// automatisch ab. Kein Pfad kann das vergessen.
     Fenster(crate::fenster::FensterId),
+    /// EINE TONQUELLE im Mixer (Serie 10).
+    ///
+    /// Dieselbe Pointe wie beim Fenster: Weil es ein Handle ist, meldet
+    /// der `Drop` der Tabelle die Quelle beim Prozess-Ende automatisch
+    /// ab — auch nach einem Absturz. Sonst liefe der Audio-Stream
+    /// weiter, obwohl das Programm laengst tot ist.
+    AudioQuelle(u32),
 }
 
 impl KernelObjekt {
@@ -114,6 +121,7 @@ impl KernelObjekt {
             KernelObjekt::PipeLesen(_) => "Pipe (lesen)",
             KernelObjekt::PipeSchreiben(_) => "Pipe (schreiben)",
             KernelObjekt::Fenster(_) => "Fenster",
+            KernelObjekt::AudioQuelle(_) => "Tonquelle",
         }
     }
 
@@ -138,6 +146,10 @@ impl KernelObjekt {
             // laesst den Prozess fallen), nie im Interrupt — der
             // MANAGER-Lock ist hier also erlaubt.
             KernelObjekt::Fenster(id) => crate::fenster::prozess_fenster_schliessen(id),
+            // Die Quelle aus dem Mixer nehmen. Laeuft aus TASK-Kontext
+            // (der Aufraeum-Task laesst den Prozess fallen); der
+            // MIXER-Lock ist ein Blatt-Lock und hier erlaubt.
+            KernelObjekt::AudioQuelle(id) => crate::audio::dienst::quelle_abmelden(id),
             // Dateien sind pfadbasiert, die Standard-Kanäle gehören dem
             // Kernel — da gibt es nichts zu tun.
             KernelObjekt::Eingabe | KernelObjekt::Ausgabe | KernelObjekt::Diagnose => {}
@@ -407,7 +419,11 @@ pub fn schreib_ziel(handle: u64) -> Result<SchreibZiel, Fehler> {
         // Auf das LESE-Ende zu schreiben ist ein Typ-Fehler — und in ein
         // Fenster schreibt man mit `fenster_zeichnen`, nicht mit
         // `schreibe`: Pixel sind kein Byte-Strom.
-        KernelObjekt::PipeLesen(_) | KernelObjekt::Fenster(_) => Err(Fehler::FalscherHandleTyp),
+        // Ein Fenster, ein Lese-Pipe-Ende und eine Tonquelle sind keine
+        // SCHREIB-Ziele fuer Text — Typfehler, nicht „ungueltig".
+        KernelObjekt::PipeLesen(_)
+        | KernelObjekt::Fenster(_)
+        | KernelObjekt::AudioQuelle(_) => Err(Fehler::FalscherHandleTyp),
     })?
 }
 

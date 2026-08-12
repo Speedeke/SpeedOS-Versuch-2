@@ -41,6 +41,7 @@ const PROGRAMME: &[&str] = &[
     "hallo", "kopiere", "netzhole", "zaehle", "filter", "elternprobe",
     "angreifer", "messung", "zertifikate", "tlsspike", "holes", "news",
     "fenstertest", "uidemo", "bilder", "htmldump", "cssdump", "browser",
+    "spielen",
 ];
 
 /// Die Testbilder, die mitreisen (erzeugt von tools/testbilder_erzeugen.py).

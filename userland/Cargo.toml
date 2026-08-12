@@ -219,6 +219,11 @@ path = "src/bin/cssdump.rs"
 name = "browser"
 path = "src/bin/browser/main.rs"
 
+# spielen: eine WAV-Datei ueber den Audio-Syscall abspielen (Serie 10).
+[[bin]]
+name = "spielen"
+path = "src/bin/spielen.rs"
+
 # panic = "abort" ist Pflicht: Abwickeln (unwinding) bräuchte eine
 # Personality-Funktion und Landing Pads — beides gibt es ohne std nicht.
 # Ein panickendes SpeedOS-Programm beendet sich per exit(101).

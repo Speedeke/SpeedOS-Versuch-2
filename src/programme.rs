@@ -138,6 +138,11 @@ pub static PROGRAMME: &[Programm] = &[
         elf: include_bytes!(concat!(env!("OUT_DIR"), "/browser")),
     },
     Programm {
+        name: "spielen",
+        beschreibung: "spielen <datei.wav> — eine WAV-Datei abspielen",
+        elf: include_bytes!(concat!(env!("OUT_DIR"), "/spielen")),
+    },
+    Programm {
         name: "elternprobe",
         beschreibung: "elternprobe [ms] — startet ein Kind und wartet auf es (Ring 3)",
         elf: include_bytes!(concat!(env!("OUT_DIR"), "/elternprobe")),
@@ -450,11 +455,12 @@ mod tests {
     /// userland-Crate nicht — und zwar BEVOR jemand versucht, sie zu starten.
     #[test_case]
     fn test_eingebettete_programme_sind_gueltig() {
-        // Achtzehn seit Serie 8, Teil 7 (`browser` kam dazu). Die Zahl ist
+        // Neunzehn seit Serie 10 (`spielen` kam dazu). Die Zahl ist
         // Absicht: Wer ein Programm ergaenzt, muss es an DREI Stellen tun
         // (userland/Cargo.toml, build.rs, PROGRAMME) — dieser Test faengt
-        // die vergessene dritte.
-        assert_eq!(PROGRAMME.len(), 18, "es sollen achtzehn Programme mitkommen");
+        // die vergessene dritte. Er hat beim Ergaenzen von `spielen`
+        // genau das getan.
+        assert_eq!(PROGRAMME.len(), 19, "es sollen neunzehn Programme mitkommen");
         for programm in PROGRAMME {
             // Mit SPEEDOS_OHNE_USERLAND=1 gebaut? Dann gibt es nichts zu
             // pruefen — aber das ist der Notfall-Pfad, nicht der Normalfall.

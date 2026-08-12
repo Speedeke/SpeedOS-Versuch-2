@@ -12,6 +12,7 @@
 // ohne dass der Mixer angefasst wird — genau wie virtio-net damals den
 // IP-Stack nicht angefasst hat.
 
+pub mod dienst;
 pub mod hda;
 pub mod mixer;
 pub mod wav;
@@ -78,6 +79,13 @@ pub trait AudioGeraet: Send {
     /// und das ist Zustand. Ein `&self` mit innerer Veraenderlichkeit
     /// waere dieselbe Sache mit einem Deckel darauf.
     fn gespielte_frames(&mut self) -> u64;
+    /// Wie viele Frames noch in den Ringpuffer passen.
+    ///
+    /// **ZUERST FRAGEN, DANN MISCHEN.** Der Mixer VERBRAUCHT beim
+    /// Mischen die Samples seiner Quellen; wer erst mischt und dann
+    /// merkt, dass die Hardware nichts nimmt, hat sie verloren. Diese
+    /// Methode ist der Grund, warum das nicht passieren kann.
+    fn freie_frames(&mut self) -> usize;
     /// Samples in den Ringpuffer schreiben. Liefert die Zahl der
     /// uebernommenen FRAMES (kann kleiner sein — dann ist er voll).
     fn schreiben(&mut self, frames: &[Sample]) -> usize;

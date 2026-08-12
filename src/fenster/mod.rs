@@ -2387,6 +2387,47 @@ impl FensterManager {
         z.icon(systray_x, y + (metrik().taskleiste_hoehe - 16) / 2, &crate::grafik::ICON_ZAHNRAD, 1);
         z.icon(systray_x + 22, y + (metrik().taskleiste_hoehe - 16) / 2, &crate::grafik::ICON_ORDNER, 1);
 
+        // DIE LAUTSTAERKE — seit Serie 10 echt.
+        //
+        // Bis hierher war hier ein Platzhalter. Jetzt steht dort, was
+        // der Mixer wirklich tut: ein Balken mit der Gesamtlautstaerke,
+        // und bei Stumm bzw. 0 % ein deutliches Zeichen statt eines
+        // leeren Balkens — „aus" und „ganz leise" sehen sonst gleich
+        // aus, und das ist genau die Verwechslung, die man beim
+        // Suchen des fehlenden Tons nicht brauchen kann.
+        //
+        // `audio::dienst` ist ein Blatt-Lock; hier (unter MANAGER)
+        // erlaubt, wie `einstellungen` und `theme` daneben.
+        if crate::audio::vorhanden() {
+            let laut_x = systray_x + 44;
+            let mitte_y = y + metrik().taskleiste_hoehe / 2;
+            let stumm = crate::audio::dienst::stumm();
+            let prozent = crate::audio::dienst::lautstaerke_prozent();
+            let farbe = if stumm || prozent == 0 {
+                thema.text_gedimmt
+            } else {
+                thema.akzent
+            };
+            // Ein kleiner Lautsprecher: ein Kaestchen und ein Trichter.
+            z.rechteck_fuellen(Rechteck::neu(laut_x, mitte_y - 3, 4, 6), farbe);
+            z.rechteck_fuellen(Rechteck::neu(laut_x + 4, mitte_y - 6, 3, 12), farbe);
+            if stumm || prozent == 0 {
+                // Ein Strich durch — „aus" muss man SEHEN.
+                z.linie(laut_x, mitte_y + 6, laut_x + 10, mitte_y - 6, thema.text_normal);
+            } else {
+                // Ein Balken, dessen Laenge die Lautstaerke ist.
+                let voll = 18i32;
+                let breit = (prozent as i32 * voll) / 100;
+                z.rechteck_fuellen(
+                    Rechteck::neu(laut_x + 10, mitte_y - 2, voll, 4),
+                    thema.text_gedimmt,
+                );
+                if breit > 0 {
+                    z.rechteck_fuellen(Rechteck::neu(laut_x + 10, mitte_y - 2, breit, 4), farbe);
+                }
+            }
+        }
+
         // Zeit + Format kommen aus den Einstellungen (UTC-Offset,
         // 12/24h) — einstellungen ist ein Blatt-Lock, hier erlaubt.
         let jetzt = crate::einstellungen::jetzt_lokal();

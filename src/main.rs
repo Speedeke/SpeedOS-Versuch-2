@@ -185,6 +185,9 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // der Heap-Erweiterung (Ringpuffer und BDL allozieren). Kein
     // Controller -> stille Rueckkehr, wie bei virtio und xHCI.
     speed_os::audio::init();
+    // Die gespeicherte Lautstaerke anwenden — sie ueberlebt den
+    // Neustart wie Theme und Skalierung (Persistenz-Standard).
+    speed_os::einstellungen::lautstaerke_anwenden();
     // DHCP: sich beim Boot automatisch eine IP holen (IP/Maske/Gateway/DNS).
     // Timeout 3 s -> Fallback auf statische Konfiguration per 'netz-ip'.
     // Pumpt den Empfang synchron; auf QEMU-slirp antwortet der Server sofort.
@@ -316,6 +319,10 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     executor.spawn(Task::new("PS/2-Maus", speed_os::maus::maus_task()));
     executor.spawn(Task::new("Netz-Dispatch", speed_os::netz::netz_task()));
     executor.spawn(Task::new("USB-Events", speed_os::usb::xhci::usb_task()));
+    // Der Audio-Mixer-Task (Serie 10): mischt und schiebt in die
+    // Hardware. Ohne ihn kaeme aus dem Mixer nie ein Ton — der
+    // Ringpuffer wuerde nie nachgefuellt.
+    executor.spawn(Task::new("Audio-Mixer", speed_os::audio::dienst::audio_task()));
     // Der Socket-Takt: tickt TCP-Timer (Retransmits) auch dann, wenn gerade
     // nichts empfangen wird — sonst haengen Verbindungen bei Paketverlust.
     executor.spawn(Task::new(

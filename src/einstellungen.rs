@@ -1148,3 +1148,41 @@ mod tests {
         speichern();
     }
 }
+
+// ---------------------------------------------------------------------------
+// LAUTSTAERKE (Serie 10)
+// ---------------------------------------------------------------------------
+
+/// Der Schluessel in /platte/system/einstellungen.txt.
+pub const SCHLUESSEL_LAUTSTAERKE: &str = "audio.lautstaerke_prozent";
+pub const SCHLUESSEL_STUMM: &str = "audio.stumm";
+
+/// Die gespeicherte Lautstaerke auf den Mixer anwenden.
+///
+/// Laeuft beim Boot, NACH `audio::init` — wie das Theme und die
+/// UI-Skalierung. Eine Lautstaerke, die den Neustart nicht ueberlebt,
+/// waere die Sorte Kleinigkeit, die man jedes Mal neu einstellt und
+/// jedes Mal aergerlich findet.
+pub fn lautstaerke_anwenden() {
+    let prozent = hole_zahl(SCHLUESSEL_LAUTSTAERKE, 70).clamp(0, 100) as u16;
+    crate::audio::dienst::lautstaerke_prozent_setzen(prozent);
+    crate::audio::dienst::stumm_setzen(hole_bool(SCHLUESSEL_STUMM, false));
+}
+
+/// Lautstaerke setzen UND speichern.
+///
+/// **Erst den Mixer, dann die Platte.** Die Reihenfolge ist dieselbe
+/// wie beim Theme-Wechsel: Der Benutzer soll die Wirkung sofort hoeren,
+/// nicht erst nach einem Plattenzugriff.
+pub fn lautstaerke_setzen_prozent(prozent: u16) {
+    let wert = prozent.min(100);
+    crate::audio::dienst::lautstaerke_prozent_setzen(wert);
+    setze_zahl(SCHLUESSEL_LAUTSTAERKE, wert as i64);
+}
+
+pub fn stumm_umschalten() -> bool {
+    let neu = !crate::audio::dienst::stumm();
+    crate::audio::dienst::stumm_setzen(neu);
+    setze_bool(SCHLUESSEL_STUMM, neu);
+    neu
+}

@@ -565,6 +565,12 @@ impl AudioGeraet for Hda {
         roh.saturating_sub(self.start_position)
     }
 
+    fn freie_frames(&mut self) -> usize {
+        let gespielt = self.gespielte_frames();
+        let belegt = self.geschrieben.saturating_sub(gespielt) as usize;
+        PUFFER_FRAMES.saturating_sub(belegt)
+    }
+
     fn schreiben(&mut self, frames: &[Sample]) -> usize {
         let neue_frames = frames.len() / KANAELE;
         if neue_frames == 0 {

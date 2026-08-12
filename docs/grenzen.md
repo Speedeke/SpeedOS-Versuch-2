@@ -702,15 +702,22 @@ meldet „96 000 von 96 000 Frames (2000 ms)", ein direkt folgender
 zweiter Ton faengt wieder bei null an. Damit taugt sie als Grundlage
 fuer eine Fortschrittsanzeige (`spielen`).
 
+Seit Teil 1c gibt es den Audio-Syscall (53..56), den Mixer im Betrieb,
+die Lautstaerke im Systray und in den Einstellungen (persistiert) sowie
+`spielen <datei.wav>`.
+
 Ausserdem fehlt:
 
-* **Kein Audio-Syscall** — Ring-3-Programme koennen keinen Ton
-  ausgeben. Der Mixer ist gebaut und getestet, aber noch nicht
-  angeschlossen.
-* **Keine Lautstaerkeregelung** in Einstellungen oder Systray; das
-  Platzhalter-Icon aus Serie 2 ist weiter ein Platzhalter.
-* **Kein `userland/spielen`** — WAV-Parser und Mixer sind da, das
-  Programm fehlt.
+* **Der WAV-Parser existiert ZWEIMAL** — einmal im Kernel
+  (`audio::wav`, getestet) und einmal in `userland/spielen`. Das ist
+  dieselbe bewusste Doppelung wie bei den ABI-Konstanten (userland darf
+  keine Kernel-Abhaengigkeit haben), aber es ist eine Doppelung, und
+  nur die Kernel-Fassung hat Tests.
+* **Ein synchroner Shell-Befehl muss den Mixer SELBST pumpen**
+  (`dienst::pumpen_global`). Solange ein Befehl laeuft, kommt der
+  Mixer-Task nicht dran — dieselbe Lage wie beim Netz-Stack. Wer einen
+  neuen tonerzeugenden Shell-Befehl baut und das vergisst, bekommt
+  einen Haenger.
 * **Nur 48 kHz.** Eine 44,1-kHz-Datei spielt rund 9 % zu schnell; ein
   Resampler ohne Fliesskomma ist ein eigenes Vorhaben.
 * Nur AUSGABE (kein Mikrofon), nur ein Stream, keine

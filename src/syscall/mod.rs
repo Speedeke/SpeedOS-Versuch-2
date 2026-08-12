@@ -59,6 +59,7 @@
 // ==========================================================================
 
 pub mod datei;
+pub mod audio;
 pub mod fenster;
 pub mod handle;
 pub mod netz;
@@ -164,6 +165,15 @@ pub const SYS_FENSTER_SCHLIESSEN: u64 = 52;
 
 // ----- Gruppe 9: nur für Tests (240..) -----
 /// Kopiert den eingehenden Trap-Rahmen weg (Kontext-Sicherungs-Test).
+/// Eine Tonquelle anmelden (Serie 10). Liefert ein Handle.
+pub const SYS_AUDIO_OEFFNEN: u64 = 53;
+/// PCM anhaengen (Handle, Zeiger, Laenge in Bytes).
+pub const SYS_AUDIO_SCHREIBEN: u64 = 54;
+/// Wie viele Samples noch warten (Handle).
+pub const SYS_AUDIO_STATUS: u64 = 55;
+/// Lautstaerke DIESER Quelle in Promille (Handle, 0..1000).
+pub const SYS_AUDIO_LAUTSTAERKE: u64 = 56;
+
 pub const SYS_KONTEXT_TEST: u64 = 240;
 
 /// Höchstlänge eines Pfad-Arguments in Bytes.
@@ -684,6 +694,10 @@ pub fn ausfuehren(nummer: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> SysErgebni
         SYS_FENSTER_ZEICHNEN => fenster::sys_zeichnen(a0, a1, a2, a3),
         SYS_FENSTER_TITEL => fenster::sys_titel_setzen(a0, a1, a2),
         SYS_FENSTER_SCHLIESSEN => fenster::sys_schliessen(a0),
+        SYS_AUDIO_OEFFNEN => audio::sys_oeffnen(),
+        SYS_AUDIO_SCHREIBEN => audio::sys_schreiben(a0, a1, a2),
+        SYS_AUDIO_STATUS => audio::sys_status(a0),
+        SYS_AUDIO_LAUTSTAERKE => audio::sys_lautstaerke(a0, a1),
 
         // Unbekannt: sauberer Fehler, NIE eine Panik.
         _ => Err(Fehler::UnbekannterSyscall),
@@ -922,6 +936,10 @@ mod tests {
         assert_eq!(SYS_FENSTER_EREIGNIS, 50);
         assert_eq!(SYS_FENSTER_TITEL, 51);
         assert_eq!(SYS_FENSTER_SCHLIESSEN, 52);
+        assert_eq!(SYS_AUDIO_OEFFNEN, 53);
+        assert_eq!(SYS_AUDIO_SCHREIBEN, 54);
+        assert_eq!(SYS_AUDIO_STATUS, 55);
+        assert_eq!(SYS_AUDIO_LAUTSTAERKE, 56);
         // Und die Fehlercodes.
         assert_eq!(Fehler::Ok.code(), 0);
         assert_eq!(Fehler::UnbekannterSyscall.code(), 1);
@@ -937,7 +955,10 @@ mod tests {
     /// auch die Lücken zwischen den Gruppen und u64::MAX.
     #[test_case]
     fn test_unbekannte_nummern() {
-        for nummer in [15u64, 25, 31, 38, 47, 53, 100, 239, 241, u64::MAX] {
+        // 53..56 sind seit Serie 10 die Audio-Syscalls und deshalb aus
+        // dieser Liste ausgetragen — der Test hat das beim Ergaenzen
+        // korrekt bemerkt. 57 ist die naechste freie Nummer.
+        for nummer in [15u64, 25, 31, 38, 47, 57, 100, 239, 241, u64::MAX] {
             assert_eq!(
                 ausfuehren(nummer, 0, 0, 0, 0),
                 Err(Fehler::UnbekannterSyscall),

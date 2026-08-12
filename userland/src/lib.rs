@@ -87,6 +87,14 @@ pub const SYS_FENSTER_ZEICHNEN: u64 = 49;
 pub const SYS_FENSTER_EREIGNIS: u64 = 50;
 pub const SYS_FENSTER_TITEL: u64 = 51;
 pub const SYS_FENSTER_SCHLIESSEN: u64 = 52;
+/// Eine Tonquelle anmelden (Serie 10).
+pub const SYS_AUDIO_OEFFNEN: u64 = 53;
+/// PCM anhaengen (Handle, Zeiger, Laenge in Bytes).
+pub const SYS_AUDIO_SCHREIBEN: u64 = 54;
+/// Wie viele Samples noch warten (Handle).
+pub const SYS_AUDIO_STATUS: u64 = 55;
+/// Lautstaerke dieser Quelle in Promille (Handle, 0..1000).
+pub const SYS_AUDIO_LAUTSTAERKE: u64 = 56;
 
 /// Die drei reservierten Handles.
 pub const EINGABE: u64 = 0;
@@ -121,6 +129,7 @@ pub const STAT_BYTES: usize = 32;
 
 /// Ein eigenes FENSTER aus Ring 3 (Serie 8, Teil 1) — Pixelpuffer,
 /// Ereignisschleife, Titel. Die Naht, auf der der Browser aufsetzt.
+pub mod audio;
 pub mod bild;
 pub mod fenster;
 pub mod heap;
@@ -151,6 +160,8 @@ impl Fehler {
     pub const NUR_LESEN: Fehler = Fehler(15);
     pub const ZEITUEBERSCHREITUNG: Fehler = Fehler(17);
     pub const NICHT_KONFIGURIERT: Fehler = Fehler(18);
+    /// Ressource belegt — spaeter erneut versuchen (kein echter Fehler).
+    pub const BELEGT: Fehler = Fehler(24);
     pub const ABGEBROCHEN: Fehler = Fehler(22);
     pub const NICHT_GESAET: Fehler = Fehler(25);
     pub const ZEIT_UNPLAUSIBEL: Fehler = Fehler(26);
@@ -210,6 +221,12 @@ pub type Ergebnis = Result<u64, Fehler>;
 /// antwortet mit `UNGUELTIGER_ZEIGER`. Diese Funktion ist trotzdem `unsafe`,
 /// weil ein Syscall in den eigenen Speicher schreiben kann (copy-out).
 #[inline]
+pub(crate) unsafe fn syscall_roh(nummer: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> Ergebnis {
+    // SAFETY: Der Aufrufer verantwortet die Zeiger-Argumente; der
+    // Kernel prueft sie ohnehin selbst (Dauerregel I).
+    unsafe { syscall(nummer, a0, a1, a2, a3) }
+}
+
 unsafe fn syscall(nummer: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> Ergebnis {
     let fehler: u64;
     let ergebnis: u64;
