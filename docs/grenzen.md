@@ -548,3 +548,46 @@ fehlen **mit Absicht**, und sie sollen fehlen:
 | Browser-V1: Zuschnitt, CSS-Teilmenge, Layout, Zielmarke, Reißleine | `docs/browser-v1.md` |
 | unsafe-Flächen | `docs/unsafe-audit-serie6.md`, `docs/unsafe-audit-serie7.md` |
 | Echte Hardware | `docs/hardware-log.md`, `docs/usb-boot.md` |
+
+## Browser: CSS-Eigenschaften, die messbar fehlen (Serie 9, Teil 2)
+
+Gemessen an den zehn Seiten des Realitaets-Berichts, sortiert nach der
+Zahl der Seiten (Verfahren und volle Tabelle: docs/browser-realitaet.md,
+dritte Messung):
+
+* **`overflow` (5/10 Seiten)** — nicht umgesetzt, und zwar ABSICHTLICH.
+  `overflow: hidden` heisst abschneiden; das widerspricht der
+  Entscheidung aus Serie 8, Teil 6 („zu breiter Inhalt laeuft ueber, er
+  wird nicht abgeschnitten"). Solange unsere Kaesten ungenauer bemessen
+  sind als die eines echten Browsers, wuerde Zuschneiden Text
+  verschwinden lassen, den wir heute zeigen.
+* **`position` + `top`/`left`/`right`/`bottom` (4/10, 445x)** — der
+  groesste Einzelposten. Feste Kopfzeilen und Overlays stehen deshalb
+  mitten im Text statt an ihrem Platz. Eine billige Teilfassung waere
+  schaedlich (siehe Bericht); das ist ein eigener Schritt.
+* **`float` (4/10, 102x)** — Textumfluss fehlt. Braucht verkuerzte
+  Zeilen um das umflossene Element.
+* **`opacity` (4/10, 110x)** — auch `opacity: 0` versteckt bei uns
+  nichts.
+* **`cursor` (4/10, 123x)** — die Zeigerform ist aus Ring 3 gar nicht
+  setzbar, die Fenster-ABI kennt sie nicht.
+* **CSS-Variablen (`var()`)** und Hersteller-Praefixe werden getrennt
+  gezaehlt (`STIL_VARIABLEN`, `STIL_PRAEFIXE`) und nicht umgesetzt.
+
+NEU UNTERSTUETZT seit Serie 9, Teil 2: `white-space`
+(normal/nowrap/pre/pre-wrap/pre-line).
+
+## Browser: Textauswahl und Kopieren fehlen (Serie 9, Teil 2)
+
+Die GEOMETRIE ist gebaut und getestet (`speedlayout::textkarte`:
+Punkt -> Textstelle, Auswahl -> Rechtecke, zeichenweise und
+umlautfest). Was fehlt, ist die Verdrahtung mit der Maus UND ein
+Grund, der ueber den Browser hinausgeht:
+
+**Es gibt keinen Ablage-Syscall.** Die Zwischenablage aus Serie 3
+(`src/ablage.rs`) ist ein Kernel-Dienst; die Syscall-ABI endet bei 52
+(Fenster) und kennt sie nicht. Ein Ring-3-Programm kann heute nichts
+in die Ablage legen und nichts daraus holen — das betrifft den Browser,
+wuerde aber jedem User-Programm fehlen. Es ist also eine ABI-Erweiterung
+(zwei Syscalls ueber copy_in/copy_out auf einen Blatt-Lock) und keine
+Browser-Funktion.

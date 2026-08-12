@@ -390,3 +390,132 @@ Nach Häufigkeit, gemessen statt vermutet:
 * Echte Seiten ändern sich zwischen zwei Messungen. HN zeigt andere
   Beiträge, example.com wurde umgebaut. Wo das ein Urteil berührt, steht
   es dabei.
+
+---
+---
+
+# Dritte Messung: was jetzt noch fehlt
+
+*Serie 9, Teil 2 — 12. August 2026, dieselben zehn Adressen.*
+
+**Diese Messung ist bewusst eine andere Sorte als die beiden davor.**
+Die erste und zweite Messung bewerteten, wie brauchbar die Seiten
+aussehen (Augenschein). Diese hier beantwortet die Anschlussfrage:
+*Welche CSS-Eigenschaften fordern die Seiten an, die wir nicht können —
+und wie oft?* Sie ist die Entscheidungsgrundlage dafür, was als
+Nächstes gebaut wird, und ersetzt den Augenschein nicht.
+
+> **EHRLICHE EINSCHRÄNKUNG, damit sie niemand überliest:** Ein dritter
+> Augenschein-Durchgang mit Bildschirmfotos hat **nicht**
+> stattgefunden. Die Zahlen unten sind maschinell erhoben. Die Bilanz
+> 7 lesbar / 2 teilweise / 1 unbrauchbar aus der zweiten Messung steht
+> deshalb unverändert — sie wurde nicht bestätigt und nicht widerlegt.
+> Wer sie fortschreiben will, muss hinsehen; das ist die Lehre aus der
+> ersten Messung und gilt weiter.
+
+## Wie gemessen wird
+
+`speedcss::unbekannte_eigenschaften` zählt Deklarationen, deren
+Eigenschaftsname nicht in `stil::bekannt` steht — **derselben Liste,
+die auch die Kaskade benutzt.** Das ist der ganze Trick: Eine zweite,
+eigens gepflegte Liste wäre ab der ersten Erweiterung falsch, und man
+würde zweimal dasselbe bauen.
+
+`browser --pruefen` gibt es als `STIL_UNBEKANNT` aus,
+`tests/browser_realitaet.rs` summiert es über die zehn Seiten.
+
+## Die erste Fassung dieser Messung war falsch — dreifach
+
+Sie steht hier, weil der Fehler lehrreicher ist als das Ergebnis:
+
+1. **Sie schnitt je Seite nach zwölf Posten ab.** Über zehn Seiten
+   summiert ergab das eine Rangliste der *Spitzen* statt der
+   *Häufigkeiten*. `float` tauchte dadurch überhaupt nicht auf — es
+   liegt auf den großen Seiten unterhalb von Rang zwölf.
+2. **Sie zählte CSS-Variablen mit.** lite.cnn.com lieferte
+   `--primitive-border-01`, `--primitive-color-blue-100` und so
+   weiter. Das sind keine zwölf fehlenden Eigenschaften, sondern
+   *eine*: `var()`.
+3. **Sie zählte Hersteller-Präfixe mit.** `-webkit-transform` und
+   `-moz-transform` sind keine zwei Lücken, sondern zweimal dieselbe.
+
+Wer das zusammenzählt, bekommt eine Rangliste, in der die *lauteste*
+Seite gewinnt statt der häufigsten Ursache. Variablen und Präfixe
+werden jetzt getrennt ausgewiesen (`STIL_VARIABLEN`, `STIL_PRAEFIXE`),
+die Kürzung liegt bei 40.
+
+## Das Ergebnis
+
+Sortiert nach der **Zahl der Seiten**, nicht nach der Gesamtzahl der
+Deklarationen — eine Eigenschaft, die auf einer Seite 400× vorkommt,
+ist eine Eigenheit dieser Seite; eine, die auf der Hälfte aller Seiten
+steht, ist eine Eigenschaft des Webs.
+
+| Seiten | gesamt | Eigenschaft | Wirkung |
+|---:|---:|---|---|
+| **5/10** | 133× | `overflow` | Zuschneiden / Scrollbereiche |
+| **4/10** | 445× | `position` | Kopfzeilen, Overlays |
+| 4/10 | 198× | `top` | (gehört zu `position`) |
+| 4/10 | 161× | `left` | (gehört zu `position`) |
+| **4/10** | 123× | `cursor` | nur Mauszeigerform |
+| 4/10 | 116× | `right` | (gehört zu `position`) |
+| **4/10** | 110× | `opacity` | Transparenz, auch `opacity: 0` |
+| **4/10** | 110× | `white-space` | Umbruchverhalten |
+| **4/10** | 102× | `float` | Textumfluss, Spalten |
+
+## Was daraus gebaut wurde — und was nicht
+
+Gebaut: **`white-space`** (siehe unten). Von den übrigen sechs wurde
+jede einzeln bewertet, und die Begründungen sind wichtiger als die
+Auswahl:
+
+* **`position` (4/10, 445×) — der größte Posten, und trotzdem nicht
+  gebaut.** Vollständige Positionierung ist keine Tagesarbeit. Eine
+  billige Teilfassung wäre sogar *schädlich*: `absolute`/`fixed`
+  nehmen ein Element aus dem Fluss, und wer es herausnimmt, muss
+  sagen, wohin damit. Es gar nicht zu zeichnen versteckt Inhalt; es an
+  der alten Stelle zu zeichnen ist genau das, was wir schon tun. Das
+  ist der nächste ernsthafte Schritt, nicht ein Nebenbei.
+* **`overflow` (5/10) — am weitesten verbreitet und bewusst
+  ausgelassen.** `overflow: hidden` heißt *abschneiden*, und das
+  widerspricht einer bestehenden Entscheidung (Serie 8, Teil 6): „Zu
+  breiter Inhalt läuft über, er wird NICHT abgeschnitten. Stilles
+  Abschneiden versteckt Text, und niemand sieht warum." Solange unsere
+  Kästen nicht so genau bemessen sind wie die eines echten Browsers,
+  würde Zuschneiden Text verschwinden lassen, den wir heute zeigen.
+  Häufigkeit rechtfertigt keinen Rückschritt.
+* **`float` (4/10, 102×)** — echtes Float braucht verkürzte Zeilen um
+  das umflossene Element herum; das ist der teure Teil und keine
+  Tagesarbeit. *Nachtrag zur zweiten Messung:* Dort stand `float` als
+  vermutete Hauptursache. Die Messung bestätigt es als real (4/10),
+  aber nicht als häufigste.
+* **`cursor` (4/10, 123×)** — verändert am gezeichneten Bild
+  **nichts**. Ein Ring-3-Prozess kann die Zeigerform ohnehin nicht
+  setzen; die Fenster-ABI kennt sie nicht. Hohe Häufigkeit, kein
+  Gewinn.
+* **`opacity` (4/10, 110×)** und **`min-width`/`min-height`** —
+  beide machbar und beide nicht gebaut, weil die Zeit in Aufgabe 3
+  und 4 ging. Sie sind die nächsten Kandidaten.
+
+### Gebaut: `white-space`
+
+Bis hierher entschied der **Tag-Name**, ob Leerraum erhalten bleibt:
+`ist_vorformatiert` lief bis zu 32 Ebenen im Baum nach oben und suchte
+`<pre>`. Der Kommentar dort nannte den Grund ehrlich — die Eigenschaft
+sei „nur ein Fall". Die Messung sagt 4/10 Seiten.
+
+Jetzt steht `pre, textarea { white-space: pre }` im
+Standard-Stylesheet, die Vererbung erledigt den Baumlauf, und `nowrap`
+wirkt — **je Textstück, nicht je Container**, damit ein
+`<span style="white-space:nowrap">` mitten in einem Absatz genau auf
+sich selbst wirkt. Zu breiter Inhalt läuft weiter über, statt
+abgeschnitten zu werden.
+
+Der Gewinn ist doppelt: `nowrap` wirkt überhaupt, **und** eine
+Autor-Regel `pre { white-space: normal }` kann den Standard schlagen.
+Am Tag-Namen ging das nicht.
+
+**Ein Test hat dabei einen echten Fehler gefunden:** `geerbt_von`
+listet die vererbten Felder einzeln auf. `erbt()` und `global_setzen`
+sahen richtig aus, der Wert kam beim Kind trotzdem nie an —
+`<pre><code>` hätte seine Formatierung verloren.
