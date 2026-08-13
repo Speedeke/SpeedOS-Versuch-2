@@ -725,3 +725,40 @@ Ausserdem fehlt:
 * **Auf echter Hardware UNGETESTET.** Erwartete Befunde stehen in
   docs/audio.md §6 — allen voran: mehrere Codecs (der erste ist oft
   HDMI) und stumme Amps.
+
+---
+
+## Der Weg zum Bildschirm auf echter Hardware
+
+*(August 2026 — Befund 5 in `docs/hardware-log.md`)*
+
+* **Der Framebuffer wird nur dann beschleunigt, wenn er wirklich UC
+  ist.** `src/mtrr.rs` setzt einen variablen MTRR auf Write-Combining,
+  greift aber ausdrücklich **nicht** ein, wenn der Bereich schon gecacht
+  (WB/WT) oder bereits WC ist. Grund: MTRRs können nur ausgerichtete
+  Zweierpotenzen, wir überdecken also nach oben — auf gecachtem
+  Speicher erwischte das benachbarten RAM und nähme ihm Cache-Kohärenz
+  und Schreib-Reihenfolge. Der Preis dieser Vorsicht: Eine Maschine, die
+  ihren Framebuffer als WT meldet, bleibt langsam, obwohl WC ginge.
+* **Höchstens zwei MTRR-Register je Bereich**, und nur freie. Ein
+  Framebuffer, der mehr Zweierpotenzen bräuchte (unausgerichtete Basis),
+  wird abgelehnt statt zerstückelt — `Befund::ZuZerklueftet`. Auf einer
+  Maschine, deren Firmware alle acht Registerpaare belegt hat, passiert
+  gar nichts (`KeinRegisterFrei`).
+* **Der Wachhund fängt nur Stillstände mit LAUFENDEN Interrupts.**
+  `src/wacht.rs` hängt am Timer. Eine Endlosschleife unter
+  `without_interrupts`, ein Triple Fault oder eine angehaltene CPU
+  bleiben stumm — dort hilft er nicht. Er fängt die häufigere Sorte: ein
+  Warten oder eine Schleife, die nie endet, während der Timer weiter
+  tickt.
+* **Der Wachhund malt Kästchen, keine Schrift.** Der Programmpunkt ist
+  ablesbar als Anzahl (1 Executor … 9 Audio), nicht als Wort. Das ist
+  Absicht (kein Zeichensatz, keine Tabellen, keine Locks), aber es
+  heißt: Ohne die Legende im Boot-Schirm ist der Balken nicht deutbar.
+* **Die PS/2-Sonde meldet auf manchen Laptops falsch-negativ.** Der
+  First-Port-Test (8042-Kommando `0xAB`) antwortet auf dem Acer-EC nicht
+  mit `0x00`, obwohl die Tastatur einwandfrei funktioniert. Folge:
+  `diagnose::tastatur_vorhanden()` ist dort `false`, und die Boot-Meldung
+  „keine Eingabe gefunden" erscheint zu Unrecht. Der Desktop startet
+  trotzdem, die Tastatur geht — die **Anzeige** ist falsch, nicht der
+  Treiber.

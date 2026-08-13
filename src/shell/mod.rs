@@ -53,6 +53,10 @@ fn blaetter_taste(taste: DecodedKey) -> Option<bool> {
 pub async fn eingabe_router() {
     let mut keys = KeyStream::new();
     while let Some(key) = keys.next().await {
+        // Wegmarke fuer den Wachhund: Ab hier ist eine Taste im System.
+        // Auf dem Laptop fror genau beim Tippen alles ein — bleibt es
+        // hier stehen, sagt der Balken es.
+        crate::wacht::punkt(crate::wacht::Punkt::Tastatur);
         // STRG+C ZUERST (Serie 6, Teil 6): Der KeyStream dekodiert es als
         // U+0003. Es geht NICHT in die Tasten-Queue, sondern setzt den
         // Abbruch-Wunsch der Zielsitzung — denn wenn gerade ein Programm

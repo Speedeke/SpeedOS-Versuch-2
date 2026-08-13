@@ -419,8 +419,15 @@ pub async fn maus_task() {
 
     let mut puffer = [0u8; 4];
     let mut erhalten = 0usize;
+    // Wie viele Zeichen-Durchgaenge in Folge ausgelassen wurden, weil
+    // schon das naechste Paket wartete (siehe unten in der Schleife).
+    let mut uebersprungen: u8 = 0;
 
     while let Some(byte) = bytes.next().await {
+        // Wegmarke fuer den Wachhund — JE PAKET, nicht einmal beim
+        // Start: Nur so sagt sie aus, dass wir HIER stehengeblieben
+        // sind, und nicht bloss, dass wir mal hier waren.
+        crate::wacht::punkt(crate::wacht::Punkt::Maus);
         // Resynchronisation: Das erste Byte MUSS das Sync-Bit tragen.
         if erhalten == 0 && byte & 0b0000_1000 == 0 {
             continue;
@@ -473,8 +480,42 @@ pub async fn maus_task() {
 
         // Cursor neu positionieren (Untergrund wiederherstellen,
         // Pfeil an neuer Stelle als Overlay malen):
+        //
+        // ZWISCHENPOSITIONEN WERDEN UEBERSPRUNGEN. Die Maus liefert 200
+        // Pakete je Sekunde; bei einer schnellen Bewegung liegen beim
+        // Verarbeiten schon die naechsten Bytes in der Queue. Den Pfeil
+        // dann trotzdem zu malen heisst, ihn an eine Stelle zu setzen,
+        // die im selben Atemzug wieder ueberschrieben wird — und jedes
+        // Zeichnen sind rund 1000 Schreibzugriffe in den ECHTEN
+        // Framebuffer, die auf Geraetespeicher richtig Geld kosten.
+        //
+        // Es ist genau die Bewegung, bei der es dem Benutzer auffaellt:
+        // Wer den Zeiger langsam schiebt, hat eine leere Queue und
+        // bekommt jede Position; wer ihn schnell zieht, bekommt weniger
+        // Zwischenbilder — und dadurch ein FLUESSIGERES Ergebnis, weil
+        // die Arbeit je Bild nicht die naechsten Pakete aufhaelt.
+        //
+        // Der ZUSTAND wird davon nicht beruehrt: `position()` ist schon
+        // aktualisiert, und die Events unten gehen vollstaendig raus.
+        // Uebersprungen wird ausschliesslich das MALEN.
+        // OBERGRENZE: Bei ununterbrochener Bewegung wird die Queue nie
+        // leer — dann duerfte der Zeiger nie gezeichnet werden, und
+        // „fluessig" waere zu „unsichtbar" geworden. Nach hoechstens
+        // `MAX_UEBERSPRUNGEN` Auslassungen wird gemalt, egal was
+        // ansteht. Das begrenzt den Verzug auf rund 20 ms.
+        const MAX_UEBERSPRUNGEN: u8 = 3;
+        let noch_daten = MAUS_QUEUE
+            .try_get()
+            .map(|q| !q.is_empty())
+            .unwrap_or(false);
+        if noch_daten && uebersprungen < MAX_UEBERSPRUNGEN {
+            uebersprungen += 1;
+        } else {
+            uebersprungen = 0;
+        }
+        let malen = uebersprungen == 0;
         let (neu_x, neu_y) = position();
-        if (neu_x, neu_y) != (cursor_x, cursor_y) {
+        if malen && (neu_x, neu_y) != (cursor_x, cursor_y) {
             cursor_entfernen(cursor_x, cursor_y);
             cursor_zeichnen(neu_x, neu_y);
             (cursor_x, cursor_y) = (neu_x, neu_y);

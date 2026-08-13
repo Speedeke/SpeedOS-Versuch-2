@@ -487,6 +487,7 @@ impl fmt::Write for KonsolenZeichner<'_> {
 /// Doppel-Ausgabe-Regel lebt wieder!
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
+    crate::wacht::punkt(crate::wacht::Punkt::Konsole);
     use core::fmt::Write;
 
     x86_64::instructions::interrupts::without_interrupts(|| {

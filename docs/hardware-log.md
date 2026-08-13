@@ -373,3 +373,115 @@ Bildschirm: Vollbild-present 168 us (WC verfuegbar)
 In QEMU 168 µs — dort war es erwartungsgemäß nie das Problem. Auf dem
 Laptop ist diese Zahl die Antwort: unter 2 ms = in Ordnung, über 30 ms =
 ungecacht und die Ursache des Einfrierens.
+
+---
+
+## Befund 5 — die MTRRs waren die andere Hälfte (August 2026)
+
+**Die ehrliche Grenze von Befund 4 war die eigentliche Ursache.** Dort
+stand: *„Die PAT kann einen Bereich nicht besser machen, als die MTRRs
+erlauben. Steht er dort auf UC, bleibt es bei UC."* Genau so ist es —
+und damit war die PAT-Umstellung allein wirkungslos.
+
+### Die Regel, um die es geht
+
+Der effektive Speichertyp einer Seite ergibt sich aus **MTRR und PAT
+zusammen**, und dabei gewinnt der **restriktivere** (Intel SDM Vol. 3,
+Tabelle *„Effective Memory Type Depending on MTRR and PAT"*). UC ist die
+stärkste Aussage. Eine Seitentabelle, die WC sagt, während der MTRR UC
+sagt, ergibt UC — der PAT-Eintrag ist gesetzt und bewirkt nichts.
+
+Auf echter Hardware lässt die Firmware den Framebuffer-Bereich häufig
+auf UC stehen. In QEMU fällt es nicht auf, weil dort ohnehin alles
+schnell ist. Das ist der Grund, warum Befund 4 in QEMU 168 µs maß und
+sich auf dem Laptop nichts änderte.
+
+### Was jetzt passiert
+
+`src/mtrr.rs` programmiert einen **variablen MTRR auf WC** über den
+Framebuffer — dasselbe, was Linux früher mit `mtrr_add()` für
+Grafikkarten tat. `framebuffer::init` ruft es **vor** dem PAT-Eintrag;
+wer die Reihenfolge dreht, setzt wieder ein Flag ohne Wirkung.
+
+**Die Sicherheitsschranke ist der wichtigste Teil der Datei:** Wir
+greifen **nur ein, wenn der Bereich wirklich UC ist**. Sagt der MTRR WB,
+ist es gewöhnlicher gecachter Speicher — genau der Fall in QEMU, wo der
+„Framebuffer" schlicht Hauptspeicher ist. Ihn auf WC zu stellen machte
+ihn *langsamer*, und weil MTRRs nur ausgerichtete Zweierpotenzen können
+und wir deshalb nach oben überdecken, erwischte die Überdeckung
+benachbarten RAM — der verlöre Cache-Kohärenz und Schreib-Reihenfolge.
+Das wäre ein Fehler, den man erst Wochen später als unerklärliche
+Datenverfälschung bemerkt. Wir reparieren den kaputten Fall und lassen
+den gesunden in Ruhe.
+
+Weiter gilt: bestehende Einträge werden **nie** überschrieben (nur
+Register mit gelöschtem Gültig-Bit), höchstens zwei Register je Bereich,
+und bei jeder unerfüllten Bedingung passiert schlicht nichts.
+
+In QEMU meldet der Bereich tatsächlich UC (die VGA-Apertur ist MMIO,
+kein RAM) — die Schranke greift also am richtigen Fall, und beide
+Register werden gesetzt.
+
+### Der zweite Fund: der Mauszeiger schrieb byteweise
+
+`pixel_setzen_vorne` schrieb **drei einzelne Bytes je Pixel** in den
+echten Framebuffer. Auf Gerätespeicher ist jeder davon eine eigene
+Bus-Transaktion. Der Zeiger sind rund 1000 Pixel und wird bis zu
+200-mal je Sekunde neu gezeichnet — das sind 600 000 Transaktionen pro
+Sekunde für einen Mauszeiger. Jetzt ist es **ein 32-Bit-Zugriff**, wenn
+ein Pixel 4 Byte breit ist. Faktor 3, an genau der Stelle, die der
+Benutzer als „nicht smooth" wahrnimmt.
+
+### Und das Werkzeug: der Wachhund (`src/wacht.rs`)
+
+Der eigentliche Grund, warum diese Suche so lange dauerte: **Auf echter
+Hardware gibt es keine serielle Ausgabe.** Ein eingefrorenes SpeedOS
+zeigte das Bild von vorher — daran lässt sich nicht ablesen, woran es
+lag. Jede Vermutung kostete einen kompletten Zyklus aus Bauen, Stick
+schreiben, Booten, Fotografieren.
+
+Der Wachhund läuft im Timer-Interrupt, prüft den Fortschritt des
+Executors und malt bei Stillstand (3 s) einen **roten Balken** an den
+oberen Bildschirmrand — mit so vielen weißen Kästchen, wie der zuletzt
+erreichte Programmpunkt groß ist. Kästchen statt Schrift, weil sich das
+auf einem Handyfoto abzählen lässt und keine Zeichensatz-Tabellen
+braucht. Er nimmt **keinen Lock** (in genau der Lage könnte ein Lock die
+Ursache sein) und meldet **einmal**, nicht im Sekundentakt.
+
+Die Zuordnung steht seit diesem Befund auch im Boot-Schirm, damit man
+sie nicht nachschlagen muss:
+
+```
+1 Executor  2 Compositor  3 Bildschirm  4 Konsole
+5 Tastatur  6 Maus  7 Shell  8 USB  9 Audio
+```
+
+**Was er nicht kann, und das gehört dazu:** Er hängt am Timer. Steht die
+Maschine mit ausgeschalteten Interrupts (Endlosschleife unter
+`without_interrupts`, Triple Fault, CPU angehalten), läuft auch er nicht
+mehr. Er fängt die häufigere Sorte: eine Schleife oder ein Warten, das
+nie endet, während die Interrupts weiterlaufen.
+
+### Der Befund-Schirm erscheint jetzt bei JEDEM Boot
+
+Die Messung stand bisher hinter Taste D — und ausgerechnet die Tastatur
+war auf dieser Maschine das Problem. **Eine Messung, die man nur mit dem
+kaputten Gerät abrufen kann, ist keine.** Sie erscheint deshalb von
+selbst für fünf Sekunden, mit Auflösung, `present`-Zeit, MTRR-Befund
+(inklusive des Typs *vorher*), PAT-Status, den erkannten Eingabegeräten
+und einer Bewertung in Worten.
+
+### Nebenbefund, der eine Annahme widerlegt hat
+
+Das Foto vom Laptop zeigte „keine Eingabe gefunden". Die xHCI-Aufzählung
+läuft **synchron** in `usb::xhci::init()` — die Meldung stimmt also:
+**auf dem Laptop hängt nichts am USB.** Eingabe kommt dort über PS/2,
+und `diagnose::tastatur_vorhanden()` meldet sie fälschlich als abwesend
+(der 8042-Port-Test 0xAB antwortet auf diesem EC nicht wie erwartet).
+
+Folge: **Die gesamte USB-Arbeit aus Serie 9 ist auf dieser Maschine
+wirkungslos** — sie war nie an der Zähigkeit beteiligt. Das ist der
+Grund, warum die Verbesserungen an xHCI und HID dort nichts brachten,
+obwohl sie in QEMU messbar waren. Wer künftig ein Hardware-Problem
+sucht, prüft **zuerst**, ob der verdächtigte Treiber auf der Maschine
+überhaupt läuft.

@@ -237,6 +237,7 @@ impl DoppelPuffer {
 
     /// Kopiert den kompletten Back-Buffer auf den Bildschirm.
     pub fn present(&mut self) {
+        crate::wacht::punkt(crate::wacht::Punkt::Present);
         self.vorne.copy_from_slice(self.hinten);
     }
 
@@ -244,6 +245,7 @@ impl DoppelPuffer {
     /// z. B. fürs Cursor-Blinken, damit nicht ständig der ganze
     /// Bildschirm übertragen wird.
     pub fn present_zeilen(&mut self, y: usize, hoehe: usize) {
+        crate::wacht::punkt(crate::wacht::Punkt::Present);
         let von = y.min(self.info.height) * self.info.stride * self.info.bytes_per_pixel;
         let bis = (y + hoehe).min(self.info.height) * self.info.stride * self.info.bytes_per_pixel;
         self.vorne[von..bis].copy_from_slice(&self.hinten[von..bis]);
@@ -252,6 +254,11 @@ impl DoppelPuffer {
     /// Kopiert ein RECHTECK vom Back- in den Front-Buffer — stellt
     /// z. B. das Bild unter dem Maus-Cursor wieder her.
     pub fn present_bereich(&mut self, x: usize, y: usize, breite: usize, hoehe: usize) {
+        // Wegmarke fuer den Wachhund: Der Transfer in den echten
+        // Framebuffer ist auf ungecachter Hardware die mit Abstand
+        // teuerste Einzelhandlung im System. Bleibt das System hier
+        // stehen, soll das auf dem Bildschirm ablesbar sein.
+        crate::wacht::punkt(crate::wacht::Punkt::Present);
         let bpp = self.info.bytes_per_pixel;
         for zeile in y..(y + hoehe).min(self.info.height) {
             let von = (zeile * self.info.stride + x.min(self.info.width)) * bpp;
@@ -271,6 +278,39 @@ impl DoppelPuffer {
             return;
         }
         let offset = (y * self.info.stride + x) * self.info.bytes_per_pixel;
+
+        // EIN 32-BIT-SCHREIBZUGRIFF STATT DREI EINZELNER BYTES.
+        //
+        // Das ist kein Mikro-Optimieren, sondern der Unterschied
+        // zwischen ruckelnder und fluessiger Maus: Diese Funktion
+        // schreibt in den ECHTEN Framebuffer, und der ist auf echter
+        // Hardware Geraetespeicher. Dort ist JEDER Schreibzugriff eine
+        // eigene Bus-Transaktion — drei Bytes kosten dreimal so viel wie
+        // ein Doppelwort. Der Mauszeiger sind rund 1000 Pixel, und er
+        // wird bis zu 200-mal je Sekunde neu gezeichnet.
+        //
+        // Erlaubt ist es, wenn ein Pixel wirklich 4 Byte breit ist (dann
+        // ist `offset` durch 4 teilbar, weil der Puffer seitenausgerichtet
+        // beginnt) und das Format eines der beiden bekannten ist. Das
+        // vierte Byte ist in beiden Faellen reserviert und wird von der
+        // Firmware ignoriert.
+        if self.info.bytes_per_pixel == 4 {
+            let wort = match self.info.pixel_format {
+                PixelFormat::Rgb => {
+                    u32::from_le_bytes([farbe.r, farbe.g, farbe.b, 0])
+                }
+                PixelFormat::Bgr => {
+                    u32::from_le_bytes([farbe.b, farbe.g, farbe.r, 0])
+                }
+                _ => {
+                    let grau = ((farbe.r as u16 + farbe.g as u16 + farbe.b as u16) / 3) as u8;
+                    u32::from_le_bytes([grau; 4])
+                }
+            };
+            self.vorne[offset..offset + 4].copy_from_slice(&wort.to_le_bytes());
+            return;
+        }
+
         let pixel = &mut self.vorne[offset..offset + self.info.bytes_per_pixel];
         match self.info.pixel_format {
             PixelFormat::Rgb => {
@@ -388,21 +428,57 @@ pub fn init(framebuffer: FrameBuffer) {
     //
     // In QEMU faellt das nicht auf (dort ist es Host-RAM), auf dem
     // Laptop fror dadurch das Tippen ein. Siehe
-    // `memory::write_combining_einrichten` fuer die Mechanik und die
-    // ehrliche Grenze (MTRRs koennen es verhindern).
+    // `memory::write_combining_einrichten` fuer die Mechanik.
+    //
+    // ZWEI SCHICHTEN, BEIDE NOETIG — und das ist der Kern der Sache:
+    // Der effektive Speichertyp ergibt sich aus MTRR **und** PAT, und
+    // dabei gewinnt der RESTRIKTIVERE. Steht der Bereich im MTRR auf
+    // UC, kann die Seitentabelle ihn NICHT auf WC heben. Deshalb kommt
+    // der MTRR ZUERST (src/mtrr.rs) und der PAT-Eintrag danach; wer die
+    // Reihenfolge dreht, setzt ein Flag, das nichts bewirkt.
     //
     // NUR DER VORDERE Puffer wird umgestellt. Der Back-Buffer ist
     // normales RAM und soll gecacht bleiben — dort wird gezeichnet, und
     // Lesen aus WC-Speicher waere langsam.
-    let umgestellt = memory::bereich_write_combining(
-        VirtAddr::new(vorne.as_ptr() as u64),
-        info.byte_len,
-    );
+    let vorne_virt = VirtAddr::new(vorne.as_ptr() as u64);
+    match memory::uebersetzen(vorne_virt) {
+        Some(physik) => {
+            crate::mtrr::framebuffer_beschleunigen(physik.as_u64(), info.byte_len as u64);
+        }
+        None => {
+            // Kann eigentlich nicht sein — wir schreiben gerade hinein.
+            // Trotzdem kein Grund anzuhalten: Der PAT-Weg unten laeuft
+            // weiter, und auf Maschinen mit WB-Vorgabe genuegt er.
+            crate::serial_println!(
+                "[FB] Physikadresse des Framebuffers nicht ermittelbar — MTRR uebersprungen."
+            );
+        }
+    }
+    let umgestellt = memory::bereich_write_combining(vorne_virt, info.byte_len);
     crate::serial_println!(
         "[FB] {} Seiten des Framebuffers auf Write-Combining umgestellt ({} KiB).",
         umgestellt,
         info.byte_len / 1024
     );
+
+    // DEN WACHHUND SCHARF SCHALTEN (src/wacht.rs).
+    //
+    // Er bekommt den ROHEN Zeiger, weil er im Stillstand keinen Lock
+    // nehmen darf — genau dann koennte der Lock ja die Ursache sein.
+    // Ab hier kann ein eingefrorenes System seinen letzten Programmpunkt
+    // selbst auf den Bildschirm malen.
+    //
+    // SAFETY: `vorne` IST der echte, dauerhaft gemappte Framebuffer mit
+    // genau diesen Massen — wir halten ihn gerade in der Hand.
+    unsafe {
+        crate::wacht::einrichten(
+            vorne.as_mut_ptr(),
+            info.stride,
+            info.bytes_per_pixel,
+            info.width,
+            info.height,
+        );
+    }
 
     *FRAMEBUFFER.lock() = Some(DoppelPuffer {
         vorne,
@@ -556,6 +632,133 @@ pub fn bootscreen_zeigen(dauer_ms: u64) {
 /// NICHT auf die serielle Schnittstelle schaffen müssen, sondern die
 /// der Nutzer auf echter Hardware am Bildschirm sehen soll — etwa
 /// „keine PS/2-Eingabe gefunden". Die erste Zeile wird hervorgehoben.
+/// Zeigt den SYSTEMBEFUND — die Zahlen, die man auf echter Hardware
+/// sonst nirgends sieht.
+///
+/// ===================================================================
+/// WARUM DAS OHNE TASTENDRUCK ERSCHEINT
+///
+/// Auf dem Blech gibt es keine serielle Ausgabe. Bisher stand die
+/// Leistungsmessung nur im Diagnose-Modus hinter Taste D — und
+/// ausgerechnet die Tastatur ist auf der Testmaschine das Problem.
+/// Eine Messung, die man nur mit dem kaputten Geraet abrufen kann,
+/// ist keine Messung.
+///
+/// DIE WICHTIGSTE ZEILE IST `present`: Sie sagt, wie teuer ein
+/// Vollbild-Transfer in den echten Framebuffer ist. Bei 1080p sind das
+/// 8,3 MB; ist der Speicher ungecacht, kostet er zehnmal so viel wie
+/// mit Write-Combining — und genau das entscheidet, ob das System beim
+/// Tippen einfriert (jede gescrollte Konsolenzeile ist ein
+/// Vollbild-Transfer).
+pub fn befund_zeigen(dauer_ms: u64) {
+    use core::fmt::Write;
+
+    // Zweimal messen: Der erste Durchgang faellt oft aus dem Rahmen
+    // (kalte Caches, TLB), der zweite ist der ehrliche Wert.
+    let _ = present_messen();
+    let present_us = present_messen();
+
+    let (breite, hoehe) =
+        mit_framebuffer(|fb| (fb.info().width, fb.info().height)).unwrap_or((0, 0));
+
+    // Feste Puffer statt `format!` — dieser Weg laeuft frueh und soll
+    // nicht vom Heap abhaengen.
+    let mut z1: heapless_zeile::Zeile = Default::default();
+    let mut z2: heapless_zeile::Zeile = Default::default();
+    let mut z3: heapless_zeile::Zeile = Default::default();
+    let mut z4: heapless_zeile::Zeile = Default::default();
+
+    let _ = write!(z1, "Bildschirm  {}x{}   present {} us", breite, hoehe, present_us);
+    // Der Zustand VOR unserem Eingriff steht mit dabei — nur so laesst
+    // sich sagen, ob der Eingriff ueberhaupt etwas zu tun hatte.
+    let _ = write!(z2, "Speichertyp  MTRR {}", crate::mtrr::befund().text());
+    if let Some(t) = crate::mtrr::typ_vorher() {
+        let _ = write!(z2, " (vorher {})", crate::mtrr::typ_text(t));
+    }
+    let _ = write!(
+        z2,
+        "   PAT-WC {}",
+        if memory::write_combining_verfuegbar() {
+            "ja"
+        } else {
+            "nein"
+        }
+    );
+    let _ = write!(
+        z3,
+        "Eingabe  PS/2-Tastatur {}   PS/2-Maus {}   USB-HID {}",
+        if crate::diagnose::tastatur_vorhanden() { "ja" } else { "nein" },
+        if crate::maus::zeiger_vorhanden() { "ja" } else { "nein" },
+        crate::usb::geraet::anzahl()
+    );
+    // Die BEWERTUNG gleich dazu — eine nackte Zahl hilft nur dem, der
+    // die Schwellen auswendig kennt.
+    let _ = write!(
+        z4,
+        "{}",
+        if present_us > 30_000 {
+            "BEFUND: Bildschirm UNGECACHT — das ist die Ursache."
+        } else if present_us > 15_000 {
+            "BEFUND: Bildschirm langsam, aber benutzbar."
+        } else {
+            "BEFUND: Bildschirm in Ordnung."
+        }
+    );
+
+    meldung_zeigen(
+        &[
+            "SpeedOS — Systembefund",
+            "",
+            z1.als_str(),
+            z2.als_str(),
+            z3.als_str(),
+            "",
+            z4.als_str(),
+            "",
+            "Roter Balken oben = Stillstand. Kaestchen zaehlen:",
+            "1 Executor  2 Compositor  3 Bildschirm  4 Konsole",
+            "5 Tastatur  6 Maus  7 Shell  8 USB  9 Audio",
+        ],
+        dauer_ms,
+    );
+}
+
+/// Eine Textzeile mit fester Groesse — damit `befund_zeigen` ohne Heap
+/// auskommt (es laeuft frueh und soll nichts voraussetzen).
+mod heapless_zeile {
+    pub struct Zeile {
+        puffer: [u8; 96],
+        laenge: usize,
+    }
+
+    impl Default for Zeile {
+        fn default() -> Self {
+            Zeile {
+                puffer: [0; 96],
+                laenge: 0,
+            }
+        }
+    }
+
+    impl Zeile {
+        pub fn als_str(&self) -> &str {
+            core::str::from_utf8(&self.puffer[..self.laenge]).unwrap_or("?")
+        }
+    }
+
+    impl core::fmt::Write for Zeile {
+        fn write_str(&mut self, s: &str) -> core::fmt::Result {
+            for b in s.bytes() {
+                if self.laenge < self.puffer.len() {
+                    self.puffer[self.laenge] = b;
+                    self.laenge += 1;
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
 pub fn meldung_zeigen(zeilen: &[&str], dauer_ms: u64) {
     mit_framebuffer(|fb| {
         let breite = fb.info().width;

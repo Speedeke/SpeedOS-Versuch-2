@@ -3357,6 +3357,7 @@ pub async fn compositor_task() {
         if !desktop_aktiv() {
             continue;
         }
+        crate::wacht::punkt(crate::wacht::Punkt::Compositor);
         let (breite, hoehe) = match framebuffer::mit_framebuffer(|fb| {
             (fb.info().width as i32, fb.info().height as i32)
         }) {

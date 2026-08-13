@@ -473,6 +473,13 @@ pub fn timer_basisarbeit() {
     // und drei Atomics: kein Lock, keine Allokation — Handler-Regel erfüllt.
     crate::zufall::einspeisen(crate::zufall::Quelle::Pit);
 
+    // DER WACHHUND (src/wacht.rs). Er prüft, ob das System noch
+    // vorankommt, und malt bei Stillstand einen Befund an den oberen
+    // Bildschirmrand — auf echter Hardware die EINZIGE Möglichkeit
+    // herauszubekommen, woran es hängt, denn dort gibt es keine
+    // serielle Ausgabe. Kostet im Normalfall zwei Atomics.
+    crate::wacht::tick();
+
     // Dem PIC melden: "fertig behandelt" (End of Interrupt).
     // Ohne das schickt er nie wieder einen Timer-Interrupt!
     // unsafe: Die Interrupt-Nummer stammt aus unserem eigenen Enum und

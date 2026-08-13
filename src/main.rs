@@ -263,12 +263,25 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
                 "SpeedOS Live: keine Eingabe gefunden",
                 "Weder PS/2 noch eine USB-Tastatur oder -Maus.",
                 "",
-                "Taste D auf dem Bootscreen zeigt die Diagnose.",
                 "Der Desktop startet trotzdem.",
             ],
-            6000,
+            4000,
         );
     }
+
+    // ===================================================================
+    // DER BEFUND-SCHIRM — bei JEDEM Boot, ohne Tastendruck
+    //
+    // Auf echter Hardware gibt es keine serielle Ausgabe. Bisher stand
+    // die Leistungsmessung nur im Diagnose-Modus hinter Taste D — und
+    // genau die Tastatur ist auf dieser Maschine das Problem. Eine
+    // Messung, die man nur mit dem kaputten Ding abrufen kann, ist
+    // keine.
+    //
+    // Deshalb erscheint sie jetzt von selbst. Die WICHTIGSTE Zahl ist
+    // `present`: Sie sagt, wie teuer der Weg zum Bildschirm ist, und
+    // damit, ob das Einfrieren beim Tippen daher kommt.
+    speed_os::framebuffer::befund_zeigen(5000);
 
     // 6. Direkt in den DESKTOP booten: FensterManager + Terminal-
     //    Fenster stehen bereit, BEVOR der erste Task läuft — die

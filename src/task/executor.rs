@@ -125,6 +125,13 @@ impl Executor {
     /// TSC gemessen und ins Auslastungs-Gleitfenster verbucht.
     pub fn run(&mut self) -> ! {
         loop {
+            // DER HERZSCHLAG fuer den Wachhund (src/wacht.rs). Hier ist
+            // die richtige Stelle und nirgends sonst: Diese Schleife ist
+            // der Punkt, durch den JEDER Fortschritt im Kernel laeuft.
+            // Bleibt sie stehen, steht das System — egal, wo genau es
+            // haengt.
+            crate::wacht::schlag();
+            crate::wacht::punkt(crate::wacht::Punkt::Executor);
             let start_us = crate::zeit::us_seit_boot();
             self.run_ready_tasks();
             let arbeit_us = crate::zeit::us_seit_boot() - start_us;

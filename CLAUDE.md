@@ -2306,6 +2306,58 @@
   Loslassen von Alt bestätigt. WICHTIG: Ein maximiertes/gesnapptes
   Fenster braucht einen fast bildschirmgroßen Puffer — desktop_starten
   lässt den Heap passend zur Auflösung wachsen (Breite*Höhe*3*3 Bytes).
+- **DER WEG ZUM BILDSCHIRM AUF ECHTER HARDWARE (August 2026,
+  `src/mtrr.rs` + `src/wacht.rs`, Befund 5 in docs/hardware-log.md):**
+  **DIE URSACHE DER ZÄHIGKEIT WAR NIE DIE RECHENLEISTUNG, SONDERN DER
+  SPEICHERTYP DES FRAMEBUFFERS.** Der effektive Typ ergibt sich aus
+  **MTRR und PAT ZUSAMMEN**, und dabei gewinnt der RESTRIKTIVERE (Intel
+  SDM Vol. 3). Steht der Bereich im MTRR auf UC, kann die Seitentabelle
+  ihn NICHT auf WC heben — der PAT-Eintrag ist gesetzt und bewirkt
+  nichts. Genau das war der Zustand nach Befund 4, und die dort notierte
+  „ehrliche Grenze" war in Wahrheit die ganze Ursache.
+  **REIHENFOLGE IST PFLICHT:** `framebuffer::init` ruft ERST
+  `mtrr::framebuffer_beschleunigen` (physikalische Adresse!), DANN
+  `memory::bereich_write_combining`. Wer sie dreht, setzt wieder ein
+  wirkungsloses Flag.
+  **DIE SICHERHEITSSCHRANKE IST DER WICHTIGSTE TEIL:** Eingegriffen wird
+  NUR, wenn der Bereich wirklich **UC** ist. Bei WB/WT passiert nichts —
+  MTRRs können nur ausgerichtete Zweierpotenzen, wir überdecken also
+  nach oben, und auf gecachtem Speicher erwischte das benachbarten RAM
+  und nähme ihm Cache-Kohärenz und Schreib-Reihenfolge. Das ist der
+  Fehler, den man erst Wochen später als Datenverfälschung bemerkt.
+  Ebenso: bestehende Register werden NIE überschrieben (nur solche mit
+  gelöschtem Gültig-Bit), höchstens zwei je Bereich, sonst
+  `ZuZerklueftet`/`KeinRegisterFrei` und Ruhe.
+  **ZWEITER FUND, dieselbe Wurzel:** `pixel_setzen_vorne` schrieb DREI
+  EINZELNE BYTES je Pixel in den echten Framebuffer — auf Gerätespeicher
+  drei Bus-Transaktionen. Der Mauszeiger sind ~1000 Pixel bei 200 Hz,
+  also 600 000 Transaktionen je Sekunde für einen Pfeil. Jetzt EIN
+  32-Bit-Zugriff bei 4 Byte je Pixel. Dazu überspringt `maus_task`
+  Zwischenpositionen, solange schon Bytes in der Queue liegen (gedeckelt
+  auf 3, sonst wäre „flüssig" zu „unsichtbar" geworden) — gezeichnet
+  wird nur die Position, die auch stehen bleibt.
+  **DER WACHHUND (`src/wacht.rs`) IST DAS WERKZEUG, DAS GEFEHLT HAT.**
+  Auf echter Hardware gibt es KEINE serielle Ausgabe; ein eingefrorenes
+  System zeigte das Bild von vorher, und jede Vermutung kostete einen
+  ganzen Zyklus aus Bauen/Stick/Booten/Fotografieren. Er läuft im Timer,
+  prüft den Herzschlag des Executors und malt bei 3 s Stillstand einen
+  ROTEN BALKEN mit so vielen Kästchen, wie der letzte Programmpunkt groß
+  ist (1 Executor … 9 Audio, Legende steht im Boot-Schirm). **Er nimmt
+  KEINEN LOCK** (in genau der Lage könnte ein Lock die Ursache sein —
+  deshalb roher Zeiger aus `wacht::einrichten`) und meldet EINMAL, nicht
+  im Sekundentakt. GRENZE: Er hängt am Timer — bei ausgeschalteten
+  Interrupts, Triple Fault oder angehaltener CPU bleibt er stumm.
+  **DER BEFUND-SCHIRM ERSCHEINT BEI JEDEM BOOT, nicht hinter Taste D.**
+  Eine Messung, die man nur mit dem KAPUTTEN Gerät abrufen kann, ist
+  keine Messung — und die Tastatur war das Problem.
+  **NEBENBEFUND, der eine Annahme widerlegte:** Die xHCI-Aufzählung
+  läuft SYNCHRON in `usb::xhci::init()`; „keine Eingabe gefunden" auf
+  dem Laptop stimmt also — dort hängt NICHTS am USB, die Eingabe kommt
+  über PS/2, und `diagnose::tastatur_vorhanden()` (8042-Test `0xAB`)
+  meldet auf diesem EC falsch-negativ. Die ganze USB-Arbeit aus Serie 9
+  ist auf dieser Maschine wirkungslos. **REGEL: Wer ein Hardware-Problem
+  sucht, prüft ZUERST, ob der verdächtigte Treiber dort überhaupt
+  läuft.**
 - **PS/2-Paket-Grenze:** Ein Maus-Paket trägt nur 9-Bit-Deltas
   (±255); größere Bewegungen setzen das Overflow-Bit und werden
   verworfen (Spec-konform). Automatisierte QMP-Tests müssen die Maus
