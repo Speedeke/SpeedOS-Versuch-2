@@ -444,48 +444,58 @@ pub fn scancode_von(hid: u8, los: bool) -> Option<Scancode> {
 // MAUS
 // ===========================================================================
 
-/// Einen HID-Maus-Boot-Report in PS/2-Maus-Bytes uebersetzen.
+/// Einen HID-Maus-Boot-Report in ein FERTIGES `maus::Paket` uebersetzen.
 ///
 /// ===================================================================
-/// WARUM DER UMWEG UEBER PS/2-BYTES
+/// WARUM HIER KEINE PS/2-BYTES MEHR ENTSTEHEN
 ///
-/// Dieselbe Ueberlegung wie bei der Tastatur: `maus::paket_parsen`,
-/// die Beschleunigung, die Cursor-Verwaltung und der Ereignis-Weg sind
-/// da und geprueft. Ein zweiter Weg daneben waere eine zweite Stelle,
-/// an der die Maus ruckelt.
+/// Bis August 2026 baute diese Funktion PS/2-Bytes und schob sie durch
+/// dieselbe Warteschlange wie eine echte PS/2-Maus. Die Begruendung
+/// klang gut („einen zweiten Weg zu bauen heisst, eine zweite Stelle zu
+/// haben, an der die Maus ruckelt") — und war trotzdem falsch, weil sie
+/// eine Abhaengigkeit uebersah:
 ///
-/// DIE VORZEICHEN SIND DER UNTERSCHIED, UND ZWAR ZWEIMAL: Auf der
-/// LEITUNG zaehlt HID dY nach unten, PS/2 nach oben — deshalb wird hier
-/// invertiert. `maus::paket_parsen` dreht das Hardware-Vorzeichen dann
-/// aber SELBST noch einmal um und liefert Bildschirm-Koordinaten. Die
-/// beiden Umkehrungen heben sich auf, und genau das ist gewollt:
-/// HID-„unten" bleibt Bildschirm-„unten".
+/// **WIE LANG ein PS/2-Paket ist, entscheidet `RAD_MODUS`, und das
+/// setzt die PS/2-INITIALISIERUNG.** Auf einem Laptop ohne PS/2-Maus
+/// schlaegt die fehl, `RAD_MODUS` bleibt falsch — und der Maus-Task
+/// las unseren 4-Byte-Strom in 3er-Schritten. Dauerhaft aus dem Takt,
+/// der Zeiger sprang. In QEMU fiel es nie auf, weil es dort eine
+/// PS/2-Maus GIBT, die Erkennung gelingt und beide Laengen zufaellig
+/// zusammenpassen.
 ///
-/// Wer nur die erste Umkehrung sieht, laesst die Inversion weg und
-/// bekommt eine spiegelverkehrte Maus; wer nur die zweite sieht,
-/// invertiert zweimal. Siehe `test_maus_dreht_die_y_achse`.
+/// Ein `Paket` traegt seine Bedeutung selbst. Es gibt keine Laenge mehr,
+/// ueber die sich zwei Geraete uneinig sein koennten — der Fehler kann
+/// nicht wiederkommen.
 ///
-/// Der PS/2-Kopf traegt in Bit 3 ein festes Sync-Bit; ohne das verwirft
-/// `paket_parsen` das Paket (zu Recht, es ist seine Resynchronisation).
-pub fn maus_bytes(daten: &[u8]) -> Option<[u8; 4]> {
+/// DIE Y-ACHSE, die eine bleibende Feinheit: HID zaehlt dY NACH UNTEN,
+/// und `maus::Paket.dy` ebenfalls (Bildschirm-Koordinaten). Es wird also
+/// NICHT invertiert. Frueher standen hier ZWEI Umkehrungen, weil der
+/// Umweg ueber `paket_parsen` eine davon selbst vornahm; sie hoben sich
+/// auf. Ohne den Umweg faellt beides weg. Siehe
+/// `test_maus_dreht_die_y_achse`.
+pub fn maus_paket(daten: &[u8]) -> Option<crate::maus::Paket> {
     if daten.len() < 3 {
         return None;
     }
-    let tasten = daten[0] & 0b0000_0111;
-    let dx = daten[1] as i8;
-    // DIE ACHSENUMKEHR — siehe oben.
-    let dy = (daten[2] as i8).saturating_neg();
-    let rad = if daten.len() >= 4 { daten[3] as i8 } else { 0 };
-
-    // Kopf: Tasten, Sync-Bit (immer 1), Vorzeichenbits von X und Y.
-    let mut kopf = tasten | 0b0000_1000;
-    if dx < 0 {
-        kopf |= 0b0001_0000;
-    }
-    if dy < 0 {
-        kopf |= 0b0010_0000;
-    }
-    Some([kopf, dx as u8, dy as u8, (rad as u8) & 0x0F])
+    let tasten = daten[0];
+    // Das Rad wird auf den Wertebereich geklemmt, den eine PS/2-Maus
+    // melden koennte (4 Bit mit Vorzeichen). Das ist keine Nostalgie:
+    // Der Rest des Systems rechnet mit Rastungen, nicht mit
+    // hochaufloesenden Radwerten, und ein Ausreisser wuerde eine Seite
+    // weit springen lassen.
+    let rad = if daten.len() >= 4 {
+        (daten[3] as i8).clamp(-8, 7)
+    } else {
+        0
+    };
+    Some(crate::maus::Paket {
+        dx: daten[1] as i8 as i32,
+        dy: daten[2] as i8 as i32,
+        links: tasten & 0b001 != 0,
+        rechts: tasten & 0b010 != 0,
+        mitte: tasten & 0b100 != 0,
+        scroll: rad,
+    })
 }
 
 // ===========================================================================
@@ -674,64 +684,71 @@ mod tests {
     // MAUS
     // -------------------------------------------------------------------
 
-    /// **DIE ACHSENUMKEHR — und wo sie WIRKLICH sitzt.**
+    /// Die Y-Achse ist die Stelle, an der man sich zweimal vertun kann.
     ///
-    /// Die erste Fassung dieses Tests erwartete -10 und war falsch. Der
-    /// Grund ist lehrreich, weil er ZWEI Umkehrungen betrifft:
+    /// HID zaehlt dY NACH UNTEN, und `maus::Paket.dy` ebenfalls
+    /// (Bildschirm-Koordinaten). Es darf also NICHT invertiert werden.
     ///
-    ///   * Auf der LEITUNG zaehlt HID dY nach unten, PS/2 nach oben.
-    ///   * `maus::paket_parsen` dreht das Hardware-Vorzeichen aber
-    ///     SCHON SELBST um (`dy: -dy_hardware`) und liefert
-    ///     Bildschirm-Koordinaten.
-    ///
-    /// `Paket.dy` und der HID-Wert haben damit DIESELBE Bedeutung:
-    /// positiv = nach unten. Damit das nach dem Umweg durch das
-    /// PS/2-Format wieder herauskommt, muss `maus_bytes` invertieren —
-    /// die beiden Umkehrungen heben sich auf.
-    ///
-    /// Wer nur die erste Umkehrung sieht, laesst die Inversion weg und
-    /// bekommt eine senkrecht spiegelverkehrte Maus; wer nur die zweite
-    /// sieht, dreht im Test das Vorzeichen. Beides ist mir passiert.
+    /// Historie, damit niemand die alte Fassung "wiederherstellt":
+    /// Frueher lief der Report ueber PS/2-Bytes und `paket_parsen`, und
+    /// das dreht das Hardware-Vorzeichen selbst um (`dy: -dy_hardware`).
+    /// Deshalb musste die Uebersetzung DAMALS invertieren — zwei
+    /// Umkehrungen, die sich aufhoben. Seit der Report direkt ein
+    /// `Paket` liefert, faellt beides weg. Wer nur eine der beiden
+    /// Aenderungen nachvollzieht, bekommt eine senkrecht
+    /// spiegelverkehrte Maus.
     #[test_case]
     fn test_maus_dreht_die_y_achse() {
         // HID: 10 nach unten -> auf dem Bildschirm ebenfalls nach unten.
-        let b = maus_bytes(&[0, 0, 10]).unwrap();
-        let p = crate::maus::paket_parsen(b[0], b[1], b[2], Some(b[3])).unwrap();
+        let p = maus_paket(&[0, 0, 10]).unwrap();
         assert_eq!(p.dy, 10, "HID unten muss Bildschirm unten bleiben");
         // HID: 10 nach oben.
-        let b = maus_bytes(&[0, 0, (-10i8) as u8]).unwrap();
-        let p = crate::maus::paket_parsen(b[0], b[1], b[2], Some(b[3])).unwrap();
+        let p = maus_paket(&[0, 0, (-10i8) as u8]).unwrap();
         assert_eq!(p.dy, -10);
     }
 
     #[test_case]
     fn test_maus_x_und_tasten() {
         // Linke Taste (Bit 0), 5 nach rechts.
-        let b = maus_bytes(&[0b001, 5, 0]).unwrap();
-        let p = crate::maus::paket_parsen(b[0], b[1], b[2], Some(b[3])).unwrap();
+        let p = maus_paket(&[0b001, 5, 0]).unwrap();
         assert_eq!(p.dx, 5);
         assert!(p.links);
         assert!(!p.rechts);
         // Nach links.
-        let b = maus_bytes(&[0, (-7i8) as u8, 0]).unwrap();
-        let p = crate::maus::paket_parsen(b[0], b[1], b[2], Some(b[3])).unwrap();
+        let p = maus_paket(&[0, (-7i8) as u8, 0]).unwrap();
         assert_eq!(p.dx, -7);
     }
 
-    /// Das Sync-Bit muss gesetzt sein, sonst verwirft `paket_parsen`
-    /// zu Recht.
+    /// DER FEHLER, DER DEN ZEIGER JAHRELANG SPRINGEN LIESS.
+    ///
+    /// Ein HID-Maus-Report ist VIER Byte lang. Frueher wurde er in
+    /// PS/2-Bytes verpackt, und wie lang ein PS/2-Paket ist, entschied
+    /// `RAD_MODUS` — gesetzt von der PS/2-Initialisierung. Auf einem
+    /// Rechner OHNE PS/2-Maus blieb der auf "3 Byte", und der Maus-Task
+    /// las den 4-Byte-Strom in 3er-Schritten.
+    ///
+    /// Ein `Paket` hat keine Laenge, ueber die man sich uneinig sein
+    /// kann. Der Test haelt genau das fest: Was hier herauskommt, ist
+    /// unabhaengig von jedem PS/2-Zustand vollstaendig.
     #[test_case]
-    fn test_maus_kopf_hat_sync_bit() {
-        let b = maus_bytes(&[0, 0, 0]).unwrap();
-        assert_ne!(b[0] & 0b0000_1000, 0);
+    fn test_maus_paket_haengt_nicht_am_ps2_zustand() {
+        let mit_rad = maus_paket(&[0b010, 3, -4i8 as u8, 1]).unwrap();
+        assert_eq!((mit_rad.dx, mit_rad.dy), (3, -4));
+        assert!(mit_rad.rechts);
+        assert_eq!(mit_rad.scroll, 1);
+        // Und ohne Rad-Byte ist es dasselbe Paket, nur ohne Scroll —
+        // KEINE andere Zerlegung, kein anderer Takt.
+        let ohne_rad = maus_paket(&[0b010, 3, -4i8 as u8]).unwrap();
+        assert_eq!((ohne_rad.dx, ohne_rad.dy), (3, -4));
+        assert_eq!(ohne_rad.scroll, 0);
     }
 
     #[test_case]
     fn test_maus_kurzer_report() {
-        assert!(maus_bytes(&[0, 0]).is_none());
-        assert!(maus_bytes(&[]).is_none());
+        assert!(maus_paket(&[0, 0]).is_none());
+        assert!(maus_paket(&[]).is_none());
         // Drei Byte reichen (ohne Rad).
-        assert!(maus_bytes(&[0, 0, 0]).is_some());
+        assert!(maus_paket(&[0, 0, 0]).is_some());
     }
 
     // -------------------------------------------------------------------

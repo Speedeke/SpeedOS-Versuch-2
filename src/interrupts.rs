@@ -497,19 +497,7 @@ pub fn timer_basisarbeit() {
 /// eigentliche Dekodierung (QWERTZ, Umlaute, Backspace) erledigt der
 /// Tastatur-Task im Executor, wenn gerade Zeit dafür ist.
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    use x86_64::instructions::port::Port;
-
-    // Der PS/2-Controller legt den Scancode der Taste in Port 0x60.
-    // Wir MÜSSEN ihn lesen, sonst sendet die Tastatur nichts mehr.
-    // unsafe (Port-I/O): 0x60 ist der Standard-Datenport des PS/2-
-    // Controllers; das Lesen ist genau die vorgesehene Bedienung.
-    let mut port = Port::new(0x60);
-    let scancode: u8 = unsafe { port.read() };
-    // ENTROPIE: die BESTE Quelle, die wir haben — ein Mensch tippt, und
-    // Tippabstände schwanken um zehntel Sekunden (Millionen TSC-Zyklen).
-    crate::zufall::einspeisen(crate::zufall::Quelle::Tastatur);
-    // In die lock-freie Queue damit + Tastatur-Task wecken. Fertig!
-    crate::task::keyboard::add_scancode(scancode);
+    ps2_bytes_verteilen();
 
     // unsafe: korrekte Interrupt-Nummer, siehe Timer-Handler.
     unsafe {
@@ -518,19 +506,135 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
     }
 }
 
+/// So viele Bytes holt ein einzelner IRQ hoechstens aus dem Controller.
+///
+/// Die Grenze ist kein Geiz, sondern eine Sicherung: Bliebe das
+/// Ausgabe-Bit eines defekten (oder gerade zurueckgesetzten) Controllers
+/// dauerhaft stehen, drehte die Schleife FUER IMMER — und zwar im
+/// Interrupt-Handler, also mit stehendem System. Genau das darf ein
+/// Handler nie.
+const PS2_MAX_JE_IRQ: usize = 16;
+
+/// Wem gehoert das Byte, das gerade im Datenport des 8042 liegt?
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Ps2Ziel {
+    /// Es liegt gar keines da.
+    Nichts,
+    Tastatur,
+    Maus,
+}
+
+/// DIE WEICHE — als reine Funktion, damit sie pruefbar ist.
+///
+/// Sie beantwortet die Frage, an der die Eingabe auf echter Hardware
+/// jahrelang gescheitert ist: Ein Byte im gemeinsamen Datenport sagt
+/// NICHT, von wem es kommt. Das steht allein im Statusregister:
+///
+///   Bit 0 (OBF, Output Buffer Full) : liegt ueberhaupt eines da?
+///   Bit 5 (AUX)                     : gesetzt = zweiter Port = Maus.
+///
+/// Alle anderen Bits (Timeout, Paritaet, Systemflag, Befehl/Daten)
+/// gehen uns hier nichts an und duerfen das Ergebnis NICHT beeinflussen
+/// — genau dafuer ist die Funktion getestet.
+pub(crate) fn ps2_ziel(status: u8) -> Ps2Ziel {
+    if status & 0b0000_0001 == 0 {
+        return Ps2Ziel::Nichts;
+    }
+    if status & 0b0010_0000 != 0 {
+        Ps2Ziel::Maus
+    } else {
+        Ps2Ziel::Tastatur
+    }
+}
+
+/// HOLT ALLE ANSTEHENDEN BYTES AUS DEM 8042 UND VERTEILT SIE NACH IHRER
+/// HERKUNFT — der gemeinsame Pfad von Tastatur (IRQ 1) und Maus (IRQ 12).
+///
+/// ===================================================================
+/// WARUM BEIDE HANDLER DENSELBEN CODE BRAUCHEN
+///
+/// Tastatur und Maus haengen am SELBEN Chip und teilen sich EINEN
+/// Datenport (0x60). Welches Geraet ein Byte geschickt hat, steht NICHT
+/// im Byte — es steht im STATUSREGISTER (Port 0x64):
+///
+///   Bit 0 (OBF) : ueberhaupt ein Byte da?
+///   Bit 5 (AUX) : gesetzt = vom ZWEITEN Port, also von der Maus.
+///
+/// Bis August 2026 lasen beide Handler den Datenport BLIND: der
+/// Tastatur-Handler schob sein Byte in die Tastatur-Queue, der
+/// Maus-Handler seines in die Maus-Queue — ohne je nachzusehen, wem es
+/// gehoert. In QEMU geht das gut, weil dort jeder Interrupt sauber zu
+/// genau einem bereitliegenden Byte gehoert.
+///
+/// AUF ECHTER HARDWARE GEHT ES NICHT GUT. Ein Embedded Controller im
+/// Laptop bedient Tastatur und Touchpad verschachtelt und liefert bei
+/// 200 Paketen je Sekunde staendig Bytes. Trifft ein Tastatur-IRQ auf
+/// ein wartendes MAUS-Byte, dann wandert dieses Byte in den
+/// Scancode-Strom — und der Scancode, der eigentlich gemeint war,
+/// verschwindet. Die Folgen sind genau die beobachteten:
+///
+///   * Die Maus RUCKELT, weil ihr Paketstrom die Synchronisation
+///     verliert und der Resync-Pfad Bytes verwirft.
+///   * Das TIPPEN stirbt, weil Scancodes verloren gehen — und im
+///     schlimmsten Fall bleibt ein Byte im Controller liegen, das
+///     niemand abholt. Dann schickt der 8042 gar keinen Interrupt mehr,
+///     und die Eingabe ist tot, waehrend der Rest weiterlaeuft.
+///
+/// DIE LOESUNG IST NICHT, DEN FEHLER ABZUFANGEN, SONDERN IHN UNMOEGLICH
+/// ZU MACHEN: Es wird IMMER erst der Status gelesen, und das Byte geht
+/// dorthin, wohin der Controller es adressiert hat. Damit ist es egal,
+/// welcher der beiden IRQs uns hergefuehrt hat.
+///
+/// GELEERT WIRD IN EINER SCHLEIFE (gedeckelt): Liegen zwei Bytes bereit
+/// und wir holten nur eines, bliebe das zweite stehen — und darauf zu
+/// hoffen, dass ein weiterer Interrupt kommt, ist genau die Wette, die
+/// oben verloren geht.
+///
+/// Handler-Regeln bleiben gewahrt: kein Lock, keine Allokation, nur
+/// Port-I/O und lock-freie Queues.
+fn ps2_bytes_verteilen() {
+    use x86_64::instructions::port::Port;
+
+    let mut status_port: Port<u8> = Port::new(0x64);
+    let mut daten_port: Port<u8> = Port::new(0x60);
+
+    for _ in 0..PS2_MAX_JE_IRQ {
+        // unsafe (Port-I/O): 0x64 ist das Statusregister des 8042, nur
+        // lesen — ohne Seiteneffekt.
+        let status: u8 = unsafe { status_port.read() };
+        let ziel = ps2_ziel(status);
+        if ziel == Ps2Ziel::Nichts {
+            break; // Ausgabepuffer leer: nichts (mehr) abzuholen.
+        }
+        // unsafe (Port-I/O): 0x60 ist der Datenport. Das Lesen QUITTIERT
+        // das Byte — genau deshalb muss es passieren, sonst schickt der
+        // Controller nie wieder etwas.
+        let byte: u8 = unsafe { daten_port.read() };
+
+        if ziel == Ps2Ziel::Maus {
+            // ENTROPIE: wie die Tastatur ein Mensch — aber 200 Proben/s,
+            // und aufeinanderfolgende Proben sind korreliert (eine
+            // Bewegung ist glatt). Deshalb weniger Bits je Probe
+            // (docs/zufall.md §3).
+            crate::zufall::einspeisen(crate::zufall::Quelle::Maus);
+            crate::maus::byte_hinzufuegen(byte);
+        } else {
+            // ENTROPIE: die BESTE Quelle, die wir haben — ein Mensch
+            // tippt, und Tippabstaende schwanken um zehntel Sekunden
+            // (Millionen TSC-Zyklen).
+            crate::zufall::einspeisen(crate::zufall::Quelle::Tastatur);
+            crate::task::keyboard::add_scancode(byte);
+        }
+    }
+}
+
 /// Maus-Interrupt (IRQ 12): exakt das Tastatur-Muster — Byte lesen,
 /// in die lock-freie Queue, Task wecken, EOI. Nicht mehr!
 extern "x86-interrupt" fn maus_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    use x86_64::instructions::port::Port;
-
-    // unsafe (Port-I/O): 0x60 ist der Datenport des PS/2-Controllers.
-    let mut port = Port::new(0x60);
-    let byte: u8 = unsafe { port.read() };
-    // ENTROPIE: wie die Tastatur ein Mensch — aber 200 Proben/s, und
-    // aufeinanderfolgende Proben sind korreliert (eine Bewegung ist glatt).
-    // Deshalb weniger Bits je Probe (docs/zufall.md §3).
-    crate::zufall::einspeisen(crate::zufall::Quelle::Maus);
-    crate::maus::byte_hinzufuegen(byte);
+    // DERSELBE Pfad wie bei der Tastatur — und das ist der Punkt:
+    // Welches Geraet ein Byte geschickt hat, sagt das Statusregister und
+    // nicht die IRQ-Nummer. Siehe `ps2_bytes_verteilen`.
+    ps2_bytes_verteilen();
 
     // unsafe: korrekte Interrupt-Nummer, siehe Timer-Handler.
     unsafe {
@@ -594,7 +698,57 @@ pub fn irq_freischalten(irq: u8) {
 
 #[cfg(test)]
 mod tests {
+    use super::{ps2_ziel, Ps2Ziel};
     use crate::println;
+
+    /// DER REGRESSIONSWAECHTER FUER DEN FEHLER, DER DIE TASTATUR AUF
+    /// ECHTER HARDWARE STERBEN LIESS.
+    ///
+    /// Tastatur und Maus teilen sich EINEN Datenport. Bis August 2026
+    /// lasen beide Interrupt-Handler ihn blind und schoben das Byte in
+    /// die Queue ihres eigenen Geraets — die IRQ-Nummer galt als Beweis
+    /// der Herkunft. Auf echter Hardware ist sie das nicht: Ein
+    /// Embedded Controller bedient beide Geraete verschachtelt, und ein
+    /// Tastatur-Interrupt trifft dort regelmaessig auf ein wartendes
+    /// Maus-Byte.
+    ///
+    /// Die Herkunft steht IMMER im Statusregister, nie in der
+    /// IRQ-Nummer.
+    #[test_case]
+    fn test_ps2_weiche_liest_die_herkunft_aus_dem_status() {
+        // Kein Byte da (OBF = 0) — egal, was sonst gesetzt ist.
+        assert_eq!(ps2_ziel(0b0000_0000), Ps2Ziel::Nichts);
+        assert_eq!(ps2_ziel(0b0010_0000), Ps2Ziel::Nichts);
+        assert_eq!(ps2_ziel(0b1111_1110), Ps2Ziel::Nichts);
+
+        // Byte da, AUX aus -> Tastatur.
+        assert_eq!(ps2_ziel(0b0000_0001), Ps2Ziel::Tastatur);
+        // Byte da, AUX an -> Maus.
+        assert_eq!(ps2_ziel(0b0010_0001), Ps2Ziel::Maus);
+    }
+
+    /// Die uebrigen Statusbits (Systemflag, Befehl/Daten, Timeout,
+    /// Paritaet) duerfen die Weiche NICHT beeinflussen. Ein Controller,
+    /// der einen Paritaetsfehler meldet, liefert trotzdem ein Byte —
+    /// und es gehoert dem Geraet, das AUX nennt.
+    #[test_case]
+    fn test_ps2_weiche_ignoriert_die_uebrigen_bits() {
+        for zusatz in [0b0000_0010u8, 0b0000_0100, 0b0000_1000, 0b1100_0000] {
+            assert_eq!(
+                ps2_ziel(0b0000_0001 | zusatz),
+                Ps2Ziel::Tastatur,
+                "Zusatzbits {:08b} haben die Weiche verstellt",
+                zusatz
+            );
+            assert_eq!(
+                ps2_ziel(0b0010_0001 | zusatz),
+                Ps2Ziel::Maus,
+                "Zusatzbits {:08b} haben die Weiche verstellt",
+                zusatz
+            );
+        }
+    }
+
 
     /// Löst absichtlich eine Breakpoint-Exception aus. Der Test gilt als
     /// bestanden, wenn die Ausführung danach normal weiterläuft — das

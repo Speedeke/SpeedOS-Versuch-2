@@ -1231,11 +1231,12 @@ impl Controller {
                 }
             }
             Some(hid::HidArt::Maus) => {
-                if let Some(b) = hid::maus_bytes(&daten) {
-                    // Vier Bytes wie ein IntelliMouse-Paket.
-                    for byte in b {
-                        crate::maus::byte_hinzufuegen(byte);
-                    }
+                // EIN FERTIGES PAKET, keine PS/2-Bytes: Die Paketlaenge
+                // des PS/2-Stroms haengt an der PS/2-Erkennung, und auf
+                // einem Rechner ohne PS/2-Maus passte sie nie zu unseren
+                // vier Bytes. Siehe `hid::maus_paket`.
+                if let Some(paket) = hid::maus_paket(&daten) {
+                    crate::maus::paket_einspeisen(paket);
                 }
             }
             None => {}

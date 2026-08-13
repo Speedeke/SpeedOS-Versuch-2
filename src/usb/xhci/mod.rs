@@ -626,6 +626,31 @@ fn starten() -> Result<(), XhciFehler> {
     }
     serial_println!("[xhci] RS gesetzt, HCH gefallen — der Controller LAEUFT.");
 
+    // ERST DEN PORTS ZEIT LASSEN, DANN NACHSEHEN.
+    //
+    // Ein Controller, der gerade erst losgelaufen ist, weiss noch nicht,
+    // was an ihm haengt: Die Wurzel-Hubs brauchen einen Moment, bis sie
+    // eine Verbindung erkannt und im PORTSC gemeldet haben. Sieht man
+    // sofort nach, sind die Ports leer — und ein Geraet, das beim Boot
+    // steckt, erzeugt spaeter auch kein Event mehr (sein CSC-Bit stand
+    // ja schon, siehe unten).
+    //
+    // GENAU DAS liess SpeedOS beim Boot „keine Eingabe gefunden" melden,
+    // obwohl eine USB-Maus steckte. Sie wurde erst durch einen spaeteren
+    // Port-Wechsel gefunden — die MELDUNG war falsch, nicht der Treiber.
+    //
+    // 200 ms sind reichlich (die USB-Spezifikation gibt einem Geraet
+    // 100 ms bis zur Meldung) und fallen im Boot nicht auf. Gewartet
+    // wird mit `warten_auf` samt Abbruch, sobald der erste Port belegt
+    // meldet: Wer eine Maus dran hat, wartet gar nicht erst.
+    warten_auf(200_000, || {
+        (0..p1.max_ports).any(|i| {
+            // SAFETY: siehe unten — PORTSC liegt innerhalb MMIO_BYTES.
+            let roh = unsafe { op.lese32(OP_PORTSC_BASIS + i as u64 * OP_PORT_ABSTAND) };
+            portsc_lesen(roh).angeschlossen
+        })
+    });
+
     // Die Ports einmal einlesen — und PROTOKOLLIEREN.
     //
     // Das ist nicht nur fuer `usb` da: Geraete, die beim Start schon

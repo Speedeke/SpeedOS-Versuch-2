@@ -344,12 +344,16 @@ pub fn zeiger_melden() {
 }
 
 static MAUS_QUEUE: OnceCell<ArrayQueue<u8>> = OnceCell::uninit();
+static PAKET_QUEUE: OnceCell<ArrayQueue<Paket>> = OnceCell::uninit();
 static MAUS_WAKER: AtomicWaker = AtomicWaker::new();
 
 /// Wird vom IRQ-12-Handler gerufen (interrupts.rs): nie blockieren!
+///
+/// AUSSCHLIESSLICH FUER PS/2. Wer schon fertige Bewegungsdaten hat —
+/// allen voran der USB-HID-Treiber — nimmt `paket_einspeisen`. Warum
+/// das wichtig ist, steht dort.
 pub(crate) fn byte_hinzufuegen(byte: u8) {
-    // JEDES Byte beweist, dass ein Zeigegeraet existiert — egal ob es
-    // vom PS/2-Interrupt oder vom USB-HID-Treiber kommt.
+    // JEDES Byte beweist, dass ein Zeigegeraet existiert.
     ZEIGER_DA.store(true, Ordering::Relaxed);
     if let Ok(queue) = MAUS_QUEUE.try_get() {
         // Volle Queue: Byte verwerfen — der Parser resynchronisiert
@@ -359,7 +363,54 @@ pub(crate) fn byte_hinzufuegen(byte: u8) {
     }
 }
 
-/// Stream der rohen Maus-Bytes.
+/// Nimmt ein FERTIGES Paket entgegen — der Weg für jede Quelle, die
+/// keine PS/2-Maus ist (heute: USB-HID).
+///
+/// ===================================================================
+/// WARUM ES DIESEN ZWEITEN WEG GIBT — der Fehler, der dahinter steckte
+///
+/// Bis August 2026 baute der USB-HID-Treiber seine Bewegungsdaten in
+/// ein PS/2-Bytepaket um und schob es durch `byte_hinzufuegen`. Das sah
+/// sparsam aus und war ein handfester Fehler: WIE LANG ein Paket ist,
+/// entschied `RAD_MODUS` — und das wird von der PS/2-INITIALISIERUNG
+/// gesetzt, also von ganz anderer Hardware.
+///
+/// Auf einem Laptop ohne PS/2-Maus schlägt diese Erkennung fehl,
+/// `RAD_MODUS` bleibt falsch, und der Maus-Task liest den 4-Byte-Strom
+/// der USB-Maus in 3er-Schritten. Ergebnis: dauerhaft aus dem Takt, der
+/// Zeiger springt. In QEMU fiel es nie auf, weil dort eine PS/2-Maus
+/// existiert, die Erkennung gelingt und beide Längen zufällig
+/// zusammenpassen.
+///
+/// DIE LEHRE, und deshalb steht sie hier: **Ein Datenformat darf nie
+/// von einem Zustand abhängen, den eine fremde Quelle gesetzt hat.**
+/// Ein fertiges `Paket` trägt seine Bedeutung selbst — es gibt keine
+/// Länge mehr, über die sich zwei Geräte uneinig sein könnten.
+pub fn paket_einspeisen(paket: Paket) {
+    ZEIGER_DA.store(true, Ordering::Relaxed);
+    if let Ok(queue) = PAKET_QUEUE.try_get() {
+        // Voll: verwerfen. Ein verlorenes Bewegungspaket ist ein
+        // ausgelassener Zwischenschritt — die nächste Meldung trägt die
+        // absolute Wahrheit ohnehin nach, weil der Zustand kumuliert.
+        let _ = queue.push(paket);
+        MAUS_WAKER.wake();
+    }
+}
+
+/// Was aus dem Eingabestrom der Maus herauskommt.
+enum MausEingabe {
+    /// Ein rohes PS/2-Byte, das noch zusammengesetzt werden muss.
+    Byte(u8),
+    /// Ein fertiges Paket (USB-HID).
+    Paket(Paket),
+}
+
+/// Stream der Maus-Eingaben aus BEIDEN Quellen.
+///
+/// Ein Strom und ein Waker für beide Quellen — sonst müsste der
+/// Maus-Task auf zwei Dinge gleichzeitig warten, und genau dort
+/// entstünde die nächste Sorte Fehler (eine Quelle, die nie geweckt
+/// wird, weil der Task in der anderen hängt).
 struct MausByteStream {
     _privat: (),
 }
@@ -369,23 +420,36 @@ impl MausByteStream {
         MAUS_QUEUE
             .try_init_once(|| ArrayQueue::new(256))
             .expect("MausByteStream::neu darf nur einmal laufen");
+        PAKET_QUEUE
+            .try_init_once(|| ArrayQueue::new(128))
+            .expect("MausByteStream::neu darf nur einmal laufen");
         MausByteStream { _privat: () }
     }
 }
 
 impl Stream for MausByteStream {
-    type Item = u8;
+    type Item = MausEingabe;
 
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<u8>> {
-        let queue = MAUS_QUEUE.try_get().expect("Maus-Queue nicht initialisiert");
-        if let Some(byte) = queue.pop() {
-            return Poll::Ready(Some(byte));
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<MausEingabe>> {
+        // Fertige Pakete zuerst: Sie brauchen keine Zusammensetzung und
+        // sind damit die billigere Arbeit.
+        fn holen() -> Option<MausEingabe> {
+            if let Ok(q) = PAKET_QUEUE.try_get() {
+                if let Some(p) = q.pop() {
+                    return Some(MausEingabe::Paket(p));
+                }
+            }
+            MAUS_QUEUE.try_get().ok()?.pop().map(MausEingabe::Byte)
+        }
+
+        if let Some(e) = holen() {
+            return Poll::Ready(Some(e));
         }
         MAUS_WAKER.register(cx.waker());
-        match queue.pop() {
-            Some(byte) => {
+        match holen() {
+            Some(e) => {
                 MAUS_WAKER.take();
-                Poll::Ready(Some(byte))
+                Poll::Ready(Some(e))
             }
             None => Poll::Pending,
         }
@@ -410,8 +474,11 @@ pub async fn maus_task() {
             maus.y = info.height as i32 / 2;
         });
     }
+    // DIE PAKETLAENGE GILT NUR FUER PS/2. Sie stammt aus der
+    // PS/2-Erkennung und darf deshalb auch nur auf PS/2-Bytes angewandt
+    // werden — fertige Pakete anderer Quellen laufen daran vorbei.
     let rad_modus = RAD_MODUS.load(Ordering::Relaxed);
-    let paket_laenge: usize = if rad_modus { 4 } else { 3 };
+    let ps2_paket_laenge: usize = if rad_modus { 4 } else { 3 };
 
     // Cursor initial zeichnen:
     let (mut cursor_x, mut cursor_y) = position();
@@ -419,30 +486,35 @@ pub async fn maus_task() {
 
     let mut puffer = [0u8; 4];
     let mut erhalten = 0usize;
-    // Wie viele Zeichen-Durchgaenge in Folge ausgelassen wurden, weil
-    // schon das naechste Paket wartete (siehe unten in der Schleife).
-    let mut uebersprungen: u8 = 0;
 
-    while let Some(byte) = bytes.next().await {
+    while let Some(eingabe) = bytes.next().await {
         // Wegmarke fuer den Wachhund — JE PAKET, nicht einmal beim
         // Start: Nur so sagt sie aus, dass wir HIER stehengeblieben
         // sind, und nicht bloss, dass wir mal hier waren.
         crate::wacht::punkt(crate::wacht::Punkt::Maus);
-        // Resynchronisation: Das erste Byte MUSS das Sync-Bit tragen.
-        if erhalten == 0 && byte & 0b0000_1000 == 0 {
-            continue;
-        }
-        puffer[erhalten] = byte;
-        erhalten += 1;
-        if erhalten < paket_laenge {
-            continue;
-        }
-        erhalten = 0;
 
-        let rad = if rad_modus { Some(puffer[3]) } else { None };
-        let paket = match paket_parsen(puffer[0], puffer[1], puffer[2], rad) {
-            Some(p) => p,
-            None => continue,
+        let paket = match eingabe {
+            // Fertig geliefert (USB-HID) — nichts zusammenzusetzen.
+            MausEingabe::Paket(p) => p,
+            // PS/2: Bytes sammeln, bis ein Paket voll ist.
+            MausEingabe::Byte(byte) => {
+                // Resynchronisation: Das erste Byte MUSS das Sync-Bit tragen.
+                if erhalten == 0 && byte & 0b0000_1000 == 0 {
+                    continue;
+                }
+                puffer[erhalten] = byte;
+                erhalten += 1;
+                if erhalten < ps2_paket_laenge {
+                    continue;
+                }
+                erhalten = 0;
+
+                let rad = if rad_modus { Some(puffer[3]) } else { None };
+                match paket_parsen(puffer[0], puffer[1], puffer[2], rad) {
+                    Some(p) => p,
+                    None => continue,
+                }
+            }
         };
 
         // Zustand aktualisieren + Events ableiten:
@@ -481,41 +553,26 @@ pub async fn maus_task() {
         // Cursor neu positionieren (Untergrund wiederherstellen,
         // Pfeil an neuer Stelle als Overlay malen):
         //
-        // ZWISCHENPOSITIONEN WERDEN UEBERSPRUNGEN. Die Maus liefert 200
-        // Pakete je Sekunde; bei einer schnellen Bewegung liegen beim
-        // Verarbeiten schon die naechsten Bytes in der Queue. Den Pfeil
-        // dann trotzdem zu malen heisst, ihn an eine Stelle zu setzen,
-        // die im selben Atemzug wieder ueberschrieben wird — und jedes
-        // Zeichnen sind rund 1000 Schreibzugriffe in den ECHTEN
-        // Framebuffer, die auf Geraetespeicher richtig Geld kosten.
+        // HIER WIRD NICHTS UEBERSPRUNGEN, und das ist eine bewusste
+        // Entscheidung nach einem Fehlschlag: Ein erster Versuch liess
+        // Zwischenpositionen aus, solange schon das naechste Paket
+        // wartete — das sparte Schreibzugriffe und hinterliess PFADE AUS
+        // MAUSZEIGERN auf dem Schirm.
         //
-        // Es ist genau die Bewegung, bei der es dem Benutzer auffaellt:
-        // Wer den Zeiger langsam schiebt, hat eine leere Queue und
-        // bekommt jede Position; wer ihn schnell zieht, bekommt weniger
-        // Zwischenbilder — und dadurch ein FLUESSIGERES Ergebnis, weil
-        // die Arbeit je Bild nicht die naechsten Pakete aufhaelt.
+        // Der Grund ist lehrreich: Es gibt ZWEI Stellen, die den Zeiger
+        // malen. Der Compositor zeichnet ihn nach jedem Frame an
+        // `position()` neu (`cursor_neu_zeichnen`), und dieser Task
+        // loescht ihn an der Stelle, die er sich gemerkt hat. Beide
+        // stimmen nur ueberein, solange hier JEDE Position gezeichnet
+        // wird. Wer eine auslaesst, laesst die beiden auseinanderlaufen
+        // — und was der Compositor an einer uebersprungenen Stelle malt,
+        // loescht danach niemand mehr.
         //
-        // Der ZUSTAND wird davon nicht beruehrt: `position()` ist schon
-        // aktualisiert, und die Events unten gehen vollstaendig raus.
-        // Uebersprungen wird ausschliesslich das MALEN.
-        // OBERGRENZE: Bei ununterbrochener Bewegung wird die Queue nie
-        // leer — dann duerfte der Zeiger nie gezeichnet werden, und
-        // „fluessig" waere zu „unsichtbar" geworden. Nach hoechstens
-        // `MAX_UEBERSPRUNGEN` Auslassungen wird gemalt, egal was
-        // ansteht. Das begrenzt den Verzug auf rund 20 ms.
-        const MAX_UEBERSPRUNGEN: u8 = 3;
-        let noch_daten = MAUS_QUEUE
-            .try_get()
-            .map(|q| !q.is_empty())
-            .unwrap_or(false);
-        if noch_daten && uebersprungen < MAX_UEBERSPRUNGEN {
-            uebersprungen += 1;
-        } else {
-            uebersprungen = 0;
-        }
-        let malen = uebersprungen == 0;
+        // MERKSATZ: Es darf nur EINE Stelle geben, die weiss, wo der
+        // Zeiger steht. Solange es zwei sind, ist Auslassen kein
+        // Optimieren, sondern ein Fehler.
         let (neu_x, neu_y) = position();
-        if malen && (neu_x, neu_y) != (cursor_x, cursor_y) {
+        if (neu_x, neu_y) != (cursor_x, cursor_y) {
             cursor_entfernen(cursor_x, cursor_y);
             cursor_zeichnen(neu_x, neu_y);
             (cursor_x, cursor_y) = (neu_x, neu_y);

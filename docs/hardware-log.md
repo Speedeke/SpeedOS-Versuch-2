@@ -485,3 +485,105 @@ Grund, warum die Verbesserungen an xHCI und HID dort nichts brachten,
 obwohl sie in QEMU messbar waren. Wer künftig ein Hardware-Problem
 sucht, prüft **zuerst**, ob der verdächtigte Treiber auf der Maschine
 überhaupt läuft.
+
+---
+
+## Befund 6 — warum es in QEMU läuft und auf dem Blech nicht (August 2026)
+
+Der Projektbesitzer stellte die entscheidende Frage: *„Warum klappt es in
+QEMU so gut?"* Bei allen drei Fehlern dieses Tages lautet die Antwort
+gleich — **QEMU erfüllt eine Annahme, die echte Hardware nicht macht.**
+Ein Emulator ist ein freundlicher Gesprächspartner; er tut, was man
+erwartet. Ein echter Chip tut, was in seinem Datenblatt steht.
+
+Wichtige Korrektur der Ausgangslage: Der Laptop hat **keine
+USB-Tastatur** (die eingebaute hängt über PS/2 am Embedded Controller),
+aber **eine USB-Maus**. Der Befund 5 („auf dem Laptop hängt nichts am
+USB") war deshalb falsch — siehe Fehler 3.
+
+### Fehler 1 — die Maus hat NIE funktioniert
+
+Der USB-HID-Treiber baute seine Bewegungsdaten in **PS/2-Bytes** um und
+schob sie durch dieselbe Warteschlange wie eine echte PS/2-Maus. Wie
+lang ein solches Paket ist, entscheidet aber `RAD_MODUS` — und den setzt
+die **PS/2-Initialisierung**.
+
+Auf einem Laptop ohne PS/2-Maus schlägt die fehl, `RAD_MODUS` bleibt
+`false`, und der Maus-Task liest den **4-Byte-Strom der USB-Maus in
+3er-Schritten**. Dauerhaft aus dem Takt: Der Zeiger springt, die
+Resynchronisation über das Sync-Bit rastet an falschen Stellen ein.
+
+**In QEMU gibt es eine PS/2-Maus**, ihre Erkennung gelingt, `RAD_MODUS`
+wird `true` — und beide Längen passen zufällig zusammen.
+
+Behoben durch `maus::paket_einspeisen(Paket)`: Der USB-Treiber liefert
+ein **fertiges Paket** statt eines Byte-Stroms. Ein Paket trägt seine
+Bedeutung selbst; es gibt keine Länge mehr, über die sich zwei Geräte
+uneinig sein könnten.
+
+> **Die Lehre, allgemein:** Ein Datenformat darf nie von einem Zustand
+> abhängen, den eine *fremde* Quelle gesetzt hat. Die Wiederverwendung
+> des PS/2-Pfades klang sparsam („kein zweiter Weg, an dem die Maus
+> ruckeln kann") und war in Wahrheit eine versteckte Kopplung.
+
+### Fehler 2 — die Tastatur starb, obwohl sie „ganz früher" ging
+
+Tastatur und Maus hängen am **selben Chip** und teilen sich **einen
+Datenport** (0x60). Welches Gerät ein Byte geschickt hat, steht **nicht
+im Byte** — es steht im Statusregister 0x64, Bit 5 (AUX).
+
+Beide Interrupt-Handler lasen den Datenport **blind** und schoben das
+Byte in die Queue ihres eigenen Geräts; die IRQ-Nummer galt als Beweis
+der Herkunft. Auf echter Hardware ist sie das nicht: Ein Embedded
+Controller bedient Tastatur und Touchpad verschachtelt, und ein
+Tastatur-Interrupt trifft dort regelmäßig auf ein wartendes Maus-Byte.
+Dann wandert ein Maus-Byte in den Scancode-Strom, und der Scancode, der
+gemeint war, verschwindet. Im schlimmsten Fall bleibt ein Byte liegen,
+das niemand abholt — dann schickt der 8042 **gar keinen Interrupt mehr**
+und die Eingabe ist tot, während der Rest weiterläuft.
+
+**In QEMU gehört zu jedem Interrupt genau ein passendes Byte.** Die
+Verschachtelung tritt nie auf.
+
+Behoben durch `interrupts::ps2_bytes_verteilen`: Beide Handler benutzen
+denselben Pfad, lesen **immer erst den Status** und geben das Byte
+dorthin, wohin der Controller es adressiert hat — geleert wird in einer
+gedeckelten Schleife, damit nie eines liegenbleibt. Die Weiche selbst
+ist eine reine Funktion (`ps2_ziel`) mit zwei Regressionstests.
+
+### Fehler 3 — die Boot-Meldung log
+
+Ein gerade gestarteter xHCI-Controller weiß noch nicht, was an ihm
+hängt; die Wurzel-Hubs brauchen einen Moment. Wir sahen sofort nach,
+fanden leere Ports und meldeten „keine Eingabe gefunden" — die USB-Maus
+wurde erst später durch einen Port-Wechsel gefunden. **Die Meldung war
+falsch, nicht der Treiber.** Jetzt wird bis zu 200 ms gewartet, mit
+Abbruch beim ersten belegten Port.
+
+Diese falsche Meldung hatte mich in Befund 5 zu der Fehlannahme geführt,
+auf dem Laptop hänge nichts am USB — und damit die Suche in die falsche
+Richtung geschickt.
+
+### Fehler 4 — meine eigene Optimierung malte Zeigerspuren
+
+Der Versuch, bei schneller Bewegung Zwischenpositionen des Mauszeigers
+auszulassen, hinterließ **Pfade aus stehengebliebenen Pfeilen**. Grund:
+Es gibt **zwei** Stellen, die den Zeiger malen — der Compositor
+zeichnet ihn nach jedem Frame an `position()` neu, der Maus-Task löscht
+ihn an der Stelle, die *er* sich gemerkt hat. Beide stimmen nur überein,
+solange jede Position gezeichnet wird.
+
+> **Merksatz:** Es darf nur eine Stelle geben, die weiß, wo der Zeiger
+> steht. Solange es zwei sind, ist Auslassen kein Optimieren, sondern
+> ein Fehler.
+
+Die Optimierung ist entfernt.
+
+### Was daraus als Arbeitsregel bleibt
+
+**QEMU beweist, dass der Code *eine* Umgebung bedient — nicht, dass er
+richtig ist.** Wo eine Annahme über Hardware im Code steckt (Paketlänge,
+Herkunft eines Bytes, Zeitpunkt einer Meldung), prüft QEMU sie nicht,
+weil es sie erfüllt. Solche Stellen gehören ausdrücklich benannt und mit
+reinen Funktionen abgesichert, die man ohne Hardware testen kann — genau
+das ist mit `ps2_ziel` und `maus_paket` jetzt geschehen.
