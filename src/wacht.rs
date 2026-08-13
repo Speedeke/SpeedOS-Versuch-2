@@ -124,6 +124,87 @@ pub fn schlag() {
     HERZSCHLAG.fetch_add(1, Ordering::Relaxed);
 }
 
+// ---------------------------------------------------------------------------
+// WELCHER TASK — die Frage, die der grobe Programmpunkt offen laesst
+// ---------------------------------------------------------------------------
+//
+// Ein Stillstand mit dem Punkt „Executor" heisst nur: Es haengt in
+// IRGENDEINEM Kernel-Task, der keine eigene Wegmarke gesetzt hat. Das
+// grenzt ein, benennt aber nicht. Deshalb merkt sich der Executor vor
+// JEDEM Poll, welchen Task er gerade anfasst.
+//
+// Der NAME ist ein `&'static str` — er lebt ewig, also darf sein Zeiger
+// gefahrlos in Atomics liegen und aus dem Interrupt heraus gelesen
+// werden. Kein Lock, keine Allokation, zwei Speicheroperationen.
+
+/// Der Name des zuletzt angefassten Tasks — KOPIERT, nicht verwiesen.
+///
+/// Ein Zeiger waere der naheliegende Weg und hier falsch: Task-Namen
+/// sind `String`s, und ein Task kann enden. Der Wachhund laeuft im
+/// Interrupt und wuerde dann in freigegebenen Speicher lesen. 24 Byte
+/// zu kopieren kostet nichts und kann nicht schiefgehen.
+///
+/// EHRLICHE GRENZE: Die Kopie ist nicht atomar. Trifft der Timer genau
+/// waehrend des Schreibens, steht dort ein Mischtext aus zwei Namen.
+/// Das ist ein Schoenheitsfehler in einer Diagnose-Ausgabe und kein
+/// Sicherheitsproblem — die Laenge wird geklemmt, es wird nie ueber den
+/// Puffer hinaus gelesen.
+static TASK_NAME: Mutexfrei = Mutexfrei::neu();
+static TASK_NAME_LEN: AtomicUsize = AtomicUsize::new(0);
+static TASK_NUMMER: AtomicU32 = AtomicU32::new(0);
+
+/// Ein fester Namenspuffer ohne Lock. `UnsafeCell`, weil er aus dem
+/// Interrupt gelesen und aus dem Executor geschrieben wird — beides auf
+/// EINEM Kern, es gibt also keine echte Gleichzeitigkeit, nur eine
+/// Unterbrechung mitten im Schreiben (siehe Grenze oben).
+struct Mutexfrei(core::cell::UnsafeCell<[u8; NAME_MAX]>);
+const NAME_MAX: usize = 24;
+// SAFETY: Einkern-System; der Inhalt ist reiner Diagnosetext, und jeder
+// Lesezugriff klemmt auf die gespeicherte Laenge.
+unsafe impl Sync for Mutexfrei {}
+impl Mutexfrei {
+    const fn neu() -> Self {
+        Mutexfrei(core::cell::UnsafeCell::new([0; NAME_MAX]))
+    }
+}
+
+/// Sagt dem Wachhund, welcher Task gleich gepollt wird.
+///
+/// `nummer` ist die Task-Nummer (Reihenfolge des Spawns) — sie wird als
+/// zweite Kaestchenreihe gemalt, denn ein Name laesst sich ohne
+/// Zeichensatz nicht zeichnen, eine Anzahl schon.
+#[inline]
+pub fn task_setzen(nummer: u32, name: &str) {
+    let n = name.len().min(NAME_MAX);
+    // SAFETY: siehe `Mutexfrei` — Einkern, fester Puffer, geklemmte
+    // Laenge. Es wird nie ueber `NAME_MAX` hinaus geschrieben.
+    unsafe {
+        let ziel = &mut *TASK_NAME.0.get();
+        ziel[..n].copy_from_slice(&name.as_bytes()[..n]);
+    }
+    TASK_NAME_LEN.store(n, Ordering::Relaxed);
+    TASK_NUMMER.store(nummer, Ordering::Relaxed);
+}
+
+/// Der Name des zuletzt angefassten Tasks — `None`, solange keiner lief.
+pub fn letzter_task() -> Option<&'static str> {
+    let len = TASK_NAME_LEN.load(Ordering::Relaxed).min(NAME_MAX);
+    if len == 0 {
+        return None;
+    }
+    // SAFETY: siehe oben. Ungueltiges UTF-8 (durch eine Unterbrechung
+    // mitten im Kopieren) wird zu None statt zu einem Absturz.
+    unsafe {
+        let puffer = &*TASK_NAME.0.get();
+        core::str::from_utf8(&puffer[..len]).ok()
+    }
+}
+
+/// Die laufende Nummer des zuletzt angefassten Tasks.
+pub fn letzte_task_nummer() -> u32 {
+    TASK_NUMMER.load(Ordering::Relaxed)
+}
+
 /// Der zuletzt gemeldete Punkt (fuer Diagnose-Anzeigen).
 pub fn letzter_punkt() -> Punkt {
     match PUNKT.load(Ordering::Relaxed) {
@@ -229,12 +310,14 @@ pub fn tick() {
     MELDUNGEN.fetch_add(1, Ordering::Relaxed);
     let p = letzter_punkt();
     crate::serial_println!(
-        "[wacht] STILLSTAND seit {} Ticks — letzter Punkt: {} ({})",
+        "[wacht] STILLSTAND seit {} Ticks — Punkt: {} ({}), Task: {} (Nr. {})",
         still,
         p.text(),
-        p as u32
+        p as u32,
+        letzter_task().unwrap_or("unbekannt"),
+        letzte_task_nummer()
     );
-    balken_malen(p as u32);
+    balken_malen(p as u32, letzte_task_nummer());
 }
 
 /// Malt den Befund an den oberen Bildschirmrand: ein roter Streifen und
@@ -242,7 +325,7 @@ pub fn tick() {
 ///
 /// Schreibt OHNE Lock direkt in den Framebuffer — siehe Regel (1) im
 /// Kopfkommentar. Das ist der ganze Sinn dieser Funktion.
-fn balken_malen(punkt_nummer: u32) {
+fn balken_malen(punkt_nummer: u32, task_nummer: u32) {
     let zeiger = FB_ZEIGER.load(Ordering::Relaxed);
     if zeiger == 0 {
         return;
@@ -259,6 +342,37 @@ fn balken_malen(punkt_nummer: u32) {
     // unuebersehbar ist.
     let flaeche = Flaeche { zeiger, stride, bpp };
     fuellen(flaeche, 0, 0, breite, BALKEN_HOEHE, 0xE0, 0x20, 0x20);
+    // ZWEITE REIHE: die laufende Nummer des Tasks, in dem es haengt.
+    // Blau, damit man die beiden Reihen auf einem Foto nicht verwechselt.
+    if hoehe >= 2 * BALKEN_HOEHE {
+        fuellen(
+            flaeche,
+            0,
+            BALKEN_HOEHE,
+            breite,
+            BALKEN_HOEHE,
+            0x20,
+            0x60,
+            0xE0,
+        );
+        let kasten2 = BALKEN_HOEHE - 2 * RAND;
+        for i in 0..task_nummer as usize {
+            let x = RAND + i * (kasten2 + RAND);
+            if x + kasten2 > breite {
+                break;
+            }
+            fuellen(
+                flaeche,
+                x,
+                BALKEN_HOEHE + RAND,
+                kasten2,
+                kasten2,
+                0xFF,
+                0xFF,
+                0xFF,
+            );
+        }
+    }
 
     // Die Kaestchen. Sie beginnen mit einem Abstand vom Rand, damit man
     // sieht, wo die Reihe anfaengt, und sind quadratisch.

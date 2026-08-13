@@ -190,6 +190,11 @@ impl Executor {
         // Aktivitätszähler: Der Task wird jetzt gepollt — VOR dem
         // Poll auf "schläft" stellen, damit ein Selbst-Wecken
         // WÄHREND des Polls (yield_now) wieder "wach" setzen kann.
+        // FUER DEN WACHHUND: Wer wird jetzt angefasst? Bleibt das
+        // System stehen, ist das die entscheidende Auskunft — der grobe
+        // Programmpunkt sagt nur „irgendein Kernel-Task". Kostet zwei
+        // Speicheroperationen auf Atomics (src/wacht.rs).
+        crate::wacht::task_setzen(task_id.als_zahl() as u32, &task.name);
         task.zaehler.polls.fetch_add(1, Ordering::Relaxed);
         task.zaehler.wach.store(false, Ordering::Relaxed);
         let zaehler = task.zaehler.clone();
